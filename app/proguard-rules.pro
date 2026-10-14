@@ -1,0 +1,2 @@
+-keep class org.dcm4che3.** { *; }
+-dontwarn org.dcm4che3.**

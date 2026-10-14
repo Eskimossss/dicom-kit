@@ -1,0 +1,48 @@
+# Gradle
+.gradle/
+build/
+app/build/
+*/build/
+
+# Local configuration file (SDK path, NDK path)
+local.properties
+
+# Android Studio / IntelliJ IDEA
+.idea/
+*.iml
+.navigation/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Built application files
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+
+# Signing keys and keystore files
+*.jks
+*.keystore
+signing.properties
+
+# Medical Data & PHI (Patient Health Information) Protection
+# ВНИМАНИЕ: Медицинские данные пациентов строго запрещено коммитить в публичный репозиторий!
+testdicom/
+*.dcm
+*.dicom
+*.tsv
+scu_temp/
+received_dicom/
+
+# OS-specific files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
