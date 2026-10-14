@@ -128,7 +128,8 @@ fun SettingsAndCleanupScreen(
             },
             text = {
                 Text(
-                    text = "Будут удалены все принятые DICOM-файлы ($filesCount шт.) из активного хранилища. Технический журнал DICOM сохранится. Это действие нельзя отменить.",
+                    text = "Будут удалены подтверждённые файлы приложения из хранилища. Неизвестные SAF-документы и сохранённые входящие .incoming_tmp/*.part не удаляются. Технический журнал сохранится. Это действие нельзя отменить." +
+                        (storageInfo.retainedIncoming.warningMessage?.let { "\n\n$it" } ?: ""),
                     color = TextSecondarySlate,
                     softWrap = true
                 )
@@ -359,6 +360,10 @@ fun SettingsAndCleanupScreen(
                             color = TextSecondarySlate,
                             softWrap = true
                         )
+                        storageInfo.retainedIncoming.warningMessage?.let { warning ->
+                            Text(text = warning, color = ErrorRed, fontSize = 12.sp,
+                                modifier = Modifier.padding(top = 8.dp))
+                        }
                         if (storageInfo.type == StorageType.SAF) {
                             Text(
                                 text = "Постоянный доступ через Storage Access Framework без MANAGE_EXTERNAL_STORAGE",

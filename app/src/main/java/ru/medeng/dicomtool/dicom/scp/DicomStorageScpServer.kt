@@ -932,6 +932,7 @@ class DicomStorageScpServer(
             val tmpDir = File(studyRepository.storageRootDir, ".incoming_tmp").apply { mkdirs() }
             val tempFile = File(tmpDir, "${sanitizeFileName(iuid)}_${System.nanoTime()}.part")
 
+            var payloadComplete = false
             try {
                 // 1. Потоковая запись DICOM Part 10 (File Meta Information + PDV поток) без чтения Pixel Data в ОЗУ
                 val fmi = asAssoc.createFileMetaInformation(iuid, cuid, tsuid)
@@ -943,6 +944,8 @@ class DicomStorageScpServer(
                         fos.fd.sync()
                     }
                 }
+
+                payloadComplete = true
 
                 // 2. Читаем только теги заголовка (до PixelData) для валидации и раскладки по Study/Series папкам
                 val studyUid: String
@@ -1027,8 +1030,8 @@ class DicomStorageScpServer(
                     }
                 }
             } catch (e: Exception) {
-                if (tempFile.exists()) {
-                    tempFile.delete()
+                if (!payloadComplete && tempFile.exists()) {
+                    tempFile.delete() // Incomplete network payload; complete failed saves remain recoverable.
                 }
                 val elapsedSec = (System.nanoTime() - startNs) / 1_000_000_000.0
                 logger.recordTechnicalEvent(
@@ -1052,6 +1055,7 @@ class DicomStorageScpServer(
                     isError = true,
                     sessionUid = sessionUid
                 )
+                if (e is DicomServiceException) throw e
                 throw DicomServiceException(Status.ProcessingFailure, e)
             }
         }

@@ -11,6 +11,8 @@ coroutines = "1.8.1"
 dcm4che = "5.33.1"
 slf4j = "2.0.13"
 junit = "4.13.2"
+androidxTestRunner = "1.6.2"
+androidxTestJunit = "1.2.1"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -34,6 +36,8 @@ dcm4che-dict = { group = "org.dcm4che", name = "dcm4che-dict", version.ref = "dc
 slf4j-api = { group = "org.slf4j", name = "slf4j-api", version.ref = "slf4j" }
 slf4j-simple = { group = "org.slf4j", name = "slf4j-simple", version.ref = "slf4j" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
+androidx-test-runner = { group = "androidx.test", name = "runner", version.ref = "androidxTestRunner" }
+androidx-test-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidxTestJunit" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

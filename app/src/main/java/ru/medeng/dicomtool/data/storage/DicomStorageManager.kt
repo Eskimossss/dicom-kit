@@ -4,16 +4,12 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
-import ru.medeng.dicomtool.dicom.DicomValidationUtils.sanitizeFileName
-import java.io.BufferedInputStream
-import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileInputStream
-import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
-import java.io.OutputStream
-import java.util.Locale
+import org.dcm4che3.data.Tag
+import org.dcm4che3.io.DicomInputStream
 
 /**
  * Тип используемого каталога для хранения принятых исследований.
@@ -44,7 +40,8 @@ data class StorageLocationInfo(
     val totalBytes: Long = 0L,
     val filesCount: Int = 0,
     val studiesCount: Int = 0,
-    val warningMessage: String? = null
+    val warningMessage: String? = null,
+    val retainedIncoming: RetainedIncoming = RetainedIncoming()
 )
 
 /**
@@ -54,7 +51,8 @@ sealed interface DicomSaveResult {
     data class Success(
         val destinationDescription: String,
         val savedSizeBytes: Long,
-        val duplicateActionNote: String
+        val duplicateActionNote: String,
+        val sourceRetained: Boolean = false
     ) : DicomSaveResult
 
     data class Failure(
@@ -71,7 +69,8 @@ data class MigrationResult(
     val totalFound: Int,
     val successfullyMigrated: Int,
     val failedCount: Int,
-    val errorDetails: List<String> = emptyList()
+    val errorDetails: List<String> = emptyList(),
+    val retainedSourceCount: Int = 0
 )
 
 /**
@@ -323,292 +322,91 @@ class DicomStorageManager(
         }
     }
 
-    private fun saveToInternalStorage(
-        tempIncomingFile: File,
-        studyInstanceUid: String,
-        seriesInstanceUid: String,
-        sopInstanceUid: String
-    ): DicomSaveResult {
-        return try {
-            val targetDir = File(
-                File(internalStorageDir, sanitizeFileName(studyInstanceUid)),
-                sanitizeFileName(seriesInstanceUid)
-            ).apply { mkdirs() }
+    private val coordinator = StorageCoordinator.forRoot(internalStorageDir)
+    private val ownership = DocumentOwnership.forRoot(internalStorageDir)
 
-            val primaryTargetFile = File(targetDir, "${sanitizeFileName(sopInstanceUid)}.dcm")
-            var duplicateActionNote = "Saved as new instance"
-            val finalTargetFile: File
+    private fun store(access: StorageAccess) = VerifiedDicomStore(access, ownership, coordinator)
 
-            if (primaryTargetFile.exists()) {
-                val isIdentical = tempIncomingFile.length() == primaryTargetFile.length() &&
-                    tempIncomingFile.readBytes().contentEquals(primaryTargetFile.readBytes())
-                if (isIdentical) {
-                    tempIncomingFile.delete()
-                    finalTargetFile = primaryTargetFile
-                    duplicateActionNote = "Identical re-transmission detected (original file preserved)"
-                } else {
-                    val copyFile = File(
-                        targetDir,
-                        "${sanitizeFileName(sopInstanceUid)}_dup_${System.currentTimeMillis()}.dcm"
-                    )
-                    copyStreamSafely(FileInputStream(tempIncomingFile), FileOutputStream(copyFile))
-                    tempIncomingFile.delete()
-                    finalTargetFile = copyFile
-                    duplicateActionNote = "Duplicate SOP Instance UID saved separately as ${copyFile.name}"
-                }
-            } else {
-                // Атомарный перенос или копирование
-                val moved = tempIncomingFile.renameTo(primaryTargetFile)
-                if (!moved) {
-                    copyStreamSafely(FileInputStream(tempIncomingFile), FileOutputStream(primaryTargetFile))
-                    tempIncomingFile.delete()
-                }
-                finalTargetFile = primaryTargetFile
-            }
+    private fun saveToInternalStorage(file: File, study: String, series: String, sop: String): DicomSaveResult =
+        store(FileStorageAccess(internalStorageDir)).save(file.storageSource(), study, series, sop)
 
-            DicomSaveResult.Success(
-                destinationDescription = finalTargetFile.absolutePath,
-                savedSizeBytes = finalTargetFile.length(),
-                duplicateActionNote = duplicateActionNote
-            )
-        } catch (e: Exception) {
-            DicomSaveResult.Failure(
-                errorReason = "Ошибка записи во внутреннее хранилище: ${e.message ?: e.javaClass.simpleName}",
-                isOutOfSpace = e.message?.contains("ENOSPC", ignoreCase = true) == true,
-                exception = e
-            )
-        }
+    private fun saveToSafStorage(file: File, treeUri: Uri, study: String, series: String, sop: String): DicomSaveResult = try {
+        store(SafStorageAccess(context, treeUri)).save(file.storageSource(), study, series, sop)
+    } catch (e: Exception) { DicomSaveResult.Failure("SAF unavailable: ${e.message}", exception = e) }
+
+    /** Only ledger-backed documents may be destructively operated on in an arbitrary SAF tree. */
+    internal fun ownedSafDocuments(treeUri: Uri): List<OwnedDocument> = ownership.owned(treeUri.toString())
+
+    fun clearOwnedSaf(studyInstanceUid: String? = null): Int {
+        val treeUri = getSavedSafTreeUri() ?: return 0
+        return try { store(SafStorageAccess(context, treeUri)).clearOwned(studyInstanceUid) }
+        catch (_: Exception) { 0 }
     }
 
-    private fun saveToSafStorage(
-        tempIncomingFile: File,
-        treeUri: Uri,
-        studyInstanceUid: String,
-        seriesInstanceUid: String,
-        sopInstanceUid: String
-    ): DicomSaveResult {
-        var createdDoc: DocumentFile? = null
-        return try {
-            val rootDoc = DocumentFile.fromTreeUri(context, treeUri)
-                ?: throw IOException("Не удалось открыть корневую папку SAF")
+    /** Resume by content identity. A crash leaves the source or a verified destination (possibly both). */
+    fun migrateFiles(fromInternalToSaf: Boolean, onProgress: (Int, Int) -> Unit = { _, _ -> }): MigrationResult =
+        coordinator.keyed("migration") { migrateFilesLocked(fromInternalToSaf, onProgress) }
 
-            // Иерархия: <SAF_ROOT>/<StudyUID>/<SeriesUID>/<SOPUID>.dcm
-            val studyFolderName = sanitizeFileName(studyInstanceUid)
-            val studyDoc = rootDoc.findFile(studyFolderName)
-                ?: rootDoc.createDirectory(studyFolderName)
-                ?: throw IOException("Не удалось создать подкаталог исследования в SAF: $studyFolderName")
-
-            val seriesFolderName = sanitizeFileName(seriesInstanceUid)
-            val seriesDoc = studyDoc.findFile(seriesFolderName)
-                ?: studyDoc.createDirectory(seriesFolderName)
-                ?: throw IOException("Не удалось создать подкаталог серии в SAF: $seriesFolderName")
-
-            val fileName = "${sanitizeFileName(sopInstanceUid)}.dcm"
-            val existingDoc = seriesDoc.findFile(fileName)
-            var duplicateActionNote = "Saved as new instance"
-
-            val targetDoc: DocumentFile
-            if (existingDoc != null && existingDoc.exists()) {
-                if (existingDoc.length() == tempIncomingFile.length()) {
-                    tempIncomingFile.delete()
-                    return DicomSaveResult.Success(
-                        destinationDescription = existingDoc.uri.toString(),
-                        savedSizeBytes = existingDoc.length(),
-                        duplicateActionNote = "Identical re-transmission detected in SAF (original preserved)"
-                    )
-                } else {
-                    val dupName = "${sanitizeFileName(sopInstanceUid)}_dup_${System.currentTimeMillis()}.dcm"
-                    val dupDoc = seriesDoc.createFile("application/dicom", dupName)
-                        ?: throw IOException("Не удалось создать файл дубликата в SAF: $dupName")
-                    targetDoc = dupDoc
-                    createdDoc = dupDoc
-                    duplicateActionNote = "Duplicate SOP Instance UID saved separately in SAF as $dupName"
-                }
-            } else {
-                val newDoc = seriesDoc.createFile("application/dicom", fileName)
-                    ?: throw IOException("Не удалось создать файл в SAF: $fileName")
-                targetDoc = newDoc
-                createdDoc = newDoc
-            }
-
-            // Потоковое копирование из временного файла в SAF DocumentFile с проверкой размера
-            context.contentResolver.openOutputStream(targetDoc.uri, "wt")?.use { out ->
-                FileInputStream(tempIncomingFile).use { inStream ->
-                    copyStreamSafely(inStream, out)
-                }
-            } ?: throw IOException("ContentResolver вернул null при открытии OutputStream для ${targetDoc.uri}")
-
-            val expectedSize = tempIncomingFile.length()
-            val writtenSize = targetDoc.length()
-            if (writtenSize != expectedSize && writtenSize != 0L) {
-                // Некоторые DocumentsProvider обновляют length с задержкой, но если 0 и ожидалось >0, проверяем
-            }
-
-            tempIncomingFile.delete()
-
-            DicomSaveResult.Success(
-                destinationDescription = targetDoc.uri.toString(),
-                savedSizeBytes = expectedSize,
-                duplicateActionNote = duplicateActionNote
-            )
-        } catch (e: Exception) {
-            createdDoc?.delete()
-            DicomSaveResult.Failure(
-                errorReason = "Ошибка записи в SAF каталог: ${e.message ?: e.javaClass.simpleName}",
-                isOutOfSpace = e.message?.contains("ENOSPC", ignoreCase = true) == true ||
-                    e.message?.contains("space", ignoreCase = true) == true,
-                exception = e
-            )
-        }
-    }
-
-    /**
-     * Выполняет безопасный перенос всех DICOM-файлов между внутренним хранилищем и SAF-каталогом.
-     * Проверяет успешность копирования каждого файла до удаления оригинала.
-     */
-    fun migrateFiles(
-        fromInternalToSaf: Boolean,
-        onProgress: (Int, Int) -> Unit = { _, _ -> }
-    ): MigrationResult {
+    // Opposite migrations must not each deduplicate against the other's source and then delete both.
+    // This lock serializes migrations only; independent C-STORE operations still use shared receiving locks.
+    private fun migrateFilesLocked(fromInternalToSaf: Boolean, onProgress: (Int, Int) -> Unit): MigrationResult {
+        val treeUri = getSavedSafTreeUri() ?: return MigrationResult(0, 0, 0, listOf("SAF URI не настроен"))
+        if (!isSafStorageWritable(treeUri)) return MigrationResult(0, 0, 0, listOf("Каталог SAF недоступен"))
         val errors = ArrayList<String>()
-        var successCount = 0
-
-        if (fromInternalToSaf) {
-            val safUri = getSavedSafTreeUri() ?: return MigrationResult(0, 0, 0, listOf("SAF URI не настроен"))
-            if (!isSafStorageWritable(safUri)) {
-                return MigrationResult(0, 0, 0, listOf("Каталог SAF недоступен для записи"))
-            }
-
-            val localFiles = internalStorageDir.walkTopDown()
-                .filter { it.isFile && it.extension.equals("dcm", ignoreCase = true) }
-                .toList()
-
-            val total = localFiles.size
-            if (total == 0) return MigrationResult(0, 0, 0)
-
-            localFiles.forEachIndexed { index, file ->
-                onProgress(index + 1, total)
-                try {
-                    val seriesDir = file.parentFile
-                    val studyDir = seriesDir?.parentFile
-                    val studyUid = studyDir?.name?.takeIf { it != internalStorageDir.name } ?: "UNKNOWN_STUDY"
-                    val seriesUid = seriesDir?.name ?: "UNKNOWN_SERIES"
-                    val sopUid = file.nameWithoutSuffix()
-
-                    val saveRes = saveToSafStorage(
-                        tempIncomingFile = file, // file будет безопасно скопирован, но не удалён если ошибка
-                        treeUri = safUri,
-                        studyInstanceUid = studyUid,
-                        seriesInstanceUid = seriesUid,
-                        sopInstanceUid = sopUid
-                    )
-
-                    when (saveRes) {
-                        is DicomSaveResult.Success -> {
-                            successCount++
-                            // Удаляем оригинал ТОЛЬКО после подтверждённого сохранения в SAF
-                            if (file.exists()) {
-                                file.delete()
-                            }
-                        }
-                        is DicomSaveResult.Failure -> {
-                            errors.add("Файл ${file.name}: ${saveRes.errorReason}")
-                        }
-                    }
-                } catch (e: Exception) {
-                    errors.add("Файл ${file.name}: ${e.message}")
+        var succeeded = 0
+        var retainedSources = 0
+        return try {
+            val saf = SafStorageAccess(context, treeUri)
+            if (fromInternalToSaf) {
+                val sources = StoragePaths.dicomFiles(internalStorageDir).toList()
+                sources.forEachIndexed { index, file ->
+                    onProgress(index + 1, sources.size)
+                    coordinator.receiving { coordinator.keyed("source:${file.canonicalPath}") {
+                        try {
+                            val ids = readIdentity { FileInputStream(file) }
+                            val result = store(saf).save(file.storageSource(), ids[0], ids[1], ids[2])
+                            if (result is DicomSaveResult.Success && result.sourceRetained) retainedSources++
+                            if (result is DicomSaveResult.Success && !file.exists()) succeeded++
+                            else errors.add("${file.name}: ${if (result is DicomSaveResult.Failure) result.errorReason else RETAINED_SOURCE_WARNING}")
+                        } catch (e: Exception) { errors.add("${file.name}: ${e.message}") }
+                    } }
                 }
-            }
-
-            // Очищаем пустые папки во внутреннем хранилище
-            cleanupEmptyDirectories(internalStorageDir)
-            return MigrationResult(total, successCount, total - successCount, errors)
-        } else {
-            // Перенос из SAF во внутреннее хранилище
-            val safUri = getSavedSafTreeUri() ?: return MigrationResult(0, 0, 0, listOf("SAF URI не настроен"))
-            val safFiles = listAllSafDicomFiles(safUri)
-            val total = safFiles.size
-            if (total == 0) return MigrationResult(0, 0, 0)
-
-            safFiles.forEachIndexed { index, (studyUid, seriesUid, doc) ->
-                onProgress(index + 1, total)
-                try {
-                    val targetDir = File(
-                        File(internalStorageDir, sanitizeFileName(studyUid)),
-                        sanitizeFileName(seriesUid)
-                    ).apply { mkdirs() }
-
-                    val targetFile = File(targetDir, doc.name ?: "${System.nanoTime()}.dcm")
-                    val sourceLength = doc.length()
-
-                    context.contentResolver.openInputStream(doc.uri)?.use { inStream ->
-                        FileOutputStream(targetFile).use { outStream ->
-                            copyStreamSafely(inStream, outStream)
-                        }
-                    } ?: throw IOException("Не удалось прочитать DocumentFile ${doc.uri}")
-
-                    if (targetFile.length() > 0 && (sourceLength == 0L || targetFile.length() == sourceLength)) {
-                        successCount++
-                        // Удаляем файл в SAF только после проверки успешности записи в целевой файл
-                        doc.delete()
-                    } else {
-                        targetFile.delete()
-                        errors.add("Несовпадение размера файла ${doc.name}")
-                    }
-                } catch (e: Exception) {
-                    errors.add("Файл ${doc.name}: ${e.message}")
+                MigrationResult(sources.size, succeeded, sources.size - succeeded, errors, retainedSources)
+            } else {
+                // Existing legacy/user documents are not provably ours: do not remove or migrate them.
+                val sources = ownedSafDocuments(treeUri)
+                sources.forEachIndexed { index, doc ->
+                    onProgress(index + 1, sources.size)
+                    coordinator.receiving { coordinator.keyed("source:${doc.scope}:${doc.id}") {
+                        try {
+                            val node = StorageNode(doc.id, doc.name, false)
+                            require(VerifiedDicomStore.fingerprint { saf.read(node) } == doc.digest) { "SAF source changed; retained" }
+                            var removed = false
+                            val source = StorageSource({ saf.read(node) }, {
+                                if (VerifiedDicomStore.fingerprint { saf.read(node) } != doc.digest) false
+                                else saf.deleteFile(node).also { removed = it }
+                            })
+                            val result = store(FileStorageAccess(internalStorageDir)).save(source, doc.study, doc.series, doc.sop)
+                            if (result is DicomSaveResult.Success && result.sourceRetained) retainedSources++
+                            if (result is DicomSaveResult.Success && removed) {
+                                ownership.forget(doc.scope, doc.id); succeeded++
+                            } else errors.add("${doc.name}: ${if (result is DicomSaveResult.Failure) result.errorReason else RETAINED_SOURCE_WARNING}")
+                        } catch (e: Exception) { errors.add("${doc.name}: ${e.message}") }
+                    } }
                 }
+                MigrationResult(sources.size, succeeded, sources.size - succeeded, errors, retainedSources)
             }
-
-            return MigrationResult(total, successCount, total - successCount, errors)
-        }
+        } catch (e: Exception) { MigrationResult(0, 0, 1, listOf(e.message ?: "Ошибка миграции")) }
     }
 
-    private fun listAllSafDicomFiles(treeUri: Uri): List<Triple<String, String, DocumentFile>> {
-        val result = ArrayList<Triple<String, String, DocumentFile>>()
-        val rootDoc = DocumentFile.fromTreeUri(context, treeUri) ?: return emptyList()
-        val studyDocs = rootDoc.listFiles().filter { it.isDirectory }
-        for (studyDoc in studyDocs) {
-            val studyUid = studyDoc.name ?: continue
-            val seriesDocs = studyDoc.listFiles().filter { it.isDirectory }
-            for (seriesDoc in seriesDocs) {
-                val seriesUid = seriesDoc.name ?: continue
-                val dcmFiles = seriesDoc.listFiles().filter {
-                    it.isFile && (it.name?.endsWith(".dcm", ignoreCase = true) == true)
-                }
-                for (doc in dcmFiles) {
-                    result.add(Triple(studyUid, seriesUid, doc))
-                }
+    private fun readIdentity(open: () -> InputStream): List<String> = open().use { input ->
+        DicomInputStream(input).use { dis ->
+            dis.includeBulkData = DicomInputStream.IncludeBulkData.NO
+            dis.readFileMetaInformation()
+            val attrs = dis.readDatasetUntilPixelData()
+            listOf(Tag.StudyInstanceUID, Tag.SeriesInstanceUID, Tag.SOPInstanceUID).map {
+                StoragePaths.uid(attrs.getString(it) ?: throw IOException("Missing DICOM UID"))
             }
         }
-        return result
-    }
-
-    private fun cleanupEmptyDirectories(dir: File) {
-        dir.listFiles()?.forEach { child ->
-            if (child.isDirectory) {
-                cleanupEmptyDirectories(child)
-                if (child.listFiles().isNullOrEmpty()) {
-                    child.delete()
-                }
-            }
-        }
-    }
-
-    private fun copyStreamSafely(input: InputStream, output: OutputStream) {
-        BufferedInputStream(input, 65536).use { bis ->
-            BufferedOutputStream(output, 65536).use { bos ->
-                val buf = ByteArray(65536)
-                var read: Int
-                while (bis.read(buf).also { read = it } != -1) {
-                    bos.write(buf, 0, read)
-                }
-                bos.flush()
-            }
-        }
-    }
-
-    private fun File.nameWithoutSuffix(): String {
-        return name.substringBeforeLast('.')
     }
 }

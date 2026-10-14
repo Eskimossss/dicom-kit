@@ -91,47 +91,9 @@ class LocalDicomStudyRepository(
                 sopInstanceUid = sopInstanceUid
             )
         } else {
-            // Резервное сохранение во внутреннее хранилище
-            val targetDir = File(
-                File(storageRootDir, sanitizeFolder(studyInstanceUid)),
-                sanitizeFolder(seriesInstanceUid)
-            ).apply { mkdirs() }
-            val primaryTarget = File(targetDir, "${sanitizeFolder(sopInstanceUid)}.dcm")
-            val finalTarget: File
-            val duplicateNote: String
-
-            if (primaryTarget.exists()) {
-                val isIdentical = tempIncomingFile.length() == primaryTarget.length() &&
-                    tempIncomingFile.readBytes().contentEquals(primaryTarget.readBytes())
-                if (isIdentical) {
-                    tempIncomingFile.delete()
-                    finalTarget = primaryTarget
-                    duplicateNote = "Identical re-transmission detected"
-                } else {
-                    val copyFile = File(targetDir, "${sanitizeFolder(sopInstanceUid)}_dup_${System.currentTimeMillis()}.dcm")
-                    val moved = tempIncomingFile.renameTo(copyFile)
-                    if (!moved) {
-                        tempIncomingFile.copyTo(copyFile, overwrite = true)
-                        tempIncomingFile.delete()
-                    }
-                    finalTarget = copyFile
-                    duplicateNote = "Duplicate SOP Instance UID saved separately as ${copyFile.name}"
-                }
-            } else {
-                val moved = tempIncomingFile.renameTo(primaryTarget)
-                if (!moved) {
-                    tempIncomingFile.copyTo(primaryTarget, overwrite = true)
-                    tempIncomingFile.delete()
-                }
-                finalTarget = primaryTarget
-                duplicateNote = "Saved as new instance"
-            }
-
-            DicomSaveResult.Success(
-                destinationDescription = finalTarget.absolutePath,
-                savedSizeBytes = finalTarget.length(),
-                duplicateActionNote = duplicateNote
-            )
+            VerifiedDicomStore(FileStorageAccess(storageRootDir), DocumentOwnership.forRoot(storageRootDir),
+                StorageCoordinator.forRoot(storageRootDir)).save(tempIncomingFile.storageSource(),
+                studyInstanceUid, seriesInstanceUid, sopInstanceUid)
         }
     }
 
@@ -141,9 +103,7 @@ class LocalDicomStudyRepository(
 
             // 1. Сканируем внутреннее хранилище (если существует)
             if (storageRootDir.exists()) {
-                val internalFiles = storageRootDir.walkTopDown()
-                    .filter { it.isFile && it.extension.equals("dcm", ignoreCase = true) }
-                    .toList()
+                val internalFiles = StoragePaths.dicomFiles(storageRootDir).toList()
 
                 for (file in internalFiles) {
                     val rec = parseSummaryFromSource(
@@ -381,80 +341,31 @@ class LocalDicomStudyRepository(
         }
     }
 
-    override fun deleteStudy(studyInstanceUid: String): Boolean {
-        lock.withLock {
+    override fun deleteStudy(studyInstanceUid: String): Boolean = lock.withLock {
+        StorageCoordinator.forRoot(storageRootDir).maintenance {
             val study = _studiesFlow.value.firstOrNull { it.studyInstanceUid == studyInstanceUid }
-                ?: return false
-            var deletedAny = false
-            study.seriesList.flatMap { it.instances }.forEach { inst ->
-                if (inst.filePath.startsWith("content://") && context != null) {
-                    try {
-                        val uri = Uri.parse(inst.filePath)
-                        val doc = DocumentFile.fromSingleUri(context, uri)
-                        if (doc != null && doc.delete()) {
-                            deletedAny = true
-                        }
-                    } catch (_: Exception) {}
-                } else {
-                    val f = File(inst.filePath)
-                    val seriesDir = f.parentFile
-                    val studyDir = seriesDir?.parentFile
-                    if (f.exists() && f.delete()) {
-                        deletedAny = true
-                    }
-                    if (seriesDir != null && seriesDir.exists() && seriesDir.listFiles().isNullOrEmpty()) {
-                        seriesDir.delete()
-                    }
-                    if (studyDir != null && studyDir != storageRootDir && studyDir.exists() && studyDir.listFiles().isNullOrEmpty()) {
-                        studyDir.delete()
-                    }
-                }
+                ?: return@maintenance false
+            var removed = (storageManager?.clearOwnedSaf(studyInstanceUid) ?: 0) > 0
+            for (inst in study.seriesList.flatMap { it.instances }) {
+                if (inst.filePath.startsWith("content://")) continue // SAF deletion only through ownership ledger.
+                val file = runCatching { StoragePaths.contained(storageRootDir, File(inst.filePath)) }.getOrNull() ?: continue
+                if (file.isFile && file.extension.equals("dcm", true) && file.delete()) removed = true
             }
             refreshFromDisk()
-            return deletedAny
+            removed
         }
     }
 
-    override fun clearAllStudies(): Int {
-        lock.withLock {
-            var deletedCount = 0
-            if (storageRootDir.exists()) {
-                storageRootDir.walkBottomUp().forEach { file ->
-                    if (file != storageRootDir) {
-                        if (file.isFile && file.extension.equals("dcm", ignoreCase = true)) {
-                            if (file.delete()) deletedCount++
-                        } else if (file.isDirectory) {
-                            file.delete()
-                        }
-                    }
-                }
+    override fun clearAllStudies(): Int = lock.withLock {
+        StorageCoordinator.forRoot(storageRootDir).maintenance {
+            var removed = storageManager?.clearOwnedSaf() ?: 0
+            // The internal root is private app storage. Never follow paths outside it or delete directories.
+            StoragePaths.dicomFiles(storageRootDir).forEach { candidate ->
+                val file = runCatching { StoragePaths.contained(storageRootDir, candidate) }.getOrNull()
+                if (file != null && file.delete()) removed++
             }
-
-            // Очищаем SAF-файлы, если настроены
-            val safUri = storageManager?.getSavedSafTreeUri()
-            if (context != null && safUri != null && storageManager?.isSafStorageWritable(safUri) == true) {
-                try {
-                    val rootDoc = DocumentFile.fromTreeUri(context, safUri)
-                    rootDoc?.listFiles()?.forEach { studyDoc ->
-                        if (studyDoc.isDirectory) {
-                            studyDoc.listFiles().forEach { seriesDoc ->
-                                if (seriesDoc.isDirectory) {
-                                    seriesDoc.listFiles().forEach { dcmDoc ->
-                                        if (dcmDoc.isFile && dcmDoc.name?.endsWith(".dcm", ignoreCase = true) == true) {
-                                            if (dcmDoc.delete()) deletedCount++
-                                        }
-                                    }
-                                    seriesDoc.delete()
-                                }
-                            }
-                            studyDoc.delete()
-                        }
-                    }
-                } catch (_: Exception) {}
-            }
-
             refreshFromDisk()
-            return deletedCount
+            removed
         }
     }
 
@@ -804,7 +715,4 @@ class LocalDicomStudyRepository(
         return sdf.format(Date(fileLastModified))
     }
 
-    private fun sanitizeFolder(name: String): String {
-        return name.replace(Regex("[^a-zA-Z0-9._-]"), "_").take(64)
-    }
 }

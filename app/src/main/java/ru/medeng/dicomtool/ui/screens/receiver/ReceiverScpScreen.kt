@@ -500,7 +500,9 @@ private fun ScpStatusCard(
             }
         }
 
-        if (isSaf && (!isAccessible || !storageInfo?.warningMessage.isNullOrBlank())) {
+        val storageWarning = listOfNotNull(storageInfo?.warningMessage, storageInfo?.retainedIncoming?.warningMessage)
+            .joinToString("\n").ifBlank { null }
+        if ((isSaf && !isAccessible) || storageWarning != null) {
             Spacer(modifier = Modifier.height(8.dp))
             Surface(
                 modifier = Modifier.fillMaxWidth(),
@@ -509,7 +511,7 @@ private fun ScpStatusCard(
                 border = BorderStroke(1.dp, DangerActionSoftBorder)
             ) {
                 Text(
-                    text = storageInfo?.warningMessage ?: "Внимание: Выбранная папка или SD-карта недоступна (отключена или отозвано разрешение). Новые файлы не могут быть сохранены.",
+                    text = storageWarning ?: "Внимание: Выбранная папка или SD-карта недоступна (отключена или отозвано разрешение). Новые файлы не могут быть сохранены.",
                     fontSize = 12.sp,
                     lineHeight = 16.sp,
                     color = ErrorRed,

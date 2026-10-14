@@ -406,4 +406,37 @@ class DicomScpStage2IntegrationTest {
         val report = verifier.verifyDcm4cheStackCompatibility()
         assertTrue(report.details, report.isCompatible)
     }
+
+    @Test
+    fun unsafeStudyUidReturnsFailedCStoreAndKeepsCompleteSyntheticPayload() {
+        val port = java.net.ServerSocket(0).use { it.localPort }
+        assertTrue(scpServer.startServer("STORAGE_TEST", port).isSuccess)
+        val pixels = ByteArray(128 * 128 * 2) { (it % 127).toByte() }
+        val dataset = createSampleImageDataset(UID.CTImageStorage, "1.2.3.4.5", "..", "1.2.3.4",
+            "CT", "SYNTHETIC^STORAGE", "SYNTHETIC", pixels)
+        val status = performCStore("TEST_SCU", "STORAGE_TEST", "127.0.0.1", port,
+            UID.CTImageStorage, "1.2.3.4.5", UID.ExplicitVRLittleEndian, dataset)
+        assertEquals(Status.ProcessingFailure, status)
+        assertTrue(storageDir.walkTopDown().none { it.extension == "dcm" })
+        val retained = File(storageDir, ".incoming_tmp").listFiles()!!.single()
+        DicomInputStream(retained).use { dis ->
+            dis.readFileMetaInformation()
+            assertArrayEquals(pixels, dis.readDataset().getBytes(Tag.PixelData))
+        }
+    }
+
+    @Test
+    fun publicationFailureDoesNotReturnSuccessfulCStoreOrDestroyPayload() {
+        val blocker = File(storageDir, "1.2.3/1.2.3.4/1.2.3.4.5.dcm").apply { mkdirs() }
+        val keep = File(blocker, "keep.txt").apply { writeText("existing original must remain") }
+        val port = java.net.ServerSocket(0).use { it.localPort }
+        assertTrue(scpServer.startServer("STORAGE_TEST", port).isSuccess)
+        val dataset = createSampleImageDataset(UID.CTImageStorage, "1.2.3.4.5", "1.2.3", "1.2.3.4",
+            "CT", "SYNTHETIC^STORAGE", "SYNTHETIC", ByteArray(128 * 128 * 2))
+        val status = performCStore("TEST_SCU", "STORAGE_TEST", "127.0.0.1", port,
+            UID.CTImageStorage, "1.2.3.4.5", UID.ExplicitVRLittleEndian, dataset)
+        assertEquals(Status.ProcessingFailure, status)
+        assertEquals("existing original must remain", keep.readText())
+        assertEquals(1, File(storageDir, ".incoming_tmp").listFiles()!!.count { it.extension == "part" })
+    }
 }

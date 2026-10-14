@@ -1,0 +1,13 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <provider
+            android:name="ru.medeng.dicomtool.storagefixtures.Stage51DocumentsProvider"
+            android:authorities="${applicationId}.stage51.documents"
+            android:exported="true"
+            android:grantUriPermissions="true"
+            android:permission="android.permission.MANAGE_DOCUMENTS">
+            <intent-filter><action android:name="android.content.action.DOCUMENTS_PROVIDER" /></intent-filter>
+        </provider>
+        <activity android:name="ru.medeng.dicomtool.storagefixtures.UriGrantActivity" android:exported="true" />
+    </application>
+</manifest>

@@ -1194,11 +1194,22 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     // --- Действия раздела «Хранилище DICOM и SAF» ---
 
 
+    init {
+        // Failed receptions do not update the study index. Monitor retained payloads independently.
+        viewModelScope.launch(Dispatchers.IO) {
+            while (true) {
+                val retained = ru.medeng.dicomtool.data.storage.RetainedIncoming.inspect(studyRepository.storageRootDir)
+                _storageLocationInfo.update { it.copy(retainedIncoming = retained) }
+                kotlinx.coroutines.delay(5_000)
+            }
+        }
+    }
+
     fun refreshStorageInfo() {
         val count = studyRepository.getTotalSavedFilesCount()
         val bytes = studyRepository.getTotalStorageBytes()
         val studiesCount = studyRepository.studiesFlow.value.size
-        _storageLocationInfo.value = storageManager?.getStorageLocationInfo(
+        _storageLocationInfo.value = (storageManager?.getStorageLocationInfo(
             totalBytes = bytes,
             filesCount = count,
             studiesCount = studiesCount
@@ -1208,7 +1219,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
             totalBytes = bytes,
             filesCount = count,
             studiesCount = studiesCount
-        )
+        )).copy(retainedIncoming = ru.medeng.dicomtool.data.storage.RetainedIncoming.inspect(studyRepository.storageRootDir))
     }
 
     fun setCustomSafStorage(treeUri: Uri): Result<Unit> {
@@ -1271,11 +1282,13 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
             studyRepository.refreshFromDisk()
             refreshStorageInfo()
             _isMigrating.value = false
-            _migrationStatusMessage.value = if (res.failedCount == 0) {
+            _migrationStatusMessage.value = (if (res.failedCount == 0) {
                 "Успешно перенесено ${res.successfullyMigrated} файлов."
             } else {
                 "Перенесено ${res.successfullyMigrated} файлов. Ошибок: ${res.failedCount} (${res.errorDetails.firstOrNull() ?: ""})"
-            }
+            }) + if (res.retainedSourceCount > 0) {
+                "\nПроверенные копии сохранены, но не удалось удалить исходные файлы: ${res.retainedSourceCount}. Источники оставлены на месте. Повторите перенос после восстановления доступа; одинаковые копии не будут созданы повторно."
+            } else ""
         }
     }
 
