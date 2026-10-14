@@ -12,6 +12,7 @@ import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -156,10 +157,11 @@ fun DicomSharedViewportBox(
                 Image(
                     bitmap = imageBitmap,
                     contentDescription = "DICOM изображение",
-                    contentScale = ContentScale.Fit,
+                    contentScale = ContentScale.FillBounds,
                     filterQuality = FilterQuality.Medium,
                     modifier = Modifier
-                        .fillMaxSize()
+                        .aspectRatio(renderState.descriptor.columns.toFloat() / renderState.descriptor.rows)
+                        .align(Alignment.Center)
                         .graphicsLayer(
                             scaleX = zoom,
                             scaleY = zoom,
@@ -286,7 +288,7 @@ fun DicomSharedViewportBox(
                         .padding(horizontal = 7.dp, vertical = 4.dp)
                 ) {
                     Text(
-                        text = "WW:$windowWidth WL:$windowCenter" + if (inverted) " • INV" else "",
+                        text = (if ((renderState as? DicomViewerRenderState.Ready)?.descriptor?.photometricInterpretation == "RGB") "RGB • WW/WL не применяется" else "WW:$windowWidth WL:$windowCenter") + if (inverted) " • INV" else "",
                         color = Color.White,
                         fontSize = 11.sp,
                         lineHeight = 14.sp,
@@ -435,7 +437,7 @@ fun DicomSharedViewportBox(
                         ViewerToolButton(
                             icon = Icons.Default.Brightness6,
                             label = if (inverted) "Инв:ВКЛ" else "Инверсия",
-                            description = "Инверсия MONOCHROME",
+                            description = "Инверсия изображения",
                             isActive = inverted
                         ) {
                             onToggleInvert()

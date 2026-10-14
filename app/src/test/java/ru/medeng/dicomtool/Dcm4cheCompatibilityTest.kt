@@ -163,7 +163,8 @@ class DicomScpStage2IntegrationTest {
         // Проверяем извлечение тегов для UI (включая вложенную последовательность SQ)
         val extractedTags = repository.getTagsForInstanceFile(savedFilePath)
         assertTrue(extractedTags.any { it.tagHex == "(0010,0010)" && it.value == "IVANOV^IVAN^IVANOVICH" })
-        assertTrue(extractedTags.any { it.tagHex == "(0008,1110)" && it.vr == "SQ" && it.value.contains("1.2.840.10008.5.1.4.1.1.2") })
+        assertTrue(extractedTags.any { it.tagHex == "(0008,1110)" && it.vr == "SQ" &&
+            it.sequenceItems.any { item -> item.tags.any { tag -> tag.value.contains("1.2.840.10008.5.1.4.1.1.2") } } })
         assertTrue(extractedTags.any { it.tagHex == "(7FE0,0010)" })
 
         // 3. Проверяем повторную отправку (Re-transmission) того же SOPInstanceUID:

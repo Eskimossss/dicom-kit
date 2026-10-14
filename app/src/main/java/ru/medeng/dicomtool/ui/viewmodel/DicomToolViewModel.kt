@@ -7,6 +7,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -119,6 +121,42 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     private val frameCache = SingleFrameDecodeCache()
     private var renderJob: Job? = null
     private var lastLoadedFilePath: String? = null
+    private var lastLoadedFrameIndex: Int? = null
+    private var preferredWindow: Pair<Double, Double>? = null // Preserve fractional DICOM defaults/presets through invert and redraw.
+    private val renderRequests = ru.medeng.dicomtool.domain.model.LatestViewerRequest()
+    private val metadataRequests = ru.medeng.dicomtool.domain.model.LatestViewerRequest()
+    private val viewerWorkMutex = kotlinx.coroutines.sync.Mutex()
+    private var externalLoadJob: Job? = null
+    private var receivedTagJob: Job? = null
+    private val receivedTagRequests = ru.medeng.dicomtool.domain.model.LatestViewerRequest()
+    private var receivedTagPath: String? = null
+    private val _receivedTags = MutableStateFlow<List<DicomTagEntry>>(emptyList())
+    val receivedTags = _receivedTags.asStateFlow()
+    private val _viewerSource = MutableStateFlow<ru.medeng.dicomtool.domain.model.ViewerSource>(ru.medeng.dicomtool.domain.model.ViewerSource.None)
+    val viewerSource = _viewerSource.asStateFlow()
+
+    private fun changeViewerSource(source: ru.medeng.dicomtool.domain.model.ViewerSource) {
+        if (_viewerSource.value == source) return
+        renderRequests.next(); renderJob?.cancel(); frameCache.clear()
+        receivedTagRequests.next(); receivedTagJob?.cancel(); receivedTagPath = null; _receivedTags.value = emptyList()
+        _selectedTagForDetail.value = null
+        _viewerSource.value = source
+        _viewerRenderState.value = DicomViewerRenderState.Idle
+        _viewerCurrentFrame.value = 1; lastLoadedFilePath = null; lastLoadedFrameIndex = null
+        preferredWindow = null
+        _viewerZoom.value = 1f; _viewerPan.value = Offset.Zero; _viewerInverted.value = false
+        _viewerActiveVoiLutIndex.value = null
+    }
+    fun ensureReceivedViewer() {
+        val study = getSelectedStudyOrDefault() ?: return
+        changeViewerSource(ru.medeng.dicomtool.domain.model.ViewerSource.Received(study.studyInstanceUid))
+        triggerFrameDecodeAndRender()
+    }
+    fun ensureExternalViewer() {
+        changeViewerSource(_selectedExternalFileUri.value?.let { ru.medeng.dicomtool.domain.model.ViewerSource.External(it.toString()) }
+            ?: ru.medeng.dicomtool.domain.model.ViewerSource.None)
+        triggerFrameDecodeAndRender()
+    }
 
     // Результат проверки инициализации стека dcm4che3
     private val _dcm4cheReport = MutableStateFlow(engineVerifier.verifyDcm4cheStackCompatibility())
@@ -381,9 +419,10 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun selectStudy(studyInstanceUid: String) {
+        changeViewerSource(ru.medeng.dicomtool.domain.model.ViewerSource.Received(studyInstanceUid))
         val changed = _selectedStudyUid.value != studyInstanceUid
         _selectedStudyUid.value = studyInstanceUid
-        val study = studies.value.firstOrNull { it.studyInstanceUid == studyInstanceUid }
+        val study = studyRepository.studiesFlow.value.firstOrNull { it.studyInstanceUid == studyInstanceUid }
         if (study != null && (changed || _viewerRenderState.value is DicomViewerRenderState.Idle)) {
             _selectedSeriesUid.value = study.seriesList.firstOrNull()?.seriesInstanceUid
             _selectedInstanceIndex.value = 1
@@ -418,7 +457,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun getSelectedStudyOrDefault(): DicomStudyItem? {
-        val currentList = studies.value
+        val currentList = studyRepository.studiesFlow.value
         if (currentList.isEmpty()) return null
         val uid = _selectedStudyUid.value
         return currentList.firstOrNull { it.studyInstanceUid == uid } ?: currentList.first()
@@ -434,17 +473,28 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun getFilteredTagsForCurrentStudy(): List<DicomTagEntry> {
-        val study = getSelectedStudyOrDefault() ?: return emptyList()
-        val seriesUid = _selectedSeriesUid.value ?: study.seriesList.firstOrNull()?.seriesInstanceUid
-        val instIdx0 = (_selectedInstanceIndex.value - 1).coerceAtLeast(0)
-        val allTags = studyRepository.getTagsForStudy(study.studyInstanceUid, seriesUid, instIdx0)
-        val q = _tagSearchQuery.value.trim().lowercase()
-        if (q.isEmpty()) return allTags
-        return allTags.filter {
-            it.tagHex.lowercase().contains(q) ||
-                it.name.lowercase().contains(q) ||
-                it.vr.lowercase().contains(q) ||
-                it.value.lowercase().contains(q)
+        return _receivedTags.value // The common browser performs recursive filtering, including nested SQ.
+    }
+    private fun loadReceivedTags(filePath: String) {
+        if (receivedTagPath == filePath) return
+        receivedTagPath = filePath; _receivedTags.value = emptyList()
+        val ticket = receivedTagRequests.next(); receivedTagJob?.cancel()
+        receivedTagJob = viewModelScope.launch {
+            try {
+                val job = coroutineContext[Job]!!
+                val check = { job.ensureActive(); receivedTagRequests.check(ticket) }
+                val parsed = withContext(Dispatchers.IO) { viewerWorkMutex.withLock {
+                    check()
+                    val stream = if (filePath.startsWith("content://")) appContext.contentResolver.openInputStream(Uri.parse(filePath)) else File(filePath).inputStream()
+                    requireNotNull(stream).use { DicomFileReader.readFromStream(it, checkCancelled = check).tags }
+                } }
+                check(); _receivedTags.value = parsed
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled
+            } catch (oom: OutOfMemoryError) {
+                if (receivedTagRequests.isCurrent(ticket)) _receivedTags.value = listOf(DicomTagEntry("(0000,0000)", "LT", "ReadError", "Недостаточно памяти для тегов; исходный файл не изменён"))
+            } catch (e: Exception) {
+                if (receivedTagRequests.isCurrent(ticket)) _receivedTags.value = listOf(DicomTagEntry("(0000,0000)", "LT", "ReadError", "Ошибка чтения тегов: ${e.message}"))
+            }
         }
     }
 
@@ -480,7 +530,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
         if (ready != null) {
             _viewerWindowWidth.value = ready.descriptor.defaultWindowWidth.roundToInt().coerceAtLeast(1)
             _viewerWindowCenter.value = ready.descriptor.defaultWindowCenter.roundToInt()
-            triggerFrameDecodeAndRender(resetWindowToFileDefault = false)
+            triggerFrameDecodeAndRender(resetWindowToFileDefault = true)
         } else {
             val inst = getActiveInstanceFileItem()
             val study = getSelectedStudyOrDefault()
@@ -501,7 +551,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
             _viewerWindowWidth.value = ready.descriptor.defaultWindowWidth.roundToInt().coerceAtLeast(1)
             _viewerWindowCenter.value = ready.descriptor.defaultWindowCenter.roundToInt()
         }
-        triggerFrameDecodeAndRender(resetWindowToFileDefault = false)
+        triggerFrameDecodeAndRender(resetWindowToFileDefault = true)
     }
 
     fun toggleViewerInvert() {
@@ -510,10 +560,12 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun applyWindowPreset(preset: DicomWindowPreset) {
+        if ((_viewerRenderState.value as? DicomViewerRenderState.Ready)?.descriptor?.photometricInterpretation == "RGB") return
         if (preset.isVoiLutSequence) {
             _viewerActiveVoiLutIndex.value = preset.voiLutIndex
         } else {
             _viewerActiveVoiLutIndex.value = null
+            preferredWindow = preset.windowWidth to preset.windowCenter
             _viewerWindowWidth.value = preset.windowWidth.roundToInt().coerceAtLeast(1)
             _viewerWindowCenter.value = preset.windowCenter.roundToInt()
         }
@@ -521,7 +573,9 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun setWindowWidthLevel(newWindowWidth: Int, newWindowCenter: Int) {
+        if ((_viewerRenderState.value as? DicomViewerRenderState.Ready)?.descriptor?.photometricInterpretation == "RGB") return
         _viewerActiveVoiLutIndex.value = null
+        preferredWindow = null
         _viewerWindowWidth.value = newWindowWidth.coerceIn(1, 131072)
         _viewerWindowCenter.value = newWindowCenter.coerceIn(-65536, 131072)
         triggerFrameDecodeAndRender(resetWindowToFileDefault = false)
@@ -531,7 +585,9 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
      * Изменение WW/WL на заданную дельту (или адаптивный шаг для 8-bit / 16-bit изображений).
      */
     fun adjustWindowWidthLevel(deltaW: Int, deltaL: Int) {
+        if ((_viewerRenderState.value as? DicomViewerRenderState.Ready)?.descriptor?.photometricInterpretation == "RGB") return
         _viewerActiveVoiLutIndex.value = null
+        preferredWindow = null
         val ready = _viewerRenderState.value as? DicomViewerRenderState.Ready
         val adaptiveScale = if (ready != null) {
             val range = (ready.descriptor.maxModalityValue - ready.descriptor.minModalityValue).coerceAtLeast(255.0)
@@ -560,7 +616,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
      */
     fun stepViewerFrame(delta: Int) {
         // Если открыт внешний файл из вкладки «Теги»
-        val externalUri = _selectedExternalFileUri.value
+        val externalUri = (_viewerSource.value as? ru.medeng.dicomtool.domain.model.ViewerSource.External)?.let { Uri.parse(it.uri) }
         val externalSummary = _externalFileSummary.value
         if (externalUri != null && externalSummary != null) {
             val totalFrames = externalSummary.numberOfFrames.coerceAtLeast(1)
@@ -575,7 +631,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
                         next
                     }
                 }
-                triggerFrameDecodeAndRender(resetWindowToFileDefault = false)
+                triggerFrameDecodeAndRender(resetWindowToFileDefault = true)
             }
             return
         }
@@ -591,7 +647,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
                     else -> next
                 }
             }
-            triggerFrameDecodeAndRender(resetWindowToFileDefault = false)
+            triggerFrameDecodeAndRender(resetWindowToFileDefault = true)
         } else {
             stepSeriesInstance(delta)
         }
@@ -626,122 +682,84 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
      * Поддерживает как принятые исследования из хранилища SCP, так и внешние файлы из раздела «Теги».
      */
     fun triggerFrameDecodeAndRender(resetWindowToFileDefault: Boolean = false) {
-        val externalUri = _selectedExternalFileUri.value
-        val externalSummary = _externalFileSummary.value
-
-        val (filePath: String, safeInstIdx: Int, totalInstances: Int) = if (externalUri != null && externalSummary != null) {
-            Triple(externalUri.toString(), 1, 1)
-        } else {
-            val study = getSelectedStudyOrDefault() ?: run {
-                _viewerRenderState.value = DicomViewerRenderState.Idle
-                return
-            }
-            val series = study.seriesList.firstOrNull { it.seriesInstanceUid == _selectedSeriesUid.value }
-                ?: study.seriesList.firstOrNull()
-                ?: run {
-                    _viewerRenderState.value = DicomViewerRenderState.Error("В исследовании нет доступных серий.")
-                    return
-                }
-            val instancesCount = series.instances.size.coerceAtLeast(1)
-            val instIdx = _selectedInstanceIndex.value.coerceIn(1, instancesCount)
-            val instance = series.instances.getOrNull(instIdx - 1) ?: run {
-                _viewerRenderState.value = DicomViewerRenderState.Error("Экземпляр изображения не найден.")
-                return
-            }
-            Triple(instance.filePath, instIdx, instancesCount)
+        val source = _viewerSource.value
+        val external = source as? ru.medeng.dicomtool.domain.model.ViewerSource.External
+        if (source == ru.medeng.dicomtool.domain.model.ViewerSource.None || (external != null && _externalFileSummary.value == null)) {
+            renderRequests.next(); renderJob?.cancel(); _viewerRenderState.value = DicomViewerRenderState.Idle; return
         }
-
-        val frameIdx0 = (_viewerCurrentFrame.value - 1).coerceAtLeast(0)
-        val isNewFile = lastLoadedFilePath != filePath
-
+        val instance = if (external == null) getActiveInstanceFileItem() else null
+        if (source is ru.medeng.dicomtool.domain.model.ViewerSource.Received && getSelectedStudyOrDefault()?.studyInstanceUid != source.studyInstanceUid) {
+            renderRequests.next(); renderJob?.cancel(); _viewerRenderState.value = DicomViewerRenderState.Error("Выбранное исследование больше недоступно"); return
+        }
+        val filePath = external?.uri ?: instance?.filePath ?: run {
+            _viewerRenderState.value = DicomViewerRenderState.Error("Экземпляр изображения не найден"); return
+        }
+        val frameIndex = _viewerCurrentFrame.value - 1
+        val reset = resetWindowToFileDefault || lastLoadedFilePath != filePath || lastLoadedFrameIndex != frameIndex
+        val ticket = renderRequests.next()
+        val ww = preferredWindow?.first ?: _viewerWindowWidth.value.toDouble()
+        val wc = preferredWindow?.second ?: _viewerWindowCenter.value.toDouble()
+        val inverted = _viewerInverted.value; val voi = _viewerActiveVoiLutIndex.value
+        val instanceIndex = if (external != null) 1 else _selectedInstanceIndex.value
+        val totalInstances = if (external != null) 1 else getSelectedStudyOrDefault()?.seriesList
+            ?.firstOrNull { it.seriesInstanceUid == _selectedSeriesUid.value }?.instances?.size ?: 1
         renderJob?.cancel()
+        if (reset) { frameCache.clear(); _viewerRenderState.value = DicomViewerRenderState.Loading }
         renderJob = viewModelScope.launch {
-            if (frameCache.get(filePath, frameIdx0) == null) {
-                _viewerRenderState.value = DicomViewerRenderState.Loading
-            }
-
-            val decodeRes = withContext(Dispatchers.IO) {
-                if (filePath.startsWith("content://")) {
-                    DicomPixelDataDecoder.decodeFrameFromSource(
-                        sourcePathOrUri = filePath,
-                        streamOpener = { appContext.contentResolver.openInputStream(android.net.Uri.parse(filePath)) },
-                        frameIndex = frameIdx0,
-                        cache = frameCache
-                    )
-                } else {
-                    DicomPixelDataDecoder.decodeFrameFromFile(
-                        file = File(filePath),
-                        frameIndex = frameIdx0,
-                        cache = frameCache
-                    )
-                }
-            }
-
-            when (decodeRes) {
-                is DicomPixelDecodeResult.UnsupportedFormat -> {
-                    _viewerRenderState.value = DicomViewerRenderState.UnsupportedFormat(
-                        transferSyntaxUid = decodeRes.transferSyntaxUid,
-                        transferSyntaxName = decodeRes.transferSyntaxName,
-                        photometricInterpretation = decodeRes.photometricInterpretation,
-                        bitsAllocated = decodeRes.bitsAllocated,
-                        reasonRu = decodeRes.reasonRu
-                    )
-                }
-
-                is DicomPixelDecodeResult.DecodeError -> {
-                    _viewerRenderState.value = DicomViewerRenderState.Error(
-                        reasonRu = decodeRes.reasonRu
-                    )
-                }
-
-                is DicomPixelDecodeResult.Success -> {
-                    val decodedFrame = decodeRes.frame
-                    val desc = decodedFrame.descriptor
-
-                    if (resetWindowToFileDefault || isNewFile) {
-                        lastLoadedFilePath = filePath
-                        _viewerWindowWidth.value = desc.defaultWindowWidth.roundToInt().coerceAtLeast(1)
-                        _viewerWindowCenter.value = desc.defaultWindowCenter.roundToInt()
-                        _viewerActiveVoiLutIndex.value = null
+            var unpublished: Bitmap? = null
+            try {
+                val job = coroutineContext[Job]!!
+                val check = { job.ensureActive(); renderRequests.check(ticket) }
+                val result = withContext(Dispatchers.IO) { viewerWorkMutex.withLock {
+                    check()
+                    val decoded = DicomPixelDataDecoder.decodeFrameFromSource(filePath,
+                        streamOpener = { if (external != null) appContext.contentResolver.openInputStream(Uri.parse(filePath)) else File(filePath).inputStream() },
+                        frameIndex = frameIndex, cache = frameCache, checkCancelled = check)
+                    if (decoded is DicomPixelDecodeResult.Success) {
+                        val d = decoded.frame.descriptor
+                        unpublished = DicomPixelDataDecoder.renderFrameToBitmap(decoded.frame,
+                            if (reset) d.defaultWindowWidth else ww, if (reset) d.defaultWindowCenter else wc,
+                            inverted, if (reset) d.windowPresets.firstOrNull()?.takeIf { it.isVoiLutSequence }?.voiLutIndex else voi, checkCancelled = check)
                     }
-
-                    val targetWw = _viewerWindowWidth.value.toDouble()
-                    val targetWc = _viewerWindowCenter.value.toDouble()
-                    val targetInverted = _viewerInverted.value
-                    val voiLutIdx = _viewerActiveVoiLutIndex.value
-
-                    val renderedBitmap = withContext(Dispatchers.Default) {
-                        DicomPixelDataDecoder.renderFrameToBitmap(
-                            frame = decodedFrame,
-                            windowWidth = targetWw,
-                            windowCenter = targetWc,
-                            userInverted = targetInverted,
-                            useVoiLutIndex = voiLutIdx
-                        )
+                    check(); decoded
+                } }
+                check()
+                when (result) {
+                    is DicomPixelDecodeResult.UnsupportedFormat -> _viewerRenderState.value = DicomViewerRenderState.UnsupportedFormat(
+                        result.transferSyntaxUid, result.transferSyntaxName, result.photometricInterpretation, result.bitsAllocated, result.reasonRu)
+                    is DicomPixelDecodeResult.DecodeError -> _viewerRenderState.value = DicomViewerRenderState.Error(result.reasonRu)
+                    is DicomPixelDecodeResult.Success -> {
+                        val d = result.frame.descriptor
+                        if (reset) { _viewerWindowWidth.value = d.defaultWindowWidth.roundToInt().coerceAtLeast(1)
+                            _viewerWindowCenter.value = d.defaultWindowCenter.roundToInt()
+                            preferredWindow = d.defaultWindowWidth to d.defaultWindowCenter
+                            _viewerActiveVoiLutIndex.value = d.windowPresets.firstOrNull()?.takeIf { it.isVoiLutSequence }?.voiLutIndex }
+                        lastLoadedFilePath = filePath; lastLoadedFrameIndex = frameIndex
+                        _viewerRenderState.value = DicomViewerRenderState.Ready(requireNotNull(unpublished), d,
+                            frameIndex + 1, d.numberOfFrames, instanceIndex, totalInstances, filePath)
+                        unpublished = null // Ownership is now the UI's; recycling a bitmap still drawn by Compose is unsafe.
                     }
-
-                    _viewerRenderState.value = DicomViewerRenderState.Ready(
-                        bitmap = renderedBitmap,
-                        descriptor = desc,
-                        currentFrame = decodedFrame.frameIndex + 1,
-                        totalFrames = desc.numberOfFrames,
-                        currentInstance = safeInstIdx,
-                        totalInstances = totalInstances,
-                        filePath = filePath
-                    )
                 }
-            }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled
+            } catch (oom: OutOfMemoryError) {
+                frameCache.clear()
+                if (renderRequests.isCurrent(ticket)) _viewerRenderState.value = DicomViewerRenderState.Error("Недостаточно памяти для Viewer")
+            } catch (e: Exception) {
+                if (renderRequests.isCurrent(ticket)) _viewerRenderState.value = DicomViewerRenderState.Error(e.message ?: "Ошибка Viewer")
+            } finally { unpublished?.recycle() }
         }
+        if (external == null) loadReceivedTags(filePath)
     }
 
     fun deleteStudy(studyInstanceUid: String) {
+        renderRequests.next()
         renderJob?.cancel()
         frameCache.clear()
         lastLoadedFilePath = null
         studyRepository.deleteStudy(studyInstanceUid)
         scpServer.refreshCountersFromRepository()
         if (_selectedStudyUid.value == studyInstanceUid) {
-            val nextUid = studies.value.firstOrNull()?.studyInstanceUid
+            val nextUid = studyRepository.studiesFlow.value.firstOrNull()?.studyInstanceUid
             _selectedStudyUid.value = nextUid
             _selectedTagForDetail.value = null
             if (nextUid != null) {
@@ -753,6 +771,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun clearAllStudies() {
+        renderRequests.next(); changeViewerSource(ru.medeng.dicomtool.domain.model.ViewerSource.None)
         renderJob?.cancel()
         frameCache.clear()
         lastLoadedFilePath = null
@@ -1368,36 +1387,50 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     // --- Действия раздела «DICOM-теги» (Этап 4.1) ---
 
     fun loadExternalDicomFile(uri: Uri) {
+        val ticket = metadataRequests.next()
+        externalLoadJob?.cancel()
+        renderRequests.next(); renderJob?.cancel(); frameCache.clear()
         _selectedExternalFileUri.value = uri
-        _externalFileError.value = null
-        _isExternalFileLoading.value = true
-        _viewerCurrentFrame.value = 1
-        _isViewerFullScreen.value = false
-        lastLoadedFilePath = null
-        viewModelScope.launch(Dispatchers.IO) {
+        changeViewerSource(ru.medeng.dicomtool.domain.model.ViewerSource.External(uri.toString()))
+        _viewerRenderState.value = DicomViewerRenderState.Loading
+        _externalFileSummary.value = null; _externalFileTags.value = emptyList()
+        _externalFileError.value = null; _isExternalFileLoading.value = true
+        _viewerCurrentFrame.value = 1; _isViewerFullScreen.value = false; lastLoadedFilePath = null
+        val encoding = _externalTagEncodingOverride.value.charsetName
+        externalLoadJob = viewModelScope.launch {
             try {
-                val parseResult = DicomFileReader.readFromUri(
-                    context = appContext,
-                    uri = uri,
-                    forcedCharset = _externalTagEncodingOverride.value.charsetName
-                )
-                withContext(Dispatchers.Main) {
-                    _externalFileSummary.value = parseResult.summary
-                    _externalFileTags.value = parseResult.tags
-                    _isExternalFileLoading.value = false
+                val job = coroutineContext[Job]!!
+                val parsed = withContext(Dispatchers.IO) { viewerWorkMutex.withLock {
+                    metadataRequests.check(ticket)
+                    DicomFileReader.readFromUri(appContext, uri, encoding) { job.ensureActive(); metadataRequests.check(ticket) }
+                } }
+                metadataRequests.check(ticket)
+                _externalFileSummary.value = parsed.summary; _externalFileTags.value = parsed.tags
+                _isExternalFileLoading.value = false
+                if (_viewerSource.value == ru.medeng.dicomtool.domain.model.ViewerSource.External(uri.toString())) triggerFrameDecodeAndRender(true)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled
+            } catch (oom: OutOfMemoryError) {
+                if (metadataRequests.isCurrent(ticket)) {
+                    _externalFileSummary.value = null; _externalFileTags.value = emptyList()
+                    _externalFileError.value = "Недостаточно памяти для метаданных DICOM"; _isExternalFileLoading.value = false
+                    if (_viewerSource.value == ru.medeng.dicomtool.domain.model.ViewerSource.External(uri.toString()))
+                        _viewerRenderState.value = DicomViewerRenderState.Error(_externalFileError.value!!)
                 }
             } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
+                if (metadataRequests.isCurrent(ticket)) {
                     _externalFileError.value = e.message ?: "Ошибка чтения DICOM-файла"
-                    _externalFileSummary.value = null
-                    _externalFileTags.value = emptyList()
-                    _isExternalFileLoading.value = false
+                    _externalFileSummary.value = null; _externalFileTags.value = emptyList(); _isExternalFileLoading.value = false
+                    if (_viewerSource.value == ru.medeng.dicomtool.domain.model.ViewerSource.External(uri.toString()))
+                        _viewerRenderState.value = DicomViewerRenderState.Error(_externalFileError.value!!)
                 }
             }
         }
     }
 
     fun clearExternalFile() {
+        metadataRequests.next(); externalLoadJob?.cancel(); _isExternalFileLoading.value = false
+        renderRequests.next(); frameCache.clear()
+        changeViewerSource(ru.medeng.dicomtool.domain.model.ViewerSource.None)
         renderJob?.cancel()
         _selectedExternalFileUri.value = null
         _externalFileSummary.value = null
@@ -1423,6 +1456,8 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     override fun onCleared() {
+        receivedTagRequests.next(); receivedTagJob?.cancel()
+        metadataRequests.next(); renderRequests.next(); externalLoadJob?.cancel()
         sendCancellation?.request()
         scanJob?.cancel()
         super.onCleared()

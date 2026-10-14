@@ -137,6 +137,7 @@ fun DicomTagsBrowserComponent(
 
     // Состояние раскрытых элементов SQ: ключ = "${tagHex}_item_${itemIndex}"
     val expandedSqItems = remember { mutableStateMapOf<String, Boolean>() }
+    LaunchedEffect(tags) { selectedTagForDetail = null; expandedSqItems.clear() }
 
     // Фильтрация тегов с поддержкой поиска по вложенным SQ
     val filteredTags by remember(tags, searchQuery, onlyFilled) {
@@ -916,7 +917,7 @@ private fun copyToClipboard(context: Context, label: String, text: String) {
 /**
  * Фильтрует плоские и вложенные теги по поисковой строке и признаку заполненности.
  */
-private fun filterTagsHierarchy(
+internal fun filterTagsHierarchy(
     tags: List<DicomTagEntry>,
     query: String,
     onlyFilled: Boolean
@@ -933,7 +934,7 @@ private fun filterTagsHierarchy(
             val filteredItems = tag.sequenceItems.mapNotNull { item ->
                 val matchingSubTags = filterTagsHierarchy(item.tags, query, onlyFilled)
                 if (matchesSelf || matchingSubTags.isNotEmpty()) {
-                    item.copy(tags = if (cleanQuery.isBlank() && !onlyFilled) item.tags else matchingSubTags)
+                    item.copy(tags = if (matchesSelf && !onlyFilled) item.tags else matchingSubTags)
                 } else null
             }
 
@@ -955,9 +956,9 @@ private fun matchesSearch(tag: DicomTagEntry, cleanQuery: String): Boolean {
 
     if (cleanHex.contains(cleanQuery) || cleanHexWithComma.contains(cleanQuery)) return true
     if (tag.vr.uppercase(Locale.ROOT).contains(cleanQuery)) return true
-    if (tag.name.uppercase(Locale.ROOT).contains(cleanQuery)) return true
-    if (tag.nameRu?.uppercase(Locale.ROOT)?.contains(cleanQuery) == true) return true
-    if (tag.value.uppercase(Locale.ROOT).contains(cleanQuery)) return true
+    if (tag.name.uppercase(Locale.ROOT).replace(" ", "").contains(cleanQuery)) return true
+    if (tag.nameRu?.uppercase(Locale.ROOT)?.replace(" ", "")?.contains(cleanQuery) == true) return true
+    if (tag.value.uppercase(Locale.ROOT).replace(" ", "").contains(cleanQuery)) return true
 
     return false
 }

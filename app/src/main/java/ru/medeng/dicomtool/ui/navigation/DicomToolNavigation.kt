@@ -111,6 +111,7 @@ fun DicomToolAppRoot(
     val viewerWL by viewModel.viewerWindowCenter.collectAsState()
     val viewerFrame by viewModel.viewerCurrentFrame.collectAsState()
     val viewerRenderState by viewModel.viewerRenderState.collectAsState()
+    val receivedTags by viewModel.receivedTags.collectAsState()
     val isViewerFullScreen by viewModel.isViewerFullScreen.collectAsState()
     val scuConfig by viewModel.scuConfig.collectAsState()
     val preparedScuObject by viewModel.preparedScuObject.collectAsState()
@@ -205,6 +206,8 @@ fun DicomToolAppRoot(
                                     onClick = {
                                         currentTab = tab
                                         activeSubScreen = ActiveSubScreen.NONE
+                                        if (tab == MainBottomTab.TAGS) viewModel.ensureExternalViewer()
+                                        if (tab == MainBottomTab.RECEIVED) viewModel.ensureReceivedViewer()
                                     },
                                     icon = {
                                         Icon(
@@ -273,7 +276,7 @@ fun DicomToolAppRoot(
                                 selectedSeriesUid = selectedSeriesUid,
                                 selectedInstanceIndex = selectedInstanceIndex,
                                 selectedTagForDetail = selectedTagForDetail,
-                                tags = viewModel.getFilteredTagsForCurrentStudy(),
+                                tags = receivedTags,
                                 tagSearchQuery = tagSearchQuery,
                                 zoom = viewerZoom,
                                 pan = viewerPan,
@@ -304,7 +307,7 @@ fun DicomToolAppRoot(
                                 onApplyWindowPreset = viewModel::applyWindowPreset,
                                 onStepFrame = viewModel::stepViewerFrame,
                                 onStepInstance = viewModel::stepSeriesInstance,
-                                onEnsureDecoded = { viewModel.triggerFrameDecodeAndRender(resetWindowToFileDefault = false) },
+                                onEnsureDecoded = viewModel::ensureReceivedViewer,
                                 onDeleteCurrentStudy = { viewModel.deleteStudy(study.studyInstanceUid) }
                             )
                         }
@@ -422,7 +425,7 @@ fun DicomToolAppRoot(
                                     onSetWindowWidthLevel = viewModel::setWindowWidthLevel,
                                     onStepFrame = viewModel::stepViewerFrame,
                                     onToggleFullScreen = viewModel::toggleViewerFullScreen,
-                                    onEnsureDecoded = { viewModel.triggerFrameDecodeAndRender(resetWindowToFileDefault = false) }
+                                    onEnsureDecoded = viewModel::ensureExternalViewer
                                 )
                             }
 

@@ -90,7 +90,30 @@ public class Stage51DocumentsProvider extends DocumentsProvider {
         if (children != null) for (File child : children) if (!delete(child)) return false;
         return f.delete();
     }
+    @Override public android.os.Bundle call(String method, String arg, android.os.Bundle extras) {
+        if ((method.equals("stage54-status") || method.equals("stage54-release")) && arg.startsWith("stage54delay") && !arg.contains("/")) {
+            android.os.Bundle result = new android.os.Bundle();
+            getContext().getCacheDir().mkdirs();
+            try {
+                if (method.equals("stage54-release")) new File(getContext().getCacheDir(), arg + ".release").createNewFile();
+                result.putBoolean("started", new File(getContext().getCacheDir(), arg + ".started").exists());
+                return result;
+            } catch (IOException ex) { throw new IllegalStateException(ex); }
+        }
+        return super.call(method, arg, extras);
+    }
     @Override public ParcelFileDescriptor openDocument(String id, String mode, CancellationSignal signal) throws FileNotFoundException {
+        if (mode.equals("r") && id.startsWith("stage54delay")) {
+            String root = id.substring(0, id.indexOf('/'));
+            File started = new File(getContext().getCacheDir(), root + ".started");
+            File release = new File(getContext().getCacheDir(), root + ".release");
+            try {
+                getContext().getCacheDir().mkdirs();
+                started.createNewFile();
+                long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
+                while (!release.exists() && System.nanoTime() < deadline) Thread.sleep(10);
+            } catch (IOException | InterruptedException ex) { throw new FileNotFoundException("Synthetic delayed read interrupted"); }
+        }
         final File f = file(id);
         if (mode.contains("w") && id.startsWith("fail")) throw new FileNotFoundException("ENOSPC synthetic provider failure");
         if (mode.contains("w") && id.startsWith("short") && f.getName().endsWith(".dcm")) {

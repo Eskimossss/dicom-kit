@@ -11,6 +11,8 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.InputStream
 import java.util.Locale
+import ru.medeng.dicomtool.dicom.tags.BoundedDicomRead
+import java.util.concurrent.CancellationException
 import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
@@ -117,6 +119,11 @@ sealed class DicomPixelDecodeResult {
 class SingleFrameDecodeCache {
     private val lock = Any()
     private var cachedFrame: DecodedDicomFrame? = null
+    private var generation = 0L
+    fun ticket(): Long = synchronized(lock) { generation }
+    fun putIfCurrent(frame: DecodedDicomFrame, ticket: Long) = synchronized(lock) {
+        if (ticket == generation) cachedFrame = frame
+    }
 
     fun get(filePath: String, frameIndex: Int): DecodedDicomFrame? = synchronized(lock) {
         val current = cachedFrame
@@ -132,6 +139,7 @@ class SingleFrameDecodeCache {
     }
 
     fun clear() = synchronized(lock) {
+        generation++
         cachedFrame = null
     }
 }
@@ -147,6 +155,44 @@ class SingleFrameDecodeCache {
  * - Медицинский конвейер: Raw Pixel -> Modality LUT / Rescale Slope & Intercept -> VOI LUT / Window Center & Width -> MONOCHROME1/2 -> User Invert.
  */
 object DicomPixelDataDecoder {
+    const val MAX_DECODED_FRAME_BYTES = 48 * 1024 * 1024L
+    const val MAX_BITMAP_PIXELS = 4 * 1024 * 1024
+    private class UnsupportedTransform(message: String) : IllegalArgumentException(message)
+
+    /** Functional groups are independent macros; simultaneous shared/per-frame definitions are invalid. */
+    private fun frameAttributes(attrs: Attributes, frame: Int, frames: Int): Attributes {
+        val shared = attrs.getSequence(Tag.SharedFunctionalGroupsSequence)
+        val per = attrs.getSequence(Tag.PerFrameFunctionalGroupsSequence)
+        if (attrs.getString(Tag.SOPClassUID) in setOf(UID.EnhancedCTImageStorage, UID.EnhancedMRImageStorage, UID.EnhancedPETImageStorage) && shared == null && per == null)
+            throw UnsupportedTransform("Enhanced DICOM без Functional Groups не поддерживается")
+        if (shared != null && shared.size != 1) throw UnsupportedTransform("Shared Functional Groups должен содержать один Item")
+        if (per != null && per.size != frames) throw UnsupportedTransform("Per-frame Functional Groups не соответствует NumberOfFrames")
+        val effective = Attributes(attrs, *intArrayOf(Tag.SOPClassUID, Tag.PresentationIntentType, Tag.ModalityLUTSequence,
+            Tag.RescaleSlope, Tag.RescaleIntercept, Tag.RescaleType, Tag.WindowCenter, Tag.WindowWidth,
+            Tag.WindowCenterWidthExplanation, Tag.VOILUTFunction, Tag.VOILUTSequence).sortedArray())
+        for (macro in listOf(Tag.PixelValueTransformationSequence, Tag.FrameVOILUTSequence)) {
+            val sharedMacro = shared?.firstOrNull()?.getSequence(macro)
+            val frameMacro = per?.get(frame)?.getSequence(macro)
+            if (sharedMacro != null && frameMacro != null) throw UnsupportedTransform("Один macro задан одновременно в Shared и Per-frame Functional Groups")
+            val tags = if (macro == Tag.PixelValueTransformationSequence)
+                listOf(Tag.RescaleSlope, Tag.RescaleIntercept, Tag.RescaleType, Tag.ModalityLUTSequence)
+            else listOf(Tag.WindowCenter, Tag.WindowWidth, Tag.WindowCenterWidthExplanation, Tag.VOILUTFunction, Tag.VOILUTSequence)
+            if (shared != null || per != null) tags.forEach { effective.remove(it) }
+            val selected = frameMacro ?: sharedMacro ?: continue
+            if (selected.size != 1) throw UnsupportedTransform("Functional Group macro должен содержать один Item")
+            effective.addAll(selected[0])
+            if (macro == Tag.PixelValueTransformationSequence &&
+                (!effective.containsValue(Tag.RescaleSlope) || !effective.containsValue(Tag.RescaleIntercept)))
+                throw UnsupportedTransform("Неполный Pixel Value Transformation: нужны Slope и Intercept")
+            if (macro == Tag.FrameVOILUTSequence && !effective.containsValue(Tag.VOILUTSequence) &&
+                (!effective.containsValue(Tag.WindowCenter) || !effective.containsValue(Tag.WindowWidth)))
+                throw UnsupportedTransform("Неполный Frame VOI: нужны Window Center/Width или LUT")
+        }
+        if (attrs.contains(Tag.RealWorldValueMappingSequence) || shared?.any { it.contains(Tag.RealWorldValueMappingSequence) } == true ||
+            per?.get(frame)?.contains(Tag.RealWorldValueMappingSequence) == true)
+            throw UnsupportedTransform("Real World Value Mapping не поддерживается Viewer; исходные теги доступны")
+        return effective
+    }
 
     val SUPPORTED_UNCOMPRESSED_TRANSFER_SYNTAXES = setOf(
         UID.ImplicitVRLittleEndian,
@@ -166,7 +212,8 @@ object DicomPixelDataDecoder {
     fun decodeFrameFromFile(
         file: File,
         frameIndex: Int = 0,
-        cache: SingleFrameDecodeCache? = null
+        cache: SingleFrameDecodeCache? = null,
+        checkCancelled: () -> Unit = {}
     ): DicomPixelDecodeResult {
         if (!file.exists() || !file.isFile) {
             return DicomPixelDecodeResult.DecodeError("Файл DICOM не найден: ${file.name}")
@@ -176,7 +223,7 @@ object DicomPixelDataDecoder {
             sourceDisplayName = file.name,
             streamOpener = { FileInputStream(file) },
             frameIndex = frameIndex,
-            cache = cache
+            cache = cache, checkCancelled = checkCancelled
         )
     }
 
@@ -188,8 +235,11 @@ object DicomPixelDataDecoder {
         sourceDisplayName: String = sourcePathOrUri.substringAfterLast('/'),
         streamOpener: () -> InputStream?,
         frameIndex: Int = 0,
-        cache: SingleFrameDecodeCache? = null
+        cache: SingleFrameDecodeCache? = null,
+        checkCancelled: () -> Unit = {}
     ): DicomPixelDecodeResult {
+        checkCancelled()
+        val cacheTicket = cache?.ticket()
         val cached = cache?.get(sourcePathOrUri, frameIndex)
         if (cached != null) {
             return DicomPixelDecodeResult.Success(cached)
@@ -199,8 +249,13 @@ object DicomPixelDataDecoder {
             val rawStream = streamOpener()
                 ?: return DicomPixelDecodeResult.DecodeError("Не удалось открыть поток для источника: $sourceDisplayName")
 
-            DicomInputStream(BufferedInputStream(rawStream, 65536)).use { dis ->
+            DicomInputStream(BufferedInputStream(object : java.io.FilterInputStream(rawStream) {
+                override fun read(): Int { checkCancelled(); return super.read() }
+                override fun read(b: ByteArray, off: Int, len: Int): Int { checkCancelled(); return `in`.read(b, off, len) }
+                override fun skip(n: Long): Long { checkCancelled(); return super.skip(n) }
+            }, 65536)).use { dis ->
                 dis.includeBulkData = DicomInputStream.IncludeBulkData.NO
+                BoundedDicomRead.install(dis, checkCancelled)
                 val fmi: Attributes? = dis.readFileMetaInformation()
                 val headerAttrs: Attributes = dis.readDatasetUntilPixelData()
 
@@ -231,7 +286,7 @@ object DicomPixelDataDecoder {
                 }
 
                 val pixelDataLength = dis.unsignedLength()
-                if (pixelDataLength <= 0L) {
+                if (dis.length() == -1 || pixelDataLength <= 0L) {
                     return DicomPixelDecodeResult.UnsupportedFormat(
                         transferSyntaxUid = tsuid,
                         transferSyntaxName = tsName,
@@ -250,12 +305,14 @@ object DicomPixelDataDecoder {
                     pixelStream = dis,
                     pixelDataLength = pixelDataLength,
                     requestedFrameIndex = frameIndex,
-                    cache = cache
+                    cache = cache, checkCancelled = checkCancelled, cacheTicket = cacheTicket
                 )
             }
+        } catch (cancelled: CancellationException) { throw cancelled
+        } catch (e: UnsupportedTransform) {
+            DicomPixelDecodeResult.DecodeError("Преобразование DICOM не поддерживается: ${e.message}")
         } catch (oom: OutOfMemoryError) {
             cache?.clear()
-            System.gc()
             DicomPixelDecodeResult.DecodeError(
                 "Недостаточно оперативной памяти Android для декодирования кадра ($sourceDisplayName)."
             )
@@ -275,8 +332,14 @@ object DicomPixelDataDecoder {
         pixelStream: InputStream,
         pixelDataLength: Long,
         requestedFrameIndex: Int,
-        cache: SingleFrameDecodeCache?
+        cache: SingleFrameDecodeCache?,
+        checkCancelled: () -> Unit,
+        cacheTicket: Long?
     ): DicomPixelDecodeResult {
+        val required = listOf(Tag.Rows, Tag.Columns, Tag.SamplesPerPixel, Tag.PhotometricInterpretation,
+            Tag.BitsAllocated, Tag.BitsStored, Tag.HighBit, Tag.PixelRepresentation)
+        if (required.any { !headerAttrs.containsValue(it) })
+            return DicomPixelDecodeResult.DecodeError("Отсутствуют обязательные параметры Image Pixel; интерпретация пикселей не подтверждена")
         val rows = headerAttrs.getInt(Tag.Rows, 0)
         val columns = headerAttrs.getInt(Tag.Columns, 0)
         val samplesPerPixel = headerAttrs.getInt(Tag.SamplesPerPixel, 1)
@@ -284,11 +347,17 @@ object DicomPixelDataDecoder {
             .trim()
             .uppercase(Locale.ROOT)
         val bitsAllocated = headerAttrs.getInt(Tag.BitsAllocated, 16)
-        val bitsStored = headerAttrs.getInt(Tag.BitsStored, bitsAllocated).coerceIn(1, bitsAllocated)
+        val bitsStored = headerAttrs.getInt(Tag.BitsStored, bitsAllocated)
         val highBit = headerAttrs.getInt(Tag.HighBit, bitsStored - 1)
         val pixelRepresentation = headerAttrs.getInt(Tag.PixelRepresentation, 0)
-        val numberOfFrames = headerAttrs.getInt(Tag.NumberOfFrames, 1).coerceAtLeast(1)
+        val numberOfFrames = headerAttrs.getInt(Tag.NumberOfFrames, 1)
         val planarConfiguration = headerAttrs.getInt(Tag.PlanarConfiguration, 0)
+        if (numberOfFrames < 1 || requestedFrameIndex !in 0 until numberOfFrames ||
+            bitsAllocated !in listOf(8, 16) || bitsStored !in 1..bitsAllocated || highBit !in (bitsStored - 1) until bitsAllocated ||
+            pixelRepresentation !in 0..1) return DicomPixelDecodeResult.DecodeError("Некорректные Frame Index / NumberOfFrames / Bits Stored / High Bit / Pixel Representation")
+        val effectiveAttrs = frameAttributes(headerAttrs, requestedFrameIndex, numberOfFrames)
+        if (photometric == "RGB" && (bitsStored != 8 || highBit != 7 || pixelRepresentation != 0))
+            return DicomPixelDecodeResult.DecodeError("RGB требует unsigned 8-bit samples")
 
         if (rows <= 0 || columns <= 0) {
             return DicomPixelDecodeResult.DecodeError(
@@ -307,6 +376,8 @@ object DicomPixelDataDecoder {
         }
 
         if (photometric == "RGB") {
+            if (!headerAttrs.containsValue(Tag.PlanarConfiguration))
+                return DicomPixelDecodeResult.DecodeError("RGB без Planar Configuration не поддерживается")
             if (samplesPerPixel != 3 || bitsAllocated != 8) {
                 return DicomPixelDecodeResult.UnsupportedFormat(
                     transferSyntaxUid = transferSyntaxUid,
@@ -339,7 +410,9 @@ object DicomPixelDataDecoder {
         }
 
         val numPixels = rows.toLong() * columns.toLong()
-        if (numPixels <= 0L || numPixels > 64_000_000L) {
+        val decodedBytes = numPixels * if (photometric == "RGB") 4 else bitsAllocated / 8
+        val frameBudget = min(MAX_DECODED_FRAME_BYTES, Runtime.getRuntime().maxMemory() / 4)
+        if (numPixels <= 0L || decodedBytes > frameBudget) {
             return DicomPixelDecodeResult.DecodeError(
                 "Размер кадра ($columns × $rows) превышает допустимый предел памяти."
             )
@@ -347,8 +420,9 @@ object DicomPixelDataDecoder {
         val pixelCount = numPixels.toInt()
         val bytesPerSample = bitsAllocated / 8
         val frameBytes = numPixels * samplesPerPixel.toLong() * bytesPerSample.toLong()
+        if (frameBytes * numberOfFrames > pixelDataLength) return DicomPixelDecodeResult.DecodeError("Pixel Data короче объявленного NumberOfFrames")
 
-        val safeFrameIndex = requestedFrameIndex.coerceIn(0, numberOfFrames - 1)
+        val safeFrameIndex = requestedFrameIndex
         val skipBytes = safeFrameIndex.toLong() * frameBytes
         if (skipBytes + frameBytes > pixelDataLength) {
             return DicomPixelDecodeResult.DecodeError(
@@ -357,6 +431,7 @@ object DicomPixelDataDecoder {
         }
 
         // Пропускаем предыдущие кадры без загрузки их в память
+        checkCancelled()
         skipFully(pixelStream, skipBytes)
 
         var gray8Buf: ByteArray? = null
@@ -406,17 +481,16 @@ object DicomPixelDataDecoder {
                 }
             } else {
                 // Planar: R1..Rn, G1..Gn, B1..Bn
-                val rPlane = ByteArray(pixelCount)
-                val gPlane = ByteArray(pixelCount)
-                val bPlane = ByteArray(pixelCount)
-                readFully(pixelStream, rPlane, 0, pixelCount)
-                readFully(pixelStream, gPlane, 0, pixelCount)
-                readFully(pixelStream, bPlane, 0, pixelCount)
-                for (i in 0 until pixelCount) {
-                    val r = rPlane[i].toInt() and 0xFF
-                    val g = gPlane[i].toInt() and 0xFF
-                    val b = bPlane[i].toInt() and 0xFF
-                    rgbPixels[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                val chunk = ByteArray(65536)
+                java.util.Arrays.fill(rgbPixels, 0xFF000000.toInt())
+                for (channel in 0..2) {
+                    var index = 0
+                    while (index < pixelCount) {
+                        val count = min(chunk.size, pixelCount - index)
+                        readFully(pixelStream, chunk, 0, count)
+                        for (i in 0 until count) rgbPixels[index + i] = rgbPixels[index + i] or ((chunk[i].toInt() and 255) shl (16 - channel * 8))
+                        index += count
+                    }
                 }
             }
             rgb8Buf = rgbPixels
@@ -500,7 +574,7 @@ object DicomPixelDataDecoder {
         }
 
         val descriptor = buildImageDescriptor(
-            headerAttrs = headerAttrs,
+            headerAttrs = effectiveAttrs,
             fmi = fmi,
             rows = rows,
             columns = columns,
@@ -527,7 +601,8 @@ object DicomPixelDataDecoder {
             rgb8Buffer = rgb8Buf
         )
 
-        cache?.put(decodedFrame)
+        checkCancelled()
+        if (cacheTicket != null) cache?.putIfCurrent(decodedFrame, cacheTicket)
         return DicomPixelDecodeResult.Success(decodedFrame)
     }
 
@@ -567,8 +642,10 @@ object DicomPixelDataDecoder {
         val modalityLut = parseLutSequence(headerAttrs, Tag.ModalityLUTSequence, "Modality LUT")
         val hasExplicitSlope = headerAttrs.containsValue(Tag.RescaleSlope)
         val hasExplicitIntercept = headerAttrs.containsValue(Tag.RescaleIntercept)
-        val rescaleSlope = headerAttrs.getDouble(Tag.RescaleSlope, 1.0).let { if (it == 0.0) 1.0 else it }
+        val rescaleSlope = headerAttrs.getDouble(Tag.RescaleSlope, 1.0)
         val rescaleIntercept = headerAttrs.getDouble(Tag.RescaleIntercept, 0.0)
+        if (!rescaleSlope.isFinite() || rescaleSlope == 0.0 || !rescaleIntercept.isFinite())
+            throw UnsupportedTransform("Некорректный Rescale Slope/Intercept")
 
         val minModality: Double
         val maxModality: Double
@@ -594,8 +671,7 @@ object DicomPixelDataDecoder {
             "LINEAR_EXACT" -> "LINEAR_EXACT"
             "SIGMOID" -> "SIGMOID"
             else -> {
-                warnings.add("Нестандартная VOI LUT Function '$rawVoiFunc' в (0028,1056) — применён стандартный режим LINEAR.")
-                "LINEAR"
+                throw UnsupportedTransform("VOI LUT Function '$rawVoiFunc' не поддерживается")
             }
         }
 
@@ -605,6 +681,9 @@ object DicomPixelDataDecoder {
 
         val presets = ArrayList<DicomWindowPreset>()
         val pairCount = min(wcDoubles.size, wwDoubles.size)
+        if (wcDoubles.size != wwDoubles.size || wcDoubles.any { !it.isFinite() } ||
+            wwDoubles.any { !it.isFinite() || it <= 0 || (voiLutFunction == "LINEAR" && it < 1) })
+            throw UnsupportedTransform("Некорректные Window Center/Width")
         for (i in 0 until pairCount) {
             val wc = wcDoubles[i]
             val ww = wwDoubles[i]
@@ -710,12 +789,12 @@ object DicomPixelDataDecoder {
             hasExplicitRescale = hasExplicitSlope || hasExplicitIntercept,
             modalityLut = modalityLut,
             voiLutFunction = voiLutFunction,
-            windowPresets = presets,
-            voiLuts = voiLuts,
+            windowPresets = if (photometric == "RGB") emptyList() else presets,
+            voiLuts = if (photometric == "RGB") emptyList() else voiLuts,
             minModalityValue = minModality,
             maxModalityValue = maxModality,
-            defaultWindowCenter = defaultWc,
-            defaultWindowWidth = defaultWw,
+            defaultWindowCenter = if (photometric == "RGB") 128.0 else defaultWc,
+            defaultWindowWidth = if (photometric == "RGB") 255.0 else defaultWw,
             pipelineWarnings = warnings
         )
     }
@@ -731,171 +810,59 @@ object DicomPixelDataDecoder {
      * Для больших маммографических снимков (например, 3580 × 2680) использует предвычисленную таблицу LUT на 65536 значений,
      * что исключает 9.6 миллионов плавающих операций на каждый шаг WW/WL.
      */
-    fun renderFrameToArgbPixels(
-        frame: DecodedDicomFrame,
-        windowWidth: Double,
-        windowCenter: Double,
-        userInverted: Boolean,
-        useVoiLutIndex: Int? = null
-    ): IntArray {
-        val desc = frame.descriptor
-        val pixelCount = desc.rows * desc.columns
-        val outArgb = IntArray(pixelCount)
-
-        if (desc.photometricInterpretation == "RGB") {
-            val srcRgb = frame.rgb8Buffer ?: return outArgb
-            if (!userInverted && windowWidth == 255.0 && windowCenter == 128.0) {
-                System.arraycopy(srcRgb, 0, outArgb, 0, pixelCount)
-                return outArgb
-            }
-            val colorLut = IntArray(256) { v ->
-                val mapped = applyWindowFormula(v.toDouble(), windowCenter, windowWidth, "LINEAR")
-                if (userInverted) 255 - mapped else mapped
-            }
-            for (i in 0 until pixelCount) {
-                val c = srcRgb[i]
-                val r = colorLut[(c ushr 16) and 0xFF]
-                val g = colorLut[(c ushr 8) and 0xFF]
-                val b = colorLut[c and 0xFF]
-                outArgb[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
-            }
-            return outArgb
+    private fun interface PixelMapper { fun map(index: Int): Int }
+    private fun pixelMapper(frame: DecodedDicomFrame, ww: Double, wc: Double, inverted: Boolean, voi: Int?): PixelMapper {
+        val d = frame.descriptor
+        if (d.photometricInterpretation == "RGB") {
+            val rgb = requireNotNull(frame.rgb8Buffer)
+            return PixelMapper { index -> if (inverted) rgb[index] xor 0x00FFFFFF else rgb[index] }
         }
-
-        val lowBit = (desc.highBit + 1 - desc.bitsStored).coerceAtLeast(0)
-        val mask = if (desc.bitsStored >= 16) 0xFFFF else ((1 shl desc.bitsStored) - 1)
-        val signBit = if (desc.pixelRepresentation == 1 && desc.bitsStored >= 1) (1 shl (desc.bitsStored - 1)) else 0
-        val signExtendSub = if (desc.pixelRepresentation == 1 && desc.bitsStored >= 1) (1 shl desc.bitsStored) else 0
-
-        val invertPolarity = (desc.photometricInterpretation == "MONOCHROME1") xor userInverted
-        val activeVoiLut = if (useVoiLutIndex != null) desc.voiLuts.getOrNull(useVoiLutIndex) else null
-
-        if (desc.bitsAllocated == 8) {
-            val src8 = frame.grayscale8Buffer ?: return outArgb
-            val lut256 = buildGrayscaleLut(
-                tableSize = 256,
-                lowBit = lowBit,
-                mask = mask,
-                signBit = signBit,
-                signExtendSub = signExtendSub,
-                modalityLut = desc.modalityLut,
-                rescaleSlope = desc.rescaleSlope,
-                rescaleIntercept = desc.rescaleIntercept,
-                activeVoiLut = activeVoiLut,
-                windowCenter = windowCenter,
-                windowWidth = windowWidth,
-                voiLutFunction = desc.voiLutFunction,
-                invertPolarity = invertPolarity
-            )
-            for (i in 0 until pixelCount) {
-                outArgb[i] = lut256[src8[i].toInt() and 0xFF]
-            }
-            return outArgb
-        } else {
-            val src16 = frame.grayscale16Buffer ?: return outArgb
-            val lut65536 = buildGrayscaleLut(
-                tableSize = 65536,
-                lowBit = lowBit,
-                mask = mask,
-                signBit = signBit,
-                signExtendSub = signExtendSub,
-                modalityLut = desc.modalityLut,
-                rescaleSlope = desc.rescaleSlope,
-                rescaleIntercept = desc.rescaleIntercept,
-                activeVoiLut = activeVoiLut,
-                windowCenter = windowCenter,
-                windowWidth = windowWidth,
-                voiLutFunction = desc.voiLutFunction,
-                invertPolarity = invertPolarity
-            )
-            for (i in 0 until pixelCount) {
-                outArgb[i] = lut65536[src16[i].toInt() and 0xFFFF]
-            }
-            return outArgb
-        }
+        val signed = d.pixelRepresentation == 1
+        val lut = buildGrayscaleLut(if (d.bitsAllocated == 8) 256 else 65536,
+            d.highBit + 1 - d.bitsStored, (1 shl d.bitsStored) - 1,
+            if (signed) 1 shl (d.bitsStored - 1) else 0, if (signed) 1 shl d.bitsStored else 0,
+            d.modalityLut, d.rescaleSlope, d.rescaleIntercept, voi?.let { d.voiLuts.getOrNull(it) },
+            wc, ww, d.voiLutFunction, (d.photometricInterpretation == "MONOCHROME1") xor inverted)
+        return PixelMapper { index -> lut[frame.grayscale8Buffer?.let { it[index].toInt() and 255 }
+            ?: (requireNotNull(frame.grayscale16Buffer)[index].toInt() and 65535)] }
     }
 
-    /**
-     * Создаёт Android [Bitmap] (ARGB_8888) из декодированного кадра с учётом ограничения текстуры GPU Android.
-     * Снимки до 4096 × 4096 (включая маммографию 3580 × 2680) рендерятся в полном разрешении 1:1.
-     */
-    fun renderFrameToBitmap(
-        frame: DecodedDicomFrame,
-        windowWidth: Double,
-        windowCenter: Double,
-        userInverted: Boolean,
-        useVoiLutIndex: Int? = null,
-        maxTextureDimension: Int = 4096
-    ): Bitmap {
-        val desc = frame.descriptor
-        val srcW = desc.columns
-        val srcH = desc.rows
+    fun renderFrameToArgbPixels(frame: DecodedDicomFrame, windowWidth: Double, windowCenter: Double,
+        userInverted: Boolean, useVoiLutIndex: Int? = null): IntArray {
+        val count = frame.descriptor.rows.toLong() * frame.descriptor.columns
+        require(count * 4 <= MAX_DECODED_FRAME_BYTES) { "Полноразмерный ARGB превышает лимит памяти" }
+        val pixel = pixelMapper(frame, windowWidth, windowCenter, userInverted, useVoiLutIndex)
+        return IntArray(count.toInt()) { pixel.map(it) }
+    }
 
-        // Если оба измерения <= 4096 (включая 3580 × 2680), рендерим без даунсэмплинга 1:1
-        val subsample = if (srcW <= maxTextureDimension && srcH <= maxTextureDimension) {
-            1
-        } else {
-            max((srcW + maxTextureDimension - 1) / maxTextureDimension, (srcH + maxTextureDimension - 1) / maxTextureDimension)
-                .coerceAtLeast(1)
-        }
+    data class RenderSize(val width: Int, val height: Int)
+    fun renderSize(columns: Int, rows: Int, maxTextureDimension: Int = 4096): RenderSize {
+        require(columns > 0 && rows > 0 && maxTextureDimension > 0)
+        val scale = max(1.0, max(max(columns, rows).toDouble() / maxTextureDimension,
+            kotlin.math.sqrt(columns.toDouble() * rows / min(MAX_BITMAP_PIXELS.toLong(), Runtime.getRuntime().maxMemory() / 32))))
+        return RenderSize((columns / scale).toInt().coerceAtLeast(1), (rows / scale).toInt().coerceAtLeast(1))
+    }
 
-        if (subsample == 1) {
-            val argb = renderFrameToArgbPixels(
-                frame = frame,
-                windowWidth = windowWidth,
-                windowCenter = windowCenter,
-                userInverted = userInverted,
-                useVoiLutIndex = useVoiLutIndex
-            )
-            return Bitmap.createBitmap(argb, srcW, srcH, Bitmap.Config.ARGB_8888)
-        }
-
-        // Если изображение превышает лимит аппаратной текстуры GPU (> 4096), выполняем аккуратную выборку
-        val dstW = (srcW / subsample).coerceAtLeast(1)
-        val dstH = (srcH / subsample).coerceAtLeast(1)
-        val outArgb = IntArray(dstW * dstH)
-
-        val lowBit = (desc.highBit + 1 - desc.bitsStored).coerceAtLeast(0)
-        val mask = if (desc.bitsStored >= 16) 0xFFFF else ((1 shl desc.bitsStored) - 1)
-        val signBit = if (desc.pixelRepresentation == 1 && desc.bitsStored >= 1) (1 shl (desc.bitsStored - 1)) else 0
-        val signExtendSub = if (desc.pixelRepresentation == 1 && desc.bitsStored >= 1) (1 shl desc.bitsStored) else 0
-        val invertPolarity = (desc.photometricInterpretation == "MONOCHROME1") xor userInverted
-        val activeVoiLut = if (useVoiLutIndex != null) desc.voiLuts.getOrNull(useVoiLutIndex) else null
-
-        val lut = buildGrayscaleLut(
-            tableSize = if (desc.bitsAllocated == 8) 256 else 65536,
-            lowBit = lowBit,
-            mask = mask,
-            signBit = signBit,
-            signExtendSub = signExtendSub,
-            modalityLut = desc.modalityLut,
-            rescaleSlope = desc.rescaleSlope,
-            rescaleIntercept = desc.rescaleIntercept,
-            activeVoiLut = activeVoiLut,
-            windowCenter = windowCenter,
-            windowWidth = windowWidth,
-            voiLutFunction = desc.voiLutFunction,
-            invertPolarity = invertPolarity
-        )
-
-        val src16 = frame.grayscale16Buffer
-        val src8 = frame.grayscale8Buffer
-        val srcRgb = frame.rgb8Buffer
-
-        var dstIdx = 0
-        for (y in 0 until dstH) {
-            val srcRowOffset = (y * subsample) * srcW
-            for (x in 0 until dstW) {
-                val srcIdx = srcRowOffset + (x * subsample)
-                outArgb[dstIdx++] = when {
-                    src16 != null -> lut[src16[srcIdx].toInt() and 0xFFFF]
-                    src8 != null -> lut[src8[srcIdx].toInt() and 0xFF]
-                    srcRgb != null -> srcRgb[srcIdx]
-                    else -> 0xFF000000.toInt()
-                }
+    /** Same color mapping at all sizes; row writes avoid a full second ARGB buffer. */
+    fun renderFrameToBitmap(frame: DecodedDicomFrame, windowWidth: Double, windowCenter: Double,
+        userInverted: Boolean, useVoiLutIndex: Int? = null, maxTextureDimension: Int = 4096,
+        checkCancelled: () -> Unit = {}): Bitmap {
+        checkCancelled()
+        val d = frame.descriptor
+        val size = renderSize(d.columns, d.rows, maxTextureDimension)
+        val bitmap = Bitmap.createBitmap(size.width, size.height, Bitmap.Config.ARGB_8888)
+        try {
+            val pixel = pixelMapper(frame, windowWidth, windowCenter, userInverted, useVoiLutIndex)
+            val row = IntArray(size.width)
+            for (y in 0 until size.height) {
+                checkCancelled()
+                val sy = (y.toLong() * d.rows / size.height).toInt()
+                for (x in row.indices) row[x] = pixel.map(sy * d.columns + (x.toLong() * d.columns / size.width).toInt())
+                bitmap.setPixels(row, 0, size.width, 0, y, size.width, 1)
             }
-        }
-        return Bitmap.createBitmap(outArgb, dstW, dstH, Bitmap.Config.ARGB_8888)
+            checkCancelled()
+            return bitmap
+        } catch (e: Throwable) { bitmap.recycle(); throw e }
     }
 
     private fun buildGrayscaleLut(
@@ -998,14 +965,15 @@ object DicomPixelDataDecoder {
         val result = ArrayList<DicomLutTable>()
         for (item in seq) {
             val desc = item.getInts(Tag.LUTDescriptor)
-            if (desc == null || desc.size < 3) continue
+            if (desc == null || desc.size != 3) throw UnsupportedTransform("Некорректный LUT Descriptor")
             val rawNumEntries = desc[0] and 0xFFFF
             val numEntries = if (rawNumEntries == 0) 65536 else rawNumEntries
             val firstValueMapped = desc[1]
-            val bitsPerEntry = desc[2].coerceIn(8, 16)
+            val bitsPerEntry = desc[2]
+            if (bitsPerEntry !in 8..16) throw UnsupportedTransform("Неподдерживаемая разрядность LUT")
             val explanation = item.getString(Tag.LUTExplanation, defaultName).trim()
 
-            val lutValues = extractLutDataArray(item, numEntries) ?: continue
+            val lutValues = extractLutDataArray(item, numEntries) ?: throw UnsupportedTransform("Недостаточная длина LUT Data")
             result.add(
                 DicomLutTable(
                     numberOfEntries = numEntries,
@@ -1057,7 +1025,7 @@ object DicomPixelDataDecoder {
             } else {
                 val toRead = min(skipBuf.size.toLong(), remaining).toInt()
                 val read = stream.read(skipBuf, 0, toRead)
-                if (read < 0) throw EOFException("Не удалось перемотать Pixel Data к нужному кадру")
+                if (read <= 0) throw EOFException("Не удалось перемотать Pixel Data к нужному кадру")
                 remaining -= read.toLong()
             }
         }
@@ -1067,7 +1035,7 @@ object DicomPixelDataDecoder {
         var totalRead = 0
         while (totalRead < length) {
             val read = stream.read(target, offset + totalRead, length - totalRead)
-            if (read < 0) throw EOFException("Неожиданный конец потока Pixel Data (прочитано $totalRead из $length байт)")
+            if (read <= 0) throw EOFException("Неожиданный конец потока Pixel Data (прочитано $totalRead из $length байт)")
             totalRead += read
         }
     }
