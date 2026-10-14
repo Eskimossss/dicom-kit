@@ -14,32 +14,29 @@ import java.util.Locale
  */
 object DicomLogExportUtils {
 
-    private val PHI_TAGS_REGEX = Regex(
-        """(?iu)(patient\s*name|patientid|patient\s*id|birth\s*date|пациент|фио|др|дата\s*рождения|\(0010,0010\)|\(0010,0020\)|\(0010,0030\))[:=]\s*([^,\n\r;\t]+)"""
-    )
-    private val DATE_PATTERN = Regex("""\b(19\d{2}|20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\b""")
-    private val DOT_DATE_PATTERN = Regex("""\b(0[1-9]|[12]\d|3[01])\.(0[1-9]|1[0-2])\.(19\d{2}|20\d{2})\b""")
-
     /**
      * Форматирование одного события для буфера обмена.
      */
-    fun formatSingleEvent(entry: DicomLogEntry, sanitizePhi: Boolean = false): String = buildString {
+    fun formatSingleEvent(entry: DicomLogEntry, sanitizePhi: Boolean = true): String {
+        if (sanitizePhi) return SafeTechnicalSummary.NOTICE + "\n" + SafeTechnicalSummary.event(entry)
+        return buildString {
+        appendLine("ПОЛНЫЙ ТЕКСТ: может содержать персональные данные.")
         appendLine("--- DICOM СОБЫТИЕ ---")
         appendLine("Время: ${entry.timestampFormatted}")
         appendLine("Направление: ${entry.direction.code}")
         appendLine("Сеанс: ${entry.associationId}${if (entry.sessionUid.isNotBlank()) " [${entry.sessionUid}]" else ""}")
         appendLine("Категория: ${entry.category}")
-        appendLine("Заголовок: ${maybeSanitize(entry.title, sanitizePhi)}")
+        appendLine("Заголовок: ${entry.title}")
         if (entry.summaryLines.isNotEmpty()) {
             appendLine("Сводка:")
             entry.summaryLines.forEach { line ->
-                appendLine("  • ${maybeSanitize(line, sanitizePhi)}")
+                appendLine("  • ${line}")
             }
         }
         if (entry.technicalDetails.isNotEmpty()) {
             appendLine("Технические параметры:")
             entry.technicalDetails.forEach { (k, v) ->
-                appendLine("  $k: ${maybeSanitizeDetail(k, v, sanitizePhi)}")
+                appendLine("  $k: ${v}")
             }
         }
         val rec = DicomDiagnosticHandbook.analyzeEntry(entry)
@@ -58,10 +55,15 @@ object DicomLogExportUtils {
         }
     }
 
+    }
+
     /**
      * Форматирование целого раскрытого сеанса для буфера обмена.
      */
-    fun formatSession(session: DicomSessionSummary, sanitizePhi: Boolean = false): String = buildString {
+    fun formatSession(session: DicomSessionSummary, sanitizePhi: Boolean = true): String {
+        if (sanitizePhi) return SafeTechnicalSummary.NOTICE + "\n" + SafeTechnicalSummary.session(session)
+        return buildString {
+        appendLine("ПОЛНЫЙ ТЕКСТ: может содержать персональные данные.")
         appendLine("==================================================")
         appendLine("DICOM СЕАНС: ${session.role} ${session.direction.code} · ${session.associationId}")
         appendLine("ID сеанса (UID): ${session.sessionUid}")
@@ -110,16 +112,18 @@ object DicomLogExportUtils {
         appendLine("\nХРОНОЛОГИЯ СОБЫТИЙ СЕАНСА (${session.events.size}):")
         session.events.forEachIndexed { i, e ->
             val errMarker = if (e.isError) "[ERROR] " else ""
-            appendLine("  [${i + 1}] ${e.timestampFormatted} ${e.direction.code} ${e.category} | $errMarker${maybeSanitize(e.title, sanitizePhi)}")
+            appendLine("  [${i + 1}] ${e.timestampFormatted} ${e.direction.code} ${e.category} | $errMarker${e.title}")
             e.summaryLines.forEach { line ->
-                appendLine("        ${maybeSanitize(line, sanitizePhi)}")
+                appendLine("        ${line}")
             }
             if (e.technicalDetails.isNotEmpty()) {
                 e.technicalDetails.forEach { (k, v) ->
-                    appendLine("        $k: ${maybeSanitizeDetail(k, v, sanitizePhi)}")
+                    appendLine("        $k: ${v}")
                 }
             }
         }
+    }
+
     }
 
     /**
@@ -136,10 +140,11 @@ object DicomLogExportUtils {
         appendLine("DICOM Kit — Экспорт технического журнала")
         appendLine("Дата выгрузки: $nowFormatted")
         appendLine("Режим: ${if (isBriefMode) "Краткий (по сеансам)" else "Подробный (по событиям)"}")
-        appendLine("Конфиденциальность: ${if (sanitizePhi) "Обезличенный (без ПДн)" else "Полный технический"}")
+        appendLine("Конфиденциальность: ${if (sanitizePhi) "Безопасная техническая сводка" else "Полный технический журнал: может содержать персональные данные"}")
         if (sanitizePhi) {
-            appendLine("ВНИМАНИЕ: Применено эвристическое маскирование персональных данных (ФИО, Patient ID, даты рождения).")
+            appendLine(SafeTechnicalSummary.NOTICE)
         }
+        appendLine("Экспортируется выбранный оперативный список; он может не включать всю дисковую историю и потерянные события.")
         appendLine("Всего сеансов: ${sessions.size}, всего событий: ${allFilteredEntries.size}")
         appendLine("==================================================\n")
 
@@ -164,14 +169,23 @@ object DicomLogExportUtils {
         content: String,
         sanitizePhi: Boolean
     ) {
+        sharePreparedFile(context, prepareExportFile(context, content, sanitizePhi), sanitizePhi)
+    }
+
+    fun prepareExportFile(context: Context, content: String, sanitizePhi: Boolean): File {
         val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val suffix = if (sanitizePhi) "sanitized" else "full"
-        val fileName = "dicom_kit_log_${timeStamp}_$suffix.txt"
+        val suffix = if (sanitizePhi) "technical-summary" else "full"
+        val fileName = "dicom_kit_log_${timeStamp}_${java.util.UUID.randomUUID()}_$suffix.txt"
 
         val exportDir = File(context.cacheDir, "log_exports")
         exportDir.mkdirs()
         val file = File(exportDir, fileName)
         file.writeText(content, Charsets.UTF_8)
+        return file
+    }
+
+    fun sharePreparedFile(context: Context, file: File, sanitizePhi: Boolean) {
+        val suffix = if (sanitizePhi) "technical-summary" else "full"
 
         val authority = "${context.packageName}.fileprovider"
         val contentUri = FileProvider.getUriForFile(context, authority, file)
@@ -188,31 +202,4 @@ object DicomLogExportUtils {
         context.startActivity(chooser)
     }
 
-    /**
-     * Эвристическое обезличивание строки.
-     */
-    fun sanitizePhi(raw: String): String {
-        var s = raw
-        // Замена ключевых полей DICOM тегов пациента
-        s = PHI_TAGS_REGEX.replace(s) { match ->
-            "${match.groupValues[1]}: *** ANONYMIZED ***"
-        }
-        // Маскирование дат рождения (YYYYMMDD или DD.MM.YYYY)
-        s = DATE_PATTERN.replace(s, "********")
-        s = DOT_DATE_PATTERN.replace(s, "**.**.****")
-        return s
-    }
-
-    private fun maybeSanitize(text: String, sanitizePhi: Boolean): String {
-        return if (sanitizePhi) sanitizePhi(text) else text
-    }
-
-    private fun maybeSanitizeDetail(key: String, value: String, sanitizePhi: Boolean): String {
-        if (!sanitizePhi) return value
-        val lk = key.lowercase(Locale.US)
-        if (lk.contains("patient") || lk.contains("пациент") || lk.contains("birth") || lk.contains("0010,")) {
-            return "*** ANONYMIZED ***"
-        }
-        return sanitizePhi(value)
-    }
 }

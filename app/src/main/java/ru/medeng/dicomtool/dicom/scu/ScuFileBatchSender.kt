@@ -255,7 +255,8 @@ internal class ScuFileBatchSender(private val logger: PersistentDicomTechnicalLo
                         if (cancelled) "Отменено до отправки" else "Не отправлен: ассоциация недоступна")
                 }
                 event(DicomLogCategory.SERVER_LIFECYCLE, "[SCU] Ассоциация завершена после cleanup",
-                    mapOf("SCU Association Complete" to "true", "SCU Cancellation" to cancelled.toString()))
+                    mapOf("SCU Association Complete" to "true", "SCU Cancellation" to cancelled.toString(),
+                        "Expected File Outcomes" to results.filterNotNull().count { it.sessionUid == session.sessionUid }.toString()))
             }
         }
         snapshot.indices.filter { results[it] == null }.forEach { finish(it,
@@ -277,7 +278,8 @@ internal class ScuFileBatchSender(private val logger: PersistentDicomTechnicalLo
         }
         val summary = "$title. Успешно: $success, предупреждений: $warning, ошибок: $failure, пропущено: $skipped, отменено до отправки: $cancelledCount, неизвестно: $unknown; всего: ${terminal.size}." +
             if (closureWarnings.isEmpty()) "" else " Предупреждение завершения: ${closureWarnings.joinToString("; ")}."
-        event(DicomLogCategory.SERVER_LIFECYCLE, "[SCU] Итог пакета: $summary", mapOf("SCU Batch Complete" to "true", "SCU Cancellation" to cancelled.toString()))
+        event(DicomLogCategory.SERVER_LIFECYCLE, "[SCU] Итог пакета: $summary", mapOf("SCU Batch Complete" to "true", "SCU Cancellation" to cancelled.toString(),
+            "Expected File Outcomes" to terminal.count { it.sessionUid == session.sessionUid }.toString()))
         return ScuBatchOperationResult(session.displayLabel, terminal.size, success, warning, failure,
             (System.nanoTime() - started) / 1_000_000, summary, cancelled, skipped, cancelledCount, unknown, terminal, closureWarnings)
     }

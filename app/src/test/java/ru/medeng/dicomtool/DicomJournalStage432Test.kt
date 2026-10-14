@@ -365,7 +365,7 @@ class DicomJournalStage432Test {
         val sanitizedText = DicomLogExportUtils.formatSingleEvent(entry, sanitizePhi = true)
         assertFalse("Обезличенный экспорт НЕ должен содержать ФИО", sanitizedText.contains("Иванов И.И."))
         assertFalse("Обезличенный экспорт НЕ должен содержать 19800512", sanitizedText.contains("19800512"))
-        assertTrue("Должна присутствовать маска анонимизации", sanitizedText.contains("ANONYMIZED") || sanitizedText.contains("********"))
+        assertTrue("Безопасная сводка использует закрытую схему", sanitizedText.contains("только разрешённые поля"))
     }
 
     @Test

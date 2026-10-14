@@ -74,6 +74,7 @@ class DicomScpStage2IntegrationTest {
         scpServer.stopServer()
         scuExecutor.shutdownNow()
         scuScheduled.shutdownNow()
+        logger.shutdown()
         tempRootDir.deleteRecursively()
     }
 
@@ -259,12 +260,15 @@ class DicomScpStage2IntegrationTest {
         assertFalse("PatientName must not leak into technical log", allLogStrings.any { it.contains("IVANOV^IVAN") })
 
         // Проверяем перезагрузку журнала с диска и сохранение журнала при полной очистке исследований
+        assertTrue("Observed events must cross the background writer barrier", logger.flushPendingWrites())
         val reloadedLogger = PersistentDicomTechnicalLogger(logFile)
-        assertEquals(logEntries.size, reloadedLogger.logsFlow.value.size)
+        assertTrue("Every observed event must reload; later connection callbacks may add more",
+            reloadedLogger.logsFlow.value.map { it.id }.containsAll(logEntries.map { it.id }))
 
         repository.clearAllStudies()
         assertEquals(0, repository.studiesFlow.value.size)
         assertTrue("Clearing studies must NOT delete technical logs", reloadedLogger.logsFlow.value.isNotEmpty())
+        reloadedLogger.shutdown()
     }
 
     private fun performCEcho(callingAe: String, calledAe: String, host: String, port: Int): Int {

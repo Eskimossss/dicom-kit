@@ -254,6 +254,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     // Состояние раздела «Журнал DICOM» (Этап 4.3.2: Краткий и Подробный режимы, фильтрация, поиск)
     val logs: StateFlow<List<DicomLogEntry>> = technicalLogger.logsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val loggerHealth = technicalLogger.healthFlow
 
     private val _logDisplayMode = MutableStateFlow(DicomLogDisplayMode.BRIEF)
     val logDisplayMode: StateFlow<DicomLogDisplayMode> = _logDisplayMode.asStateFlow()
@@ -1357,9 +1358,11 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun clearAllLogs() {
-        technicalLogger.clearLogs()
-        _expandedLogIds.value = emptySet()
-        _expandedSessionKeys.value = emptySet()
+        viewModelScope.launch {
+            val cleared = withContext(Dispatchers.IO) { technicalLogger.clearLogsAndWait() }
+            if (cleared) { _expandedLogIds.value = emptySet(); _expandedSessionKeys.value = emptySet() }
+            Toast.makeText(appContext, if (cleared) "Журнал очищен" else "Очистка журнала не подтверждена; проверьте состояние logger", Toast.LENGTH_LONG).show()
+        }
     }
 
     // --- Действия раздела «DICOM-теги» (Этап 4.1) ---

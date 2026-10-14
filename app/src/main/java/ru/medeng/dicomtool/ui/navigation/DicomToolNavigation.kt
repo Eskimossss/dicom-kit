@@ -96,6 +96,7 @@ fun DicomToolAppRoot(
     val aeTitleInput by viewModel.aeTitleInput.collectAsState()
     val portInput by viewModel.portInput.collectAsState()
     val dcm4cheReport by viewModel.dcm4cheReport.collectAsState()
+    val loggerHealth by viewModel.loggerHealth.collectAsState()
     val studies by viewModel.studies.collectAsState()
     val selectedModality by viewModel.selectedModalityFilter.collectAsState()
     val selectedStudyUid by viewModel.selectedStudyUid.collectAsState()
@@ -443,7 +444,8 @@ fun DicomToolAppRoot(
                                     onToggleAutoScroll = viewModel::toggleAutoScrollLogs,
                                     onToggleSessionExpand = viewModel::toggleSessionExpanded,
                                     onToggleLogExpand = viewModel::toggleLogExpanded,
-                                    onClearLogsConfirmed = viewModel::clearAllLogs
+                                    onClearLogsConfirmed = viewModel::clearAllLogs,
+                                    loggerHealth = loggerHealth
                                 )
                             }
                         }

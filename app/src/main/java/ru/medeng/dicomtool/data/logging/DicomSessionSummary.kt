@@ -134,7 +134,11 @@ object DicomSessionGrouper {
 
         for (entry in rawEntries) {
             val key: String
-            if (entry.sessionUid.isNotBlank()) {
+            if (entry.sessionUid.isNotBlank() && (entry.sessionUid == entry.associationId ||
+                    entry.sessionUid.matches(Regex("(?:SCU|SCP|ASSOC)-[0-9]+")))) {
+                // A short display label in legacy TSV is not a globally unique session identity.
+                key = "LEGACY-UNPROVEN-${entry.id}-${++legacyCounter}"
+            } else if (entry.sessionUid.isNotBlank()) {
                 key = entry.sessionUid
             } else {
                 // Старые записи (до этапа 4.3.1): безопасное разбиение без ложного слияния разных сеансов
@@ -544,6 +548,15 @@ object DicomSessionGrouper {
         primaryOp: String,
         files: List<TransferredFileItem>
     ): Triple<SessionOutcomeStatus, String, String> {
+        val single = events.singleOrNull()
+        if (single != null && single.sessionUid == single.associationId &&
+            single.category in listOf(DicomLogCategory.C_STORE_RSP, DicomLogCategory.C_ECHO_RSP)) {
+            val code = DicomDiagnosticHandbook.extractStatusCode(single)
+            val status = when (code) { null -> SessionOutcomeStatus.UNKNOWN; 0 -> SessionOutcomeStatus.SUCCESS
+                in 0xB000..0xBFFF -> SessionOutcomeStatus.WARNING; else -> SessionOutcomeStatus.FAILURE }
+            return Triple(status, "Зафиксирован ${single.category.name}: ${code?.let { "0x%04X".format(it) } ?: "статус неизвестен"}",
+                "Старый журнал: связь с другими событиями не установлена по одной короткой метке")
+        }
         if (role == "SCU" && events.any { it.technicalDetails.containsKey("SCU File Result") || it.technicalDetails.containsKey("SCU Batch Complete") }) {
             val complete = events.any { it.technicalDetails["SCU Association Complete"] == "true" || it.technicalDetails["SCU Batch Complete"] == "true" }
             if (!complete) return Triple(SessionOutcomeStatus.IN_PROGRESS, "Передача выполняется", "Ожидается завершение операции и cleanup")
@@ -551,9 +564,13 @@ object DicomSessionGrouper {
             val unknown = files.count { it.scuOutcome == "UNCONFIRMED" }
             val successful = files.count { it.isSuccess || it.scuOutcome == "WARNING" }
             val failure = files.count { it.isError }
+            val expected = events.lastOrNull { it.technicalDetails.containsKey("Expected File Outcomes") }
+                ?.technicalDetails?.get("Expected File Outcomes")?.toIntOrNull()
             val subtitle = "Подтверждено: $successful, ошибок/пропущено: $failure, неизвестно: $unknown, всего: ${files.size}"
             return when {
                 cancelled -> Triple(SessionOutcomeStatus.UNKNOWN, "Передача отменена", subtitle)
+                expected == null || expected != files.size -> Triple(SessionOutcomeStatus.UNKNOWN,
+                    "Полнота сеанса не подтверждена", "${subtitle}. Выборка может не содержать все события; ответы отдельных файлов сохранены.")
                 unknown > 0 -> Triple(SessionOutcomeStatus.UNKNOWN, "Результат на PACS неизвестен", subtitle)
                 events.any { it.technicalDetails["SCU Closure Warning"] == "true" } && successful == files.size ->
                     Triple(SessionOutcomeStatus.WARNING, "Передача подтверждена, ошибка завершения соединения", subtitle)
