@@ -235,6 +235,8 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
 
     private var scanJob: Job? = null
     private var sendJob: Job? = null
+    private var sendCancellation: ru.medeng.dicomtool.dicom.scu.ScuCancellation? = null
+    @Volatile private var scanGeneration = 0L
 
     private val _freehandStrokes = MutableStateFlow<List<FreehandStroke>>(emptyList())
     val freehandStrokes: StateFlow<List<FreehandStroke>> = _freehandStrokes.asStateFlow()
@@ -1038,6 +1040,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun addCandidateFilesFromUris(uris: List<Uri>) {
+        if (_batchProgress.value.isSending) return
         if (uris.isEmpty()) return
         viewModelScope.launch(Dispatchers.IO) {
             val inspected = uris.map { uri ->
@@ -1053,34 +1056,35 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun scanCandidateFolder(treeUri: Uri) {
+        if (_batchProgress.value.isSending) return
         scanJob?.cancel()
+        val generation = ++scanGeneration
         _batchProgress.value = ScuBatchProgressState(isScanning = true, summaryMessageRu = "Сканирование каталога...")
         scanJob = viewModelScope.launch(Dispatchers.IO) {
-            val found = DicomFileScanner.scanTreeFolder(
-                context = appContext,
-                treeUri = treeUri,
-                onProgress = { scanned, foundCount, currentFolder ->
-                    _batchProgress.update {
-                        it.copy(
-                            isScanning = true,
-                            scannedCount = scanned,
-                            totalFiles = foundCount,
-                            summaryMessageRu = "Сканирование: проверено $scanned файлов (найдено DICOM: $foundCount)..."
-                        )
+            val ownJob = coroutineContext[Job]!!
+            try {
+                val found = DicomFileScanner.scanTreeFolder(appContext, treeUri,
+                    onProgress = { scanned, foundCount, _ ->
+                        if (generation == scanGeneration && ownJob.isActive) _batchProgress.update {
+                            it.copy(scannedCount = scanned, totalFiles = foundCount,
+                                summaryMessageRu = "Сканирование: проверено $scanned файлов (найдено DICOM: $foundCount)...")
+                        }
+                    }, isCancelled = { !ownJob.isActive })
+                withContext(Dispatchers.Main) {
+                    if (generation == scanGeneration && ownJob.isActive) {
+                        _candidateFiles.update { current ->
+                            val existing = current.map { it.uri }.toSet()
+                            current + found.filter { it.uri !in existing }
+                        }
+                        _batchProgress.update { it.copy(summaryMessageRu = "Сканирование завершено: найдено ${found.size} DICOM-файлов.") }
                     }
-                },
-                isCancelled = { scanJob?.isCancelled == true }
-            )
-            withContext(Dispatchers.Main) {
-                _candidateFiles.update { current ->
-                    val existingUris = current.map { it.uri }.toSet()
-                    current + found.filter { it.uri !in existingUris }
                 }
-                _batchProgress.update {
-                    it.copy(
-                        isScanning = false,
-                        summaryMessageRu = "Сканирование завершено: найдено ${found.size} DICOM-файлов."
-                    )
+            } finally {
+                withContext(kotlinx.coroutines.NonCancellable + Dispatchers.Main) {
+                    if (generation == scanGeneration) {
+                        _batchProgress.update { it.copy(isScanning = false,
+                            summaryMessageRu = if (!ownJob.isActive) "Сканирование отменено; чтение завершено." else it.summaryMessageRu) }; scanJob = null
+                    }
                 }
             }
         }
@@ -1088,11 +1092,10 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun cancelFolderScan() {
         scanJob?.cancel()
-        scanJob = null
-        _batchProgress.update { it.copy(isScanning = false, summaryMessageRu = "Сканирование отменено.") }
+        _batchProgress.update { it.copy(summaryMessageRu = "Запрошена отмена сканирования; ожидается завершение чтения.") }
     }
-
     fun removeCandidateFile(fileId: String) {
+        if (_batchProgress.value.isSending) return
         _candidateFiles.update { current -> current.filter { it.id != fileId } }
     }
 
@@ -1103,94 +1106,78 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun cancelBatchSend() {
-        _batchProgress.update { it.copy(isCancelled = true) }
-        sendJob?.cancel()
+        if (!_batchProgress.value.isSending) return
+        _batchProgress.update { it.copy(summaryMessageRu = "Запрошена отмена; ожидается освобождение сетевых ресурсов.") }
+        sendCancellation?.request()
     }
 
     fun triggerCStoreFileBatch() {
-        val filesToSend = _candidateFiles.value
-        val validFiles = filesToSend.filter { it.isValidDicom }
-        if (validFiles.isEmpty()) return
-        if (_batchProgress.value.isSending) return
-
+        if (_scuConfig.value.isOperationInProgress || _batchProgress.value.isSending ||
+            _batchProgress.value.isScanning || sendJob?.isActive == true) return
+        val files = _candidateFiles.value.filter { it.isValidDicom }.toList()
+        if (files.isEmpty()) return
         val snapshot = _scuConfig.value
-        _batchProgress.value = ScuBatchProgressState(
-            isSending = true,
-            totalFiles = validFiles.size,
-            currentIndex = 0,
-            currentFileName = validFiles.firstOrNull()?.fileName,
-            summaryMessageRu = "Отправка ${validFiles.size} файлов на ${snapshot.remoteIp}:${snapshot.remotePort}..."
-        )
-
-        _scuConfig.update {
-            it.copy(
-                isOperationInProgress = true,
-                activeOperationName = "C-STORE (${validFiles.size} файлов)",
-                lastStatusTitle = "Отправка пакета файлов...",
-                lastStatusMessage = "Передача ${validFiles.size} DICOM-файлов на ${snapshot.remoteIp}:${snapshot.remotePort}...",
-                isLastOperationSuccess = null,
-                isLastOperationWarning = false
-            )
-        }
-
-        // Сбрасываем статусы файлов перед отправкой
-        _candidateFiles.update { current ->
-            current.map { file ->
-                if (file.isValidDicom) file.copy(sendStatus = FileSendStatus.PENDING, sendErrorMessage = null)
-                else file
-            }
-        }
-
+        val cancellation = ru.medeng.dicomtool.dicom.scu.ScuCancellation()
+        sendCancellation = cancellation
+        _batchProgress.value = ScuBatchProgressState(isSending = true, totalFiles = files.size,
+            summaryMessageRu = "Подготовка отправки ${files.size} файлов...")
+        _scuConfig.update { it.copy(isOperationInProgress = true, activeOperationName = "C-STORE",
+            lastStatusTitle = "Передача файлов", isLastOperationSuccess = null, isLastOperationWarning = false) }
+        _candidateFiles.update { list -> list.map { file ->
+            if (files.any { it.id == file.id }) file.copy(sendStatus = FileSendStatus.PENDING, sendErrorMessage = null) else file
+        } }
         sendJob = viewModelScope.launch(Dispatchers.IO) {
-            val result = scuClient.performCStoreFileBatch(
-                context = appContext,
-                remoteHost = snapshot.remoteIp,
-                remotePort = snapshot.remotePort,
-                callingAeTitle = snapshot.callingAeTitle,
-                calledAeTitle = snapshot.calledAeTitle,
-                files = validFiles,
-                onFileProgress = { fileIndex, file, status, errorMsg ->
-                    _batchProgress.update { prog ->
-                        prog.copy(
-                            currentIndex = fileIndex + 1,
-                            currentFileName = file.fileName,
-                            sentSuccessCount = if (status == FileSendStatus.SUCCESS) prog.sentSuccessCount + 1 else prog.sentSuccessCount,
-                            sentWarningCount = if (status == FileSendStatus.WARNING) prog.sentWarningCount + 1 else prog.sentWarningCount,
-                            failedCount = if (status == FileSendStatus.FAILED) prog.failedCount + 1 else prog.failedCount
-                        )
-                    }
-                    _candidateFiles.update { list ->
-                        list.map { item ->
-                            if (item.id == file.id) {
-                                item.copy(sendStatus = status, sendErrorMessage = errorMsg)
-                            } else item
-                        }
-                    }
-                },
-                isCancelled = { _batchProgress.value.isCancelled }
-            )
-
-            withContext(Dispatchers.Main) {
-                _batchProgress.update {
-                    it.copy(
-                        isSending = false,
-                        summaryMessageRu = result.summaryMessageRu
-                    )
+            val ownJob = coroutineContext[Job]!!
+            try {
+                val result = scuClient.performCStoreFileBatch(appContext, snapshot.remoteIp, snapshot.remotePort,
+                    snapshot.callingAeTitle, snapshot.calledAeTitle, files,
+                    onFileProgress = { index, file, status, message ->
+                        _candidateFiles.update { list -> list.map {
+                            if (it.id == file.id) it.copy(sendStatus = status, sendErrorMessage = message) else it
+                        } }
+                        val outcomes = _candidateFiles.value.filter { candidate -> files.any { it.id == candidate.id } }
+                        _batchProgress.update { it.copy(currentIndex = index + 1, currentFileName = file.fileName,
+                            sentSuccessCount = outcomes.count { f -> f.sendStatus == FileSendStatus.SUCCESS },
+                            sentWarningCount = outcomes.count { f -> f.sendStatus == FileSendStatus.WARNING },
+                            failedCount = outcomes.count { f -> f.sendStatus == FileSendStatus.FAILED },
+                            skippedCount = outcomes.count { f -> f.sendStatus == FileSendStatus.SKIPPED },
+                            cancelledCount = outcomes.count { f -> f.sendStatus == FileSendStatus.CANCELLED },
+                            unconfirmedCount = outcomes.count { f -> f.sendStatus == FileSendStatus.UNCONFIRMED }) }
+                    }, isCancelled = { !ownJob.isActive || cancellation.isRequested }, cancellation = cancellation)
+                withContext(kotlinx.coroutines.NonCancellable + Dispatchers.Main) {
+                    _batchProgress.update { it.copy(summaryMessageRu = result.summaryMessageRu,
+                        sentSuccessCount = result.successCount, sentWarningCount = result.warningCount,
+                        failedCount = result.failedCount, skippedCount = result.skippedCount,
+                        cancelledCount = result.cancelledCount, unconfirmedCount = result.unconfirmedCount,
+                        isCancelled = result.isCancelled) }
+                    val confirmed = !result.isCancelled && result.totalFiles > 0 &&
+                        result.successCount + result.warningCount == result.totalFiles
+                    _scuConfig.update { it.copy(lastStatusTitle = when {
+                        result.isCancelled -> "Передача отменена"
+                        result.unconfirmedCount > 0 -> "Есть неизвестные результаты"
+                        confirmed && result.warningCount == 0 -> "Все файлы успешно отправлены"
+                        confirmed -> "Передача с предупреждениями"
+                        else -> "Пакет завершён с ошибками"
+                    }, lastStatusMessage = result.summaryMessageRu, isLastOperationSuccess = confirmed,
+                        isLastOperationWarning = result.warningCount > 0 || result.unconfirmedCount > 0 || result.closureWarnings.isNotEmpty() ||
+                            (!confirmed && result.successCount > 0)) }
                 }
-                _scuConfig.update {
-                    it.copy(
-                        isOperationInProgress = false,
-                        activeOperationName = null,
-                        lastStatusTitle = if (result.failedCount == 0 && result.warningCount == 0) "Исследование успешно отправлено" else if (result.failedCount == 0) "Исследование отправлено с предупреждениями" else "Пакет завершён с ошибками",
-                        lastStatusMessage = result.summaryMessageRu,
-                        isLastOperationSuccess = result.failedCount == 0,
-                        isLastOperationWarning = result.warningCount > 0 && result.failedCount == 0
-                    )
+            } catch (e: Exception) {
+                withContext(kotlinx.coroutines.NonCancellable + Dispatchers.Main) {
+                    _batchProgress.update { it.copy(summaryMessageRu = "Передача завершена без полного результата: ${e.message}") }
+                    _scuConfig.update { it.copy(isLastOperationSuccess = false, lastStatusTitle = "Передача не подтверждена",
+                        lastStatusMessage = "Результаты на PACS могут быть неизвестны: ${e.message}") }
+                }
+            } finally {
+                cancellation.request()
+                withContext(kotlinx.coroutines.NonCancellable + Dispatchers.Main) {
+                    _batchProgress.update { it.copy(isSending = false) }
+                    _scuConfig.update { it.copy(isOperationInProgress = false, activeOperationName = null) }
+                    sendCancellation = null; sendJob = null
                 }
             }
         }
     }
-
     // --- Действия раздела «Хранилище DICOM и SAF» ---
 
 
@@ -1433,6 +1420,8 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     override fun onCleared() {
+        sendCancellation?.request()
+        scanJob?.cancel()
         super.onCleared()
         renderJob?.cancel()
         frameCache.clear()

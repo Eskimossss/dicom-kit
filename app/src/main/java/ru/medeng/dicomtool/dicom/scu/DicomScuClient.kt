@@ -4,8 +4,6 @@ import android.content.Context
 import org.dcm4che3.data.Attributes
 import org.dcm4che3.data.Tag
 import org.dcm4che3.data.UID
-import org.dcm4che3.io.DicomInputStream
-import org.dcm4che3.io.DicomOutputStream
 import org.dcm4che3.net.ApplicationEntity
 import org.dcm4che3.net.Association
 import org.dcm4che3.net.Connection
@@ -30,7 +28,6 @@ import ru.medeng.dicomtool.domain.model.DicomLogCategory
 import ru.medeng.dicomtool.domain.model.DicomTrafficDirection
 import ru.medeng.dicomtool.domain.model.FileSendStatus
 import ru.medeng.dicomtool.domain.model.ScuCandidateFile
-import java.io.BufferedInputStream
 import java.io.EOFException
 import java.io.File
 import java.io.IOException
@@ -140,7 +137,12 @@ data class ScuBatchOperationResult(
     val failedCount: Int,
     val durationMs: Long,
     val summaryMessageRu: String,
-    val isCancelled: Boolean
+    val isCancelled: Boolean,
+    val skippedCount: Int = 0,
+    val cancelledCount: Int = 0,
+    val unconfirmedCount: Int = 0,
+    val fileResults: List<ScuFileResult> = emptyList(),
+    val closureWarnings: List<String> = emptyList()
 )
 
 
@@ -635,6 +637,7 @@ class DicomScuClient(
                 acceptTimeout = DEFAULT_ACCEPT_TIMEOUT_MS
                 requestTimeout = DEFAULT_REQUEST_TIMEOUT_MS
                 responseTimeout = DEFAULT_RESPONSE_TIMEOUT_MS
+                sendTimeout = DEFAULT_RESPONSE_TIMEOUT_MS
                 releaseTimeout = DEFAULT_RELEASE_TIMEOUT_MS
             }
             val localAe = ApplicationEntity(callingAe).apply {
@@ -852,7 +855,7 @@ class DicomScuClient(
                 technicalDetails = linkedMapOf(
                     "Роль" to "SCU",
                     "DIMSE Command" to "C-ECHO-RSP (8030H)",
-                    "Message ID Responded To" to respMsgId.toString(),
+                    "Message ID Being Responded To" to respMsgId.toString(),
                     "Affected SOP Class UID" to (rspCmd.getString(Tag.AffectedSOPClassUID) ?: UID.Verification),
                     "DIMSE Status" to eval.statusHex,
                     "Описание статуса" to eval.descriptionRu,
@@ -983,6 +986,7 @@ class DicomScuClient(
                 acceptTimeout = DEFAULT_ACCEPT_TIMEOUT_MS
                 requestTimeout = DEFAULT_REQUEST_TIMEOUT_MS
                 responseTimeout = DEFAULT_RESPONSE_TIMEOUT_MS
+                sendTimeout = DEFAULT_RESPONSE_TIMEOUT_MS
                 releaseTimeout = DEFAULT_RELEASE_TIMEOUT_MS
             }
             val localAe = ApplicationEntity(callingAe).apply {
@@ -1254,7 +1258,7 @@ class DicomScuClient(
                 technicalDetails = linkedMapOf(
                     "Роль" to "SCU",
                     "DIMSE Command" to "C-STORE-RSP (8001H)",
-                    "Message ID Responded To" to respMsgId.toString(),
+                    "Message ID Being Responded To" to respMsgId.toString(),
                     "Affected SOP Class UID" to (rspCmd.getString(Tag.AffectedSOPClassUID) ?: sopClassUid),
                     "Affected SOP Instance UID" to (rspCmd.getString(Tag.AffectedSOPInstanceUID) ?: sopInstanceUid),
                     "Study Instance UID" to studyInstanceUid,
@@ -1370,7 +1374,7 @@ class DicomScuClient(
      * - При необходимости разбивает отправку на несколько ассоциаций, если количество контекстов превышает 128.
      * - Потоково передаёт файлы через DataWriter без загрузки массивов Pixel Data в оперативную память.
      * - Не прерывает очередь при ошибке отдельного файла: продолжает отправку остальных при сохранении связи.
-     * - Поддерживает безопасную отмену очереди пользователем (A-RELEASE) с сохранением уже переданных файлов.
+     * - Отмена закрывает транспорт текущего запуска; подтверждённые RSP сохраняются, in-flight без RSP остаётся неизвестным.
      */
     fun performCStoreFileBatch(
         context: Context,
@@ -1379,560 +1383,18 @@ class DicomScuClient(
         callingAeTitle: String,
         calledAeTitle: String,
         files: List<ScuCandidateFile>,
-        onFileProgress: (fileIndex: Int, file: ScuCandidateFile, status: FileSendStatus, errorMessage: String?) -> Unit,
+        onFileProgress: (Int, ScuCandidateFile, FileSendStatus, String?) -> Unit,
         isCancelled: () -> Boolean,
-        connectTimeoutMs: Int = DEFAULT_CONNECT_TIMEOUT_MS
-    ): ScuBatchOperationResult {
-        val overallStartNs = System.nanoTime()
-        val host = remoteHost.trim()
-        val callingAe = callingAeTitle.trim()
-        val calledAe = calledAeTitle.trim()
-        val endpoint = "$host:$remotePort"
-
-        val validFiles = files.filter { it.isValidDicom && !it.sopClassUid.isNullOrBlank() && !it.sopInstanceUid.isNullOrBlank() }
-        val totalFiles = validFiles.size
-
-        if (totalFiles == 0) {
-            val session = DicomSessionManager.nextScuSession()
-            val emptyAssocId = session.displayLabel
-            val sessionUid = session.sessionUid
-            val msg = "В очереди отсутствуют валидные DICOM-файлы для отправки."
-            logger.recordTechnicalEvent(
-                category = DicomLogCategory.NETWORK_ERROR,
-                direction = DicomTrafficDirection.LOCAL,
-                associationId = emptyAssocId,
-                title = "[SCU] Очередь пуста",
-                summaryLines = listOf(msg),
-                isError = true,
-                sessionUid = sessionUid
-            )
-            return ScuBatchOperationResult(
-                associationId = emptyAssocId,
-                totalFiles = 0,
-                successCount = 0,
-                warningCount = 0,
-                failedCount = 0,
-                durationMs = 0L,
-                summaryMessageRu = msg,
-                isCancelled = false
-            )
-        }
-
-        var globalSuccessCount = 0
-        var globalWarningCount = 0
-        var globalFailedCount = 0
-        var globalCancelled = false
-        var lastAssocId = "SCU-0"
-        var lastSessionUid = ""
-
-        // Группируем файлы в батчи, чтобы в одной ассоциации было не более 128 Presentation Contexts (DICOM max = 128 odd IDs 1..255)
-        val fileBatches = mutableListOf<List<ScuCandidateFile>>()
-        var currentBatch = mutableListOf<ScuCandidateFile>()
-        val currentPairs = mutableSetOf<Pair<String, String>>()
-
-        for (file in validFiles) {
-            val pair = Pair(file.sopClassUid!!, file.transferSyntaxUid ?: UID.ExplicitVRLittleEndian)
-            if (!currentPairs.contains(pair) && currentPairs.size >= 120) {
-                // Превышен лимит контекстов представления для одной ассоциации — начинаем новый батч
-                fileBatches.add(currentBatch)
-                currentBatch = mutableListOf(file)
-                currentPairs.clear()
-                currentPairs.add(pair)
-            } else {
-                currentBatch.add(file)
-                currentPairs.add(pair)
-            }
-        }
-        if (currentBatch.isNotEmpty()) {
-            fileBatches.add(currentBatch)
-        }
-
-        var globalIndex = 0
-
-        for ((batchIndex, batchFiles) in fileBatches.withIndex()) {
-            if (isCancelled()) {
-                globalCancelled = true
-                break
-            }
-
-            val session = DicomSessionManager.nextScuSession()
-            val assocId = session.displayLabel
-            val sessionUid = session.sessionUid
-            lastAssocId = assocId
-            lastSessionUid = sessionUid
-
-            val validationErr = validateEndpointParameters(host, remotePort, callingAe, calledAe, "C-STORE", assocId, sessionUid)
-            if (validationErr != null) {
-                for (file in batchFiles) {
-                    onFileProgress(globalIndex++, file, FileSendStatus.FAILED, validationErr.userMessageRu)
-                    globalFailedCount++
-                }
-                continue
-            }
-
-            // Уникальные пары (SOP Class UID, Transfer Syntax UID) для текущего батча
-            val distinctContexts = batchFiles.map {
-                Pair(it.sopClassUid!!, it.transferSyntaxUid ?: UID.ExplicitVRLittleEndian)
-            }.distinct()
-
-            val pcIdMap = mutableMapOf<Pair<String, String>, Int>()
-            var nextPcId = 1
-            for (pair in distinctContexts) {
-                pcIdMap[pair] = nextPcId
-                nextPcId += 2
-            }
-
-            val executor = Executors.newSingleThreadExecutor()
-            val scheduledExecutor = Executors.newSingleThreadScheduledExecutor()
-            var association: Association? = null
-
-            try {
-                val device = Device("dicomtool-scu")
-                val localConn = Connection().apply {
-                    connectTimeout = connectTimeoutMs
-                    acceptTimeout = DEFAULT_ACCEPT_TIMEOUT_MS
-                    requestTimeout = DEFAULT_REQUEST_TIMEOUT_MS
-                    responseTimeout = DEFAULT_RESPONSE_TIMEOUT_MS
-                    releaseTimeout = DEFAULT_RELEASE_TIMEOUT_MS
-                }
-                val localAe = ApplicationEntity(callingAe).apply {
-                    isAssociationInitiator = true
-                    isAssociationAcceptor = false
-                    addConnection(localConn)
-                }
-                device.addConnection(localConn)
-                device.addApplicationEntity(localAe)
-                device.executor = executor
-                device.scheduledExecutor = scheduledExecutor
-
-                val remoteConn = Connection().apply {
-                    hostname = host
-                    port = remotePort
-                }
-
-                // 1. Логируем попытку установки TCP-соединения
-                logger.recordTechnicalEvent(
-                    category = DicomLogCategory.TCP_CONNECT,
-                    direction = DicomTrafficDirection.OUTBOUND,
-                    associationId = assocId,
-                    title = "[SCU] Установка TCP-соединения с $endpoint (Пакет C-STORE ${batchIndex + 1}/${fileBatches.size})",
-                    summaryLines = listOf(
-                        "Calling AE: $callingAe → Called AE: $calledAe",
-                        "Файлов в пакете: ${batchFiles.size}, контекстов представления: ${distinctContexts.size}"
-                    ),
-                    technicalDetails = linkedMapOf(
-                        "Роль" to "SCU",
-                        "Направление" to "OUT (Исходящее)",
-                        "Remote Socket" to endpoint,
-                        "Удалённый хост" to host,
-                        "TCP Порт" to remotePort.toString(),
-                        "Calling AE Title" to callingAe,
-                        "Called AE Title" to calledAe,
-                        "Всего файлов в очереди" to totalFiles.toString(),
-                        "Файлов в текущей ассоциации" to batchFiles.size.toString()
-                    ),
-                    sessionUid = sessionUid
-                )
-
-                // 2. Формируем A-ASSOCIATE-RQ со всеми необходимыми Presentation Contexts
-                val rq = AAssociateRQ().apply {
-                    callingAET = callingAe
-                    calledAET = calledAe
-                    for ((pair, pcId) in pcIdMap) {
-                        addPresentationContext(
-                            PresentationContext(
-                                pcId,
-                                pair.first, // SOP Class UID
-                                pair.second // Transfer Syntax UID
-                            )
-                        )
-                    }
-                }
-
-                logger.recordTechnicalEvent(
-                    category = DicomLogCategory.ASSOCIATE_RQ,
-                    direction = DicomTrafficDirection.OUTBOUND,
-                    associationId = assocId,
-                    title = "[SCU] Отправка A-ASSOCIATE-RQ ($callingAe → $calledAe)",
-                    summaryLines = listOf(
-                        "Предложено контекстов представления: ${distinctContexts.size}",
-                        "SOP Classes: ${distinctContexts.map { it.first }.distinct().joinToString()}"
-                    ),
-                    technicalDetails = linkedMapOf(
-                        "Роль" to "SCU",
-                        "PDU" to "A-ASSOCIATE-RQ (01H)",
-                        "Remote Socket" to endpoint,
-                        "Calling AE Title" to callingAe,
-                        "Called AE Title" to calledAe,
-                        "Контекстов представления" to distinctContexts.size.toString(),
-                        "SOP Classes" to distinctContexts.map { it.first }.distinct().joinToString(", "),
-                        "Transfer Syntaxes" to distinctContexts.map { it.second }.distinct().joinToString(", ")
-                    ),
-                    sessionUid = sessionUid
-                )
-
-                // 3. Открываем TCP-соединение и согласуем ассоциацию
-                association = localAe.connect(localConn, remoteConn, rq)
-                val ac: AAssociateAC = association.aAssociateAC
-
-                logger.recordTechnicalEvent(
-                    category = DicomLogCategory.ASSOCIATE_AC,
-                    direction = DicomTrafficDirection.INBOUND,
-                    associationId = assocId,
-                    title = "[SCU] Получен A-ASSOCIATE-AC от $endpoint",
-                    summaryLines = listOf(
-                        "Ассоциация принята узлом ${ac.calledAET} (Max PDU: ${ac.maxPDULength})"
-                    ),
-                    technicalDetails = linkedMapOf(
-                        "Роль" to "SCU",
-                        "PDU" to "A-ASSOCIATE-AC (02H)",
-                        "Remote Socket" to endpoint,
-                        "Calling AE Title" to ac.callingAET,
-                        "Called AE Title" to ac.calledAET,
-                        "Max PDU Length" to ac.maxPDULength.toString(),
-                        "Implementation Class UID" to (ac.implClassUID ?: ""),
-                        "Implementation Version" to (ac.implVersionName ?: "")
-                    ),
-                    sessionUid = sessionUid
-                )
-
-                // 4. Проверяем результаты согласования контекстов представления
-                val acceptedContextsMap = mutableMapOf<Pair<String, String>, PresentationContext>()
-                for ((pair, pcId) in pcIdMap) {
-                    val pcAc = ac.getPresentationContext(pcId)
-                    val pcResult = pcAc?.result ?: -1
-                    val acceptedTs = pcAc?.transferSyntax ?: ""
-                    val isAccepted = pcAc != null && pcAc.isAccepted
-                    val uidName = runCatching { UID.nameOf(pair.first) ?: pair.first }.getOrDefault(pair.first)
-
-                    logger.recordTechnicalEvent(
-                        category = DicomLogCategory.PRESENTATION_CONTEXT,
-                        direction = DicomTrafficDirection.INBOUND,
-                        associationId = assocId,
-                        title = if (isAccepted) {
-                            "[SCU] Presentation Context #$pcId согласован ($uidName)"
-                        } else {
-                            "[SCU] Presentation Context #$pcId отклонён (${formatPresentationContextResult(pcResult)})"
-                        },
-                        summaryLines = listOf(
-                            "Abstract Syntax: ${pair.first}",
-                            "Result: ${formatPresentationContextResult(pcResult)}",
-                            "Transfer Syntax: ${acceptedTs.ifEmpty { "не согласован" }}"
-                        ),
-                        technicalDetails = linkedMapOf(
-                            "Роль" to "SCU",
-                            "Presentation Context ID" to pcId.toString(),
-                            "Abstract Syntax UID" to pair.first,
-                            "Transfer Syntax UID" to acceptedTs.ifEmpty { "N/A" },
-                            "Result" to formatPresentationContextResult(pcResult)
-                        ),
-                        isError = !isAccepted,
-                        sessionUid = sessionUid
-                    )
-
-                    if (isAccepted) {
-                        acceptedContextsMap[pair] = pcAc
-                    }
-                }
-
-                // 5. Последовательно отправляем файлы текущей ассоциации
-                for (file in batchFiles) {
-                    if (isCancelled()) {
-                        globalCancelled = true
-                        logger.recordTechnicalEvent(
-                            category = DicomLogCategory.RELEASE_RQ,
-                            direction = DicomTrafficDirection.LOCAL,
-                            associationId = assocId,
-                            title = "[SCU] Отправка очереди отменена пользователем",
-                            summaryLines = listOf("Обработано файлов: $globalIndex из $totalFiles"),
-                            isError = false,
-                            sessionUid = sessionUid
-                        )
-                        break
-                    }
-
-                    val currentIndex = globalIndex++
-                    val pair = Pair(file.sopClassUid!!, file.transferSyntaxUid ?: UID.ExplicitVRLittleEndian)
-                    val acceptedPc = acceptedContextsMap[pair]
-
-                    if (acceptedPc == null || !acceptedPc.isAccepted) {
-                        val pcResult = ac.getPresentationContext(pcIdMap[pair] ?: -1)?.result ?: 1
-                        val reasonRu = "PACS ($endpoint) отклонил Presentation Context для SOP Class ${file.sopClassUid} и Transfer Syntax ${file.transferSyntaxUid}: ${formatPresentationContextResult(pcResult)}."
-                        logger.recordTechnicalEvent(
-                            category = DicomLogCategory.PRESENTATION_CONTEXT,
-                            direction = DicomTrafficDirection.INBOUND,
-                            associationId = assocId,
-                            title = "[SCU] Пропуск файла ${file.fileName}: отклонён контекст представления",
-                            summaryLines = listOf(
-                                reasonRu,
-                                "SOP Class: ${file.sopClassUid}",
-                                "Transfer Syntax: ${file.transferSyntaxUid ?: "N/A"}"
-                            ),
-                            technicalDetails = linkedMapOf(
-                                "Роль" to "SCU",
-                                "Файл" to file.fileName,
-                                "SOP Class UID" to (file.sopClassUid ?: ""),
-                                "Transfer Syntax UID" to (file.transferSyntaxUid ?: ""),
-                                "Причина" to reasonRu
-                            ),
-                            isError = true,
-                            sessionUid = sessionUid
-                        )
-                        onFileProgress(currentIndex, file, FileSendStatus.FAILED, reasonRu)
-                        globalFailedCount++
-                        continue
-                    }
-
-                    onFileProgress(currentIndex, file, FileSendStatus.SENDING, null)
-
-                    val messageId = association.nextMessageID()
-                    val cstoreStartNs = System.nanoTime()
-                    val transferredBytesCounter = AtomicLong(0L)
-                    val rspCmdRef = AtomicReference<Attributes?>(null)
-
-                    logger.recordTechnicalEvent(
-                        category = DicomLogCategory.C_STORE_RQ,
-                        direction = DicomTrafficDirection.OUTBOUND,
-                        associationId = assocId,
-                        title = "[SCU] Отправка C-STORE-RQ (${currentIndex + 1}/$totalFiles: ${file.fileName})",
-                        summaryLines = listOf(
-                            "SOPClassUID: ${file.sopClassUid} | Modality: ${file.modality}",
-                            "SOPInstanceUID: ${file.sopInstanceUid}",
-                            "Размер файла: ${file.fileSizeBytes / 1024} КБ"
-                        ),
-                        technicalDetails = linkedMapOf(
-                            "Роль" to "SCU",
-                            "DIMSE Command" to "C-STORE-RQ (0001H)",
-                            "Message ID" to messageId.toString(),
-                            "Remote Socket" to endpoint,
-                            "Calling AE Title" to callingAe,
-                            "Called AE Title" to calledAe,
-                            "Имя файла" to file.fileName,
-                            "Размер файла" to "${file.fileSizeBytes} байт",
-                            "Affected SOP Class UID" to file.sopClassUid,
-                            "Affected SOP Instance UID" to (file.sopInstanceUid ?: ""),
-                            "Study Instance UID" to (file.studyInstanceUid ?: "N/A"),
-                            "Series Instance UID" to (file.seriesInstanceUid ?: "N/A"),
-                            "Transfer Syntax UID" to (file.transferSyntaxUid ?: acceptedPc.transferSyntax),
-                            "Modality" to (file.modality ?: "OT")
-                        ),
-                        sessionUid = sessionUid
-                    )
-
-                    // Потоковый DataWriter без удержания Pixel Data в памяти
-                    val streamingDataWriter = object : DataWriter {
-                        override fun writeTo(out: PDVOutputStream, tsuid: String) {
-                            val uri = file.uri ?: throw IOException("Отсутствует Uri для файла ${file.fileName}")
-                            val inStream = context.contentResolver.openInputStream(uri)
-                                ?: throw IOException("Не удалось открыть поток для файла ${file.fileName}: $uri")
-
-                            val bufferedIn = BufferedInputStream(inStream, 65536)
-                            val dis = DicomInputStream(bufferedIn)
-                            try {
-                                dis.readFileMetaInformation()
-                                val buffer = ByteArray(32768)
-                                var bytesRead: Int
-                                var totalStreamed = 0L
-                                while (dis.read(buffer).also { bytesRead = it } > 0) {
-                                    out.write(buffer, 0, bytesRead)
-                                    totalStreamed += bytesRead
-                                }
-                                transferredBytesCounter.set(totalStreamed)
-                            } finally {
-                                dis.close()
-                            }
-                        }
-                    }
-
-                    val rspHandler = object : DimseRSPHandler(messageId) {
-                        override fun onDimseRSP(asAssoc: Association?, cmd: Attributes?, data: Attributes?) {
-                            super.onDimseRSP(asAssoc, cmd, data)
-                            if (cmd != null) {
-                                rspCmdRef.set(Attributes(cmd))
-                            }
-                        }
-                    }
-
-                    try {
-                        association.cstore(
-                            file.sopClassUid!!,
-                            file.sopInstanceUid!!,
-                            Priority.NORMAL,
-                            streamingDataWriter,
-                            file.transferSyntaxUid ?: acceptedPc.transferSyntax,
-                            rspHandler
-                        )
-                        association.waitForOutstandingRSP()
-
-                        val cstoreDurationMs = ((System.nanoTime() - cstoreStartNs) / 1_000_000L).coerceAtLeast(1L)
-                        val rspCmd = rspCmdRef.get()
-
-                        if (rspCmd == null) {
-                            val noRspMsg = "Байты переданы (${file.fileSizeBytes} байт), но подтверждающий ответ C-STORE-RSP от PACS ($endpoint) не был получен (таймаут ответа)."
-                            logger.recordTechnicalEvent(
-                                category = DicomLogCategory.NETWORK_ERROR,
-                                direction = DicomTrafficDirection.INBOUND,
-                                associationId = assocId,
-                                title = "[SCU] Превышено время ожидания C-STORE-RSP для ${file.fileName}",
-                                summaryLines = listOf(noRspMsg),
-                                isError = true,
-                                sessionUid = sessionUid
-                            )
-                            onFileProgress(currentIndex, file, FileSendStatus.FAILED, noRspMsg)
-                            globalFailedCount++
-                        } else {
-                            val rawStatus = rspCmd.getInt(Tag.Status, -1)
-                            val errorComment = rspCmd.getString(Tag.ErrorComment, null)
-                            val respMsgId = rspCmd.getInt(Tag.MessageIDBeingRespondedTo, messageId)
-                            val eval = evaluateDimseStatus(rawStatus, errorComment)
-
-                            logger.recordTechnicalEvent(
-                                category = DicomLogCategory.C_STORE_RSP,
-                                direction = DicomTrafficDirection.INBOUND,
-                                associationId = assocId,
-                                title = "[SCU] Получен C-STORE-RSP (${eval.statusHex}) для ${file.fileName}",
-                                summaryLines = listOf(
-                                    eval.descriptionRu,
-                                    "Передано за ${cstoreDurationMs} мс (SOPInstanceUID: ${file.sopInstanceUid})"
-                                ),
-                                technicalDetails = linkedMapOf(
-                                    "Роль" to "SCU",
-                                    "DIMSE Command" to "C-STORE-RSP (8001H)",
-                                    "Message ID Responded To" to respMsgId.toString(),
-                                    "Файл" to file.fileName,
-                                    "Affected SOP Class UID" to (rspCmd.getString(Tag.AffectedSOPClassUID) ?: file.sopClassUid!!),
-                                    "Affected SOP Instance UID" to (rspCmd.getString(Tag.AffectedSOPInstanceUID) ?: file.sopInstanceUid!!),
-                                    "DIMSE Status" to eval.statusHex,
-                                    "Описание статуса" to eval.descriptionRu,
-                                    "Длительность C-STORE" to "${cstoreDurationMs} мс"
-                                ),
-                                isError = eval.kind == ScuDimseStatusKind.FAILURE,
-                                sessionUid = sessionUid
-                            )
-
-                            when (eval.kind) {
-                                ScuDimseStatusKind.SUCCESS -> {
-                                    globalSuccessCount++
-                                    onFileProgress(currentIndex, file, FileSendStatus.SUCCESS, null)
-                                }
-                                ScuDimseStatusKind.WARNING -> {
-                                    globalWarningCount++
-                                    onFileProgress(currentIndex, file, FileSendStatus.WARNING, eval.descriptionRu)
-                                }
-                                ScuDimseStatusKind.FAILURE -> {
-                                    globalFailedCount++
-                                    onFileProgress(currentIndex, file, FileSendStatus.FAILED, eval.descriptionRu)
-                                }
-                            }
-                        }
-                    } catch (fileEx: Throwable) {
-                        val classified = classifyException(fileEx, host, remotePort, callingAe, calledAe)
-                        logger.recordTechnicalEvent(
-                            category = classified.logCategory,
-                            direction = classified.logDirection,
-                            associationId = assocId,
-                            title = "[SCU] Ошибка отправки ${file.fileName}: ${classified.category.titleRu}",
-                            summaryLines = listOf(classified.shortUserMessageRu),
-                            technicalDetails = classified.technicalDetails,
-                            isError = true,
-                            sessionUid = sessionUid
-                        )
-                        onFileProgress(currentIndex, file, FileSendStatus.FAILED, classified.shortUserMessageRu)
-                        globalFailedCount++
-
-                        // Если произошёл обрыв TCP-соединения, прекращаем текущую ассоциацию
-                        if (classified.category == ScuErrorCategory.CONNECTION_RESET ||
-                            classified.category == ScuErrorCategory.TCP_TIMEOUT ||
-                            classified.category == ScuErrorCategory.ASSOCIATION_ABORTED
-                        ) {
-                            abortQuietlyIfOpen(association)
-                            break
-                        }
-                    }
-                }
-
-                // 6. Корректное завершение ассоциации
-                releaseQuietlyWithLogs(association, assocId, endpoint, sessionUid)
-
-            } catch (t: Throwable) {
-                val classified = classifyException(t, host, remotePort, callingAe, calledAe)
-                logger.recordTechnicalEvent(
-                    category = classified.logCategory,
-                    direction = classified.logDirection,
-                    associationId = assocId,
-                    title = "[SCU] Сбой ассоциации: ${classified.category.titleRu}",
-                    summaryLines = listOf(classified.shortUserMessageRu),
-                    technicalDetails = classified.technicalDetails,
-                    isError = true,
-                    sessionUid = sessionUid
-                )
-                abortQuietlyIfOpen(association)
-                while (globalIndex < batchFiles.size) {
-                    val remainingFile = batchFiles[globalIndex]
-                    onFileProgress(globalIndex++, remainingFile, FileSendStatus.SKIPPED, "Ассоциация разорвана: ${classified.shortUserMessageRu}")
-                    globalFailedCount++
-                }
-            } finally {
-                executor.shutdownNow()
-                scheduledExecutor.shutdownNow()
-            }
-        }
-
-        val totalDurationMs = ((System.nanoTime() - overallStartNs) / 1_000_000L).coerceAtLeast(1L)
-        val distinctPatients = files.mapNotNull { file ->
-            val p = file.patientName
-            if (!p.isNullOrBlank() && p != "N/A" && p != "ANONYMOUS" && p != "-") {
-                DicomCharsetDecoder.formatDicomPersonName(p).ifBlank { p.trim() }
-            } else null
-        }.distinct()
-
-        val commonPatientName = if (distinctPatients.size == 1) distinctPatients.first() else null
-        val patientLine = if (commonPatientName != null) "Пациент: $commonPatientName\n" else ""
-        val formattedDuration = String.format(Locale.forLanguageTag("ru"), "%.1f", totalDurationMs / 1000.0)
-        val fileWord = if (totalFiles == 1) "1 файл" else "$totalFiles файлов"
-
-        val summaryRu = when {
-            globalCancelled -> "${patientLine}Отправка отменена: успешно $globalSuccessCount, ошибок $globalFailedCount из $totalFiles · $formattedDuration с"
-            globalFailedCount == 0 && globalWarningCount == 0 -> "${patientLine}$fileWord · Успешно (0x0000) · $formattedDuration с"
-            globalFailedCount == 0 -> "${patientLine}$fileWord · Успешно с предупреждениями ($globalWarningCount) · $formattedDuration с"
-            globalSuccessCount > 0 -> "${patientLine}Отправлено: успешно $globalSuccessCount, ошибок $globalFailedCount из $totalFiles · $formattedDuration с"
-            else -> "${patientLine}Сбой отправки: ошибок $globalFailedCount из $totalFiles · $formattedDuration с"
-        }
-
-        logger.recordTechnicalEvent(
-            category = DicomLogCategory.SERVER_LIFECYCLE,
-            direction = DicomTrafficDirection.LOCAL,
-            associationId = lastAssocId,
-            title = "[SCU] Итог отправки очереди DICOM-файлов",
-            summaryLines = listOf(
-                summaryRu,
-                "Всего файлов: $totalFiles | Успешно: $globalSuccessCount | Предупреждений: $globalWarningCount | Ошибок: $globalFailedCount"
-            ),
-            technicalDetails = linkedMapOf(
-                "Роль" to "SCU",
-                "Всего файлов" to totalFiles.toString(),
-                "Успешно" to globalSuccessCount.toString(),
-                "Предупреждений" to globalWarningCount.toString(),
-                "Ошибок" to globalFailedCount.toString(),
-                "Отменено" to if (globalCancelled) "Да" else "Нет",
-                "Общая длительность" to "${totalDurationMs} мс"
-            ),
-            isError = globalFailedCount > 0 && globalSuccessCount == 0,
-            sessionUid = lastSessionUid
-        )
-
-        return ScuBatchOperationResult(
-            associationId = lastAssocId,
-            totalFiles = totalFiles,
-            successCount = globalSuccessCount,
-            warningCount = globalWarningCount,
-            failedCount = globalFailedCount,
-            durationMs = totalDurationMs,
-            summaryMessageRu = summaryRu,
-            isCancelled = globalCancelled
-        )
-    }
-
+        connectTimeoutMs: Int = DEFAULT_CONNECT_TIMEOUT_MS,
+        cancellation: ScuCancellation = ScuCancellation()
+    ): ScuBatchOperationResult = ScuFileBatchSender(logger).send(
+        remoteHost.trim(), remotePort, callingAeTitle.trim(), calledAeTitle.trim(), files,
+        open = { file ->
+            val uri = file.uri ?: throw IOException("Нет URI исходного файла")
+            context.contentResolver.openInputStream(uri) ?: throw IOException("Источник недоступен")
+        }, progress = onFileProgress, cancellation = cancellation, isCancelled = isCancelled,
+        timeouts = ScuTimeouts(connect = connectTimeoutMs)
+    )
     private fun releaseQuietlyWithLogs(association: Association?, assocId: String, endpoint: String, sessionUid: String = "") {
         if (association == null) return
         try {
@@ -1951,6 +1413,7 @@ class DicomScuClient(
                     sessionUid = sessionUid
                 )
                 association.release()
+                association.waitForSocketClose()
                 logger.recordTechnicalEvent(
                     category = DicomLogCategory.RELEASE_RP,
                     direction = DicomTrafficDirection.INBOUND,
@@ -1981,7 +1444,9 @@ class DicomScuClient(
                 sessionUid = sessionUid
             )
         } finally {
-            logger.recordTechnicalEvent(
+            runCatching { association.socket.close() }
+            runCatching { association.waitForSocketClose() }
+            if (association.socket.isClosed) logger.recordTechnicalEvent(
                 category = DicomLogCategory.TCP_DISCONNECT,
                 direction = DicomTrafficDirection.LOCAL,
                 associationId = assocId,

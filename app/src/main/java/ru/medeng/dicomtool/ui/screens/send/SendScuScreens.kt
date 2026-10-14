@@ -380,7 +380,8 @@ private fun LastScuOperationResultBanner(
     val isBusy = config.isOperationInProgress || batchProgress.isSending
     val isWarning = config.isLastOperationWarning || (batchProgress.failedCount > 0 && batchProgress.sentSuccessCount > 0)
     val isSuccess = if (batchProgress.totalFiles > 0 && !batchProgress.isSending) {
-        batchProgress.failedCount == 0
+        !batchProgress.isCancelled && batchProgress.unconfirmedCount == 0 &&
+            batchProgress.sentSuccessCount + batchProgress.sentWarningCount == batchProgress.totalFiles
     } else {
         config.isLastOperationSuccess
     }
@@ -1739,8 +1740,7 @@ fun BatchSendProgressCard(
                     color = PrimaryBlue
                 )
                 Text(
-                    text = "Успешно: ${progress.sentSuccessCount} / ${progress.totalFiles}" +
-                        if (progress.failedCount > 0) ", Ошибок: ${progress.failedCount}" else "",
+                    text = "Успешно: ${progress.sentSuccessCount}, предупреждений: ${progress.sentWarningCount}, ошибок: ${progress.failedCount}, неизвестно: ${progress.unconfirmedCount}, отменено: ${progress.cancelledCount}, пропущено: ${progress.skippedCount} / ${progress.totalFiles}",
                     fontSize = 12.sp,
                     color = TextSecondarySlate
                 )
@@ -1756,7 +1756,8 @@ fun BatchSendProgressCard(
         Spacer(modifier = Modifier.height(8.dp))
 
         val fraction = if (progress.totalFiles > 0) {
-            (progress.sentSuccessCount + progress.failedCount).toFloat() / progress.totalFiles.toFloat()
+            (progress.sentSuccessCount + progress.sentWarningCount + progress.failedCount +
+                progress.skippedCount + progress.cancelledCount + progress.unconfirmedCount).toFloat() / progress.totalFiles.toFloat()
         } else {
             0f
         }
@@ -1905,6 +1906,8 @@ private fun DicomCandidateFileItemRow(
         FileSendStatus.FAILED -> ErrorRed.copy(alpha = 0.45f)
         FileSendStatus.SENDING -> PrimaryBlue
         FileSendStatus.SKIPPED -> CardBorderGray
+        FileSendStatus.CANCELLED -> CardBorderGray
+        FileSendStatus.UNCONFIRMED -> WarningAmber
         FileSendStatus.PENDING -> if (file.isValidDicom) CardBorderGray else WarningAmber.copy(alpha = 0.45f)
     }
 
@@ -1914,6 +1917,8 @@ private fun DicomCandidateFileItemRow(
         FileSendStatus.FAILED -> ErrorRed.copy(alpha = 0.08f)
         FileSendStatus.SENDING -> PrimaryBlueLight
         FileSendStatus.SKIPPED -> InputBackgroundGray
+        FileSendStatus.CANCELLED -> InputBackgroundGray
+        FileSendStatus.UNCONFIRMED -> WarningAmber.copy(alpha = 0.10f)
         FileSendStatus.PENDING -> CardSurfaceWhite
     }
 

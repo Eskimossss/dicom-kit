@@ -59,7 +59,7 @@ object DicomDiagnosticHandbook {
         ) {
             return DiagnosticRecommendation(
                 technicalName = "C-STORE-RSP Timeout / Missing Response",
-                explanationRu = "Удалённый PACS получил команду C-STORE-RQ, но не прислал подтверждение сохранения (C-STORE-RSP) до закрытия соединения или истечения сетевого таймаута.",
+                explanationRu = "Подтверждающий C-STORE-RSP не получен до закрытия соединения или истечения таймаута. Доставка команды и сохранение объекта на PACS не подтверждены; результат неизвестен.",
                 possibleCausesRu = listOf(
                     "PACS занят сохранением или перестроением базы данных и не успел отправить ответ.",
                     "Ассоциация была разорвана до получения ответа (A-ABORT или обрыв сокета).",
@@ -311,26 +311,26 @@ object DicomDiagnosticHandbook {
             )
 
             0x0001 -> DiagnosticRecommendation(
-                technicalName = "Warning: Coercion of Data Elements (0x0001)",
-                explanationRu = "PACS сохранил исследование, но изменил значения некоторых атрибутов для соответствия своей локальной модели данных.",
-                possibleCausesRu = listOf("Автоматическая коррекция Patient ID, Study UID или Specific Character Set на стороне PACS."),
-                engineerChecklistRu = listOf("Сверить атрибуты принятого на PACS файла с исходным объектом."),
+                technicalName = "Нестандартный для C-STORE статус (0x0001)",
+                explanationRu = "Этот код не является стандартным C-STORE Success или Coercion. Не следует утверждать сохранение объекта только по нему.",
+                possibleCausesRu = listOf("Особенность реализации или несоответствующий операции код ответа."),
+                engineerChecklistRu = listOf("Сверить Command Field и DICOM Conformance Statement принимающего узла."),
                 dicomStatusCodeHex = hex
             )
 
             0xB000 -> DiagnosticRecommendation(
-                technicalName = "Warning: Elements Discarded (0xB000)",
-                explanationRu = "PACS принял объект, но отбросил часть неизвестных или неподдерживаемых атрибутов.",
-                possibleCausesRu = listOf("Объект содержит нестандартные или приватные теги (Private Tags), не включённые в словарь PACS."),
-                engineerChecklistRu = listOf("Проверить, поддерживаются ли приватные теги оборудования в конфигурации архива."),
+                technicalName = "Warning: Coercion of Data Elements (0xB000)",
+                explanationRu = "Принимающий узел сообщает о принудительном изменении некоторых элементов при сохранении объекта.",
+                possibleCausesRu = listOf("Правила коэрциции принимающего узла."),
+                engineerChecklistRu = listOf("Сверить принятые атрибуты и правила коэрциции PACS."),
                 dicomStatusCodeHex = hex
             )
 
             0xB006 -> DiagnosticRecommendation(
-                technicalName = "Warning: Elements Coerced (0xB006)",
-                explanationRu = "При сохранении значения некоторых элементов были принудительно заменены.",
-                possibleCausesRu = listOf("Согласование данных с Worklist или внутренним регламентом архива."),
-                engineerChecklistRu = listOf("Проверить правила коэрциции тегов на сервере."),
+                technicalName = "Warning: Elements Discarded (0xB006)",
+                explanationRu = "Принимающий узел сообщает, что при сохранении отбросил некоторые элементы.",
+                possibleCausesRu = listOf("Политика обработки неподдерживаемых или необязательных атрибутов."),
+                engineerChecklistRu = listOf("Проверить отброшенные элементы и DICOM Conformance Statement PACS."),
                 dicomStatusCodeHex = hex
             )
 
@@ -432,6 +432,7 @@ object DicomDiagnosticHandbook {
             ?: ""
 
         findHexStatus(statusStr)?.let { return it }
+        Regex("\\b([0-9a-fA-F]{4})[Hh]\\b").find(statusStr)?.groupValues?.get(1)?.toIntOrNull(16)?.let { return it }
         findHexStatus(entry.title)?.let { return it }
         for (line in entry.summaryLines) {
             findHexStatus(line)?.let { return it }

@@ -156,7 +156,7 @@ class DicomJournalStage432Test {
         assertEquals(1, summaries.size)
         val s = summaries.first()
 
-        assertEquals(SessionOutcomeStatus.FAILURE, s.status)
+        assertEquals(SessionOutcomeStatus.UNKNOWN, s.status)
         assertEquals("Не получено подтверждение отправки", s.statusTitle)
         assertEquals("C-STORE-RSP не получен от PACS", s.statusSubtitle)
         assertFalse("Не должно утверждаться, что PACS отклонил файл", s.statusTitle.contains("отклонил"))

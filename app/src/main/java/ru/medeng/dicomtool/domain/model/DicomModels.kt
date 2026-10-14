@@ -237,7 +237,9 @@ enum class FileSendStatus(val labelRu: String) {
     SUCCESS("Успешно"),
     WARNING("Предупреждение"),
     FAILED("Ошибка"),
-    SKIPPED("Пропущен")
+    SKIPPED("Пропущен"),
+    CANCELLED("Отменён до отправки"),
+    UNCONFIRMED("Результат на PACS неизвестен")
 }
 
 /**
@@ -276,6 +278,9 @@ data class ScuBatchProgressState(
     val sentSuccessCount: Int = 0,
     val sentWarningCount: Int = 0,
     val failedCount: Int = 0,
+    val skippedCount: Int = 0,
+    val cancelledCount: Int = 0,
+    val unconfirmedCount: Int = 0,
     val currentIndex: Int = 0,
     val currentFileName: String? = null,
     val summaryMessageRu: String? = null,
