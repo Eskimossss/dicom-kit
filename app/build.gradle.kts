@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.jetbrains.kotlin.android)
@@ -12,11 +14,37 @@ android {
         applicationId = "ru.medeng.dicomtool"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
+        versionCode = 10301
         versionName = "1.3.1"
 
         vectorDrawables {
             useSupportLibrary = true
+        }
+    }
+
+    signingConfigs {
+        create("release") {
+            val keystorePropertiesFile = rootProject.file("keystore.properties")
+            val keystoreProperties = Properties()
+            if (keystorePropertiesFile.exists()) {
+                keystorePropertiesFile.inputStream().use { keystoreProperties.load(it) }
+            }
+
+            val storeFilePath = keystoreProperties.getProperty("RELEASE_STORE_FILE")
+                ?: System.getenv("KEYSTORE_PATH")
+            val storePasswordProp = keystoreProperties.getProperty("RELEASE_STORE_PASSWORD")
+                ?: System.getenv("KEYSTORE_PASSWORD")
+            val keyAliasProp = keystoreProperties.getProperty("RELEASE_KEY_ALIAS")
+                ?: System.getenv("KEY_ALIAS")
+            val keyPasswordProp = keystoreProperties.getProperty("RELEASE_KEY_PASSWORD")
+                ?: System.getenv("KEY_PASSWORD")
+
+            if (!storeFilePath.isNullOrBlank() && file(storeFilePath).exists()) {
+                storeFile = file(storeFilePath)
+                storePassword = storePasswordProp
+                keyAlias = keyAliasProp
+                keyPassword = keyPasswordProp
+            }
         }
     }
 
@@ -27,6 +55,10 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            val releaseSigning = signingConfigs.getByName("release")
+            if (releaseSigning.storeFile != null) {
+                signingConfig = releaseSigning
+            }
         }
     }
 
