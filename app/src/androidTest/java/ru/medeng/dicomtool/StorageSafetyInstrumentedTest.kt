@@ -42,11 +42,12 @@ class StorageSafetyInstrumentedTest {
         assertTrue(manager.isSafStorageWritable(uri))
         return manager to uri
     }
-    private fun dicom(pixel: Int = 1): File = File(context.cacheDir, "synthetic-${UUID.randomUUID()}.dcm").apply {
+    private fun dicom(pixel: Int = 1, studyUid: String = study, patientName: String = "SYNTHETIC^STAGE51"): File = File(context.cacheDir, "synthetic-${UUID.randomUUID()}.dcm").apply {
         val ds = Attributes().apply {
             setString(Tag.SOPClassUID, VR.UI, UID.SecondaryCaptureImageStorage)
-            setString(Tag.SOPInstanceUID, VR.UI, sop); setString(Tag.StudyInstanceUID, VR.UI, study); setString(Tag.SeriesInstanceUID, VR.UI, series)
-            setString(Tag.PatientName, VR.PN, "SYNTHETIC^STAGE51")
+            setString(Tag.SOPInstanceUID, VR.UI, sop); setString(Tag.StudyInstanceUID, VR.UI, studyUid); setString(Tag.SeriesInstanceUID, VR.UI, series)
+            setString(Tag.SpecificCharacterSet, VR.CS, "ISO_IR 192")
+            setString(Tag.PatientName, VR.PN, patientName)
             setString(Tag.PhotometricInterpretation, VR.CS, "MONOCHROME2")
             setInt(Tag.Rows, VR.US, 2); setInt(Tag.Columns, VR.US, 2); setInt(Tag.SamplesPerPixel, VR.US, 1)
             setInt(Tag.BitsAllocated, VR.US, 8); setInt(Tag.BitsStored, VR.US, 8); setInt(Tag.HighBit, VR.US, 7); setInt(Tag.PixelRepresentation, VR.US, 0)
@@ -58,6 +59,111 @@ class StorageSafetyInstrumentedTest {
     private fun success(result: DicomSaveResult): DicomSaveResult.Success {
         assertTrue(result.toString(), result is DicomSaveResult.Success)
         return result as DicomSaveResult.Success
+    }
+    @Test fun actualCStoreResponsesAndCountsFollowDuplicatePolicy() {
+        val (manager, _) = setup(); val previous = manager.receptionOptions.value
+        val repo = LocalDicomStudyRepository(manager.internalStorageDir, context, manager)
+        val logger = ru.medeng.dicomtool.data.logging.PersistentDicomTechnicalLogger(File(context.cacheDir, "duplicates-${UUID.randomUUID()}.tsv"))
+        val server = ru.medeng.dicomtool.dicom.scp.DicomStorageScpServer(repo, logger)
+        val executor = Executors.newCachedThreadPool(); val scheduler = Executors.newSingleThreadScheduledExecutor()
+        var association: org.dcm4che3.net.Association? = null
+        try {
+            val port = java.net.ServerSocket(0).use { it.localPort }
+            assertTrue(server.startServer("TEST_RECEIVER", port).isSuccess)
+            val device = org.dcm4che3.net.Device("synthetic-policy-scu")
+            val local = org.dcm4che3.net.Connection().apply { connectTimeout = 5000; responseTimeout = 10000; releaseTimeout = 1000 }
+            val ae = org.dcm4che3.net.ApplicationEntity("SYNTHETIC")
+            ae.addConnection(local); device.addConnection(local); device.addApplicationEntity(ae)
+            device.executor = executor; device.scheduledExecutor = scheduler
+            val rq = org.dcm4che3.net.pdu.AAssociateRQ().apply {
+                callingAET = "SYNTHETIC"; calledAET = "TEST_RECEIVER"
+                addPresentationContext(org.dcm4che3.net.pdu.PresentationContext(1, UID.SecondaryCaptureImageStorage, UID.ExplicitVRLittleEndian))
+            }
+            val a = ae.connect(local, org.dcm4che3.net.Connection("remote", "127.0.0.1", port), rq)
+            association = a
+            fun send(pixel: Int = 1): Int {
+                val ds = org.dcm4che3.io.DicomInputStream(dicom(pixel)).use { it.readFileMetaInformation(); it.readDataset() }
+                val rsp = a.cstore(UID.SecondaryCaptureImageStorage, sop, 0, org.dcm4che3.net.DataWriterAdapter(ds), UID.ExplicitVRLittleEndian)
+                assertTrue(rsp.next()); return rsp.command.getInt(Tag.Status, -1)
+            }
+            manager.setReceptionOptions(ReceptionStorageOptions())
+            repeat(3) { assertEquals(0, send()) }; assertEquals(3, repo.getTotalSavedFilesCount())
+            manager.setReceptionOptions(ReceptionStorageOptions(IncomingDuplicatePolicy.DEDUPLICATE))
+            assertEquals(0, send()); assertEquals(3, repo.getTotalSavedFilesCount())
+            manager.setReceptionOptions(ReceptionStorageOptions(IncomingDuplicatePolicy.REJECT_IDENTICAL))
+            assertEquals(org.dcm4che3.net.Status.ProcessingFailure, send())
+            assertEquals(3, repo.getTotalSavedFilesCount())
+            assertEquals(0, send(2)); assertEquals(4, repo.getTotalSavedFilesCount())
+            val dispositions = logger.logsFlow.value.mapNotNull { it.technicalDetails["Storage Disposition"] }.toSet()
+            assertTrue(dispositions.containsAll(setOf("NEW_COPY", "REPEAT_COPY", "DUPLICATE_CONFIRMED", "CONTENT_COLLISION")))
+            assertTrue(File(manager.internalStorageDir, ".incoming_tmp").listFiles().orEmpty().isEmpty())
+            a.release()
+        } finally {
+            runCatching { association?.socket?.close() }; server.stopServer()
+            executor.shutdownNow(); scheduler.shutdownNow(); logger.shutdown()
+            manager.setReceptionOptions(previous); manager.resetToInternalStorage()
+        }
+    }
+    @Test fun receiverPoliciesAndPatientFolderNamesWorkWithSafWithoutRenamingOldStudies() {
+        val (manager, uri) = setup()
+        val previous = manager.receptionOptions.value
+        val repo = LocalDicomStudyRepository(manager.internalStorageDir, context, manager)
+        val original = dicom().readBytes()
+        fun receive(pixel: Int = 1) = repo.saveIncomingInstance(dicom(pixel), study, series, sop)
+        try {
+            manager.setReceptionOptions(ReceptionStorageOptions())
+            repeat(3) { success(receive()) }
+            assertEquals(3, repo.getTotalSavedFilesCount())
+            assertEquals(3, manager.ownedSafDocuments(uri).size)
+            manager.ownedSafDocuments(uri).forEach { assertArrayEquals(original, bytes(it.id)) }
+            manager.setReceptionOptions(ReceptionStorageOptions(IncomingDuplicatePolicy.DEDUPLICATE, true))
+            assertEquals(StorageDisposition.DUPLICATE_CONFIRMED, success(receive()).disposition)
+            assertEquals(3, repo.getTotalSavedFilesCount())
+            // Enabling names does not rename this existing UID directory.
+            val root = DocumentFile.fromTreeUri(context, uri)!!
+            assertEquals(listOf(study), root.listFiles().filter { it.isDirectory }.map { it.name })
+            manager.setReceptionOptions(ReceptionStorageOptions(IncomingDuplicatePolicy.REJECT_IDENTICAL, true))
+            assertTrue((receive() as DicomSaveResult.Failure).duplicateRejected)
+            success(receive(2)); assertEquals(4, repo.getTotalSavedFilesCount())
+            val newStudy = "1.2.840.98765.1"
+            val label = StudyFolderNames.create("СИНТЕТИЧЕСКИЙ^ПАЦИЕНТ/../", newStudy)
+            success(repo.saveIncomingInstance(dicom(studyUid = newStudy, patientName = "СИНТЕТИЧЕСКИЙ^ПАЦИЕНТ/../"), newStudy, series, sop))
+            assertTrue(root.listFiles().any { it.name == label && it.isDirectory })
+            assertEquals(manager.receptionOptions.value, DicomStorageManager(context, manager.internalStorageDir).receptionOptions.value)
+        } finally { manager.setReceptionOptions(previous); manager.resetToInternalStorage() }
+    }
+    @Test fun explicitIncomingRecoveryKeepsTruncationAndActiveTransferAndNeverMultipliesCopies() {
+        val (manager, _) = setup(); manager.resetToInternalStorage()
+        val previous = manager.receptionOptions.value
+        manager.setReceptionOptions(ReceptionStorageOptions())
+        val repo = LocalDicomStudyRepository(manager.internalStorageDir, context, manager)
+        val logger = ru.medeng.dicomtool.data.logging.PersistentDicomTechnicalLogger(File(context.cacheDir, "recovery-${UUID.randomUUID()}.tsv"))
+        val server = ru.medeng.dicomtool.dicom.scp.DicomStorageScpServer(repo, logger)
+        val operations = ArchiveOperations(repo, server)
+        fun idle() {
+            val until = System.nanoTime() + TimeUnit.SECONDS.toNanos(20)
+            while (operations.busy.value && System.nanoTime() < until) Thread.sleep(20)
+            assertFalse(operations.message.value, operations.busy.value)
+        }
+        val original = dicom().readBytes()
+        val folder = File(manager.internalStorageDir, ".incoming_tmp").apply { mkdirs() }
+        val full = File(folder, "synthetic-complete.part").apply { writeBytes(original) }
+        val brokenBytes = original.copyOf(original.size - 2)
+        val broken = File(folder, "synthetic-truncated.part").apply { writeBytes(brokenBytes) }
+        val active = IncomingPayloadTracker.create(folder, "scp_synthetic_").apply { writeBytes(original) }
+        try {
+            idle(); operations.recoverIncoming(); idle()
+            assertFalse(operations.message.value, full.exists())
+            assertEquals(1, repo.getTotalSavedFilesCount())
+            assertArrayEquals(brokenBytes, broken.readBytes()); assertArrayEquals(original, active.readBytes())
+            full.writeBytes(original); operations.recoverIncoming(); idle()
+            assertFalse(full.exists()); assertEquals(1, repo.getTotalSavedFilesCount())
+            assertEquals(1, RetainedIncoming.inspect(manager.internalStorageDir).filesCount)
+            repo.clearAllStudies(); assertArrayEquals(brokenBytes, broken.readBytes())
+        } finally {
+            IncomingPayloadTracker.release(active); operations.closeForTesting(); logger.shutdown()
+            manager.setReceptionOptions(previous)
+        }
     }
     @Test fun repeatMigrationAfterSourceDeleteDeniedUsesVerifiedCopy() {
         val (manager, uri) = setup()

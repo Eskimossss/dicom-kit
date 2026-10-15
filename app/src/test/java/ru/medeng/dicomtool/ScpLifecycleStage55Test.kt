@@ -72,6 +72,19 @@ class ScpLifecycleStage55Test {
         server.stopServer(); exec.shutdownNow(); sched.shutdownNow(); logger.shutdown()
         root.deleteRecursively()
     }
+    @Test fun nodeHistorySurvivesDisconnectUpdatesTimeAndResetsOnRestart() {
+        start(); val first = connect(); echo(first); first.release()
+        await { server.state.value.activeConnectionsCount == 0 }
+        val before = server.state.value.connectedNodes.single()
+        assertTrue(before.contains("SYNTHETIC (127.0.0.1)"))
+        assertTrue(before.contains("последнее обращение"))
+        Thread.sleep(1100)
+        val second = connect(); echo(second); second.release()
+        await { server.state.value.activeConnectionsCount == 0 }
+        assertNotEquals(before, server.state.value.connectedNodes.single())
+        server.stopServer(); await { server.state.value.status == ScpServerStatus.STOPPED }
+        start(); assertTrue(server.state.value.connectedNodes.isEmpty())
+    }
     @Test fun restartClosesOldAssociationAndReleasesPort() {
         port = ServerSocket(0).use { it.localPort }
         repeat(3) {
@@ -175,7 +188,9 @@ class ScpLifecycleStage55Test {
         start(); val a = connect()
         val send = exec.submit { runCatching { store(a) } }
         try {
-            assertTrue(entered.await(4, TimeUnit.SECONDS)); server.stopServer()
+            assertTrue(entered.await(4, TimeUnit.SECONDS))
+            assertEquals(0, RetainedIncoming.inspect(repo.storageRootDir).filesCount)
+            server.stopServer()
             assertEquals(ScpServerStatus.STOPPING, server.state.value.status)
             assertTrue(server.startServer("STAGE55", port).isFailure)
             assertEquals(1, File(repo.storageRootDir, ".incoming_tmp").listFiles()!!.size)
@@ -187,6 +202,7 @@ class ScpLifecycleStage55Test {
         val summary = DicomSessionGrouper.groupEvents(logger.logsFlow.value).first { it.primaryOperation == "C-STORE" }
         assertEquals(SessionOutcomeStatus.UNKNOWN, summary.status)
         assertEquals("UNCONFIRMED", summary.filesTransferred.single().scuOutcome)
+        assertEquals(1, RetainedIncoming.inspect(repo.storageRootDir).filesCount)
         start(); echo(connect())
     }
     @Test fun peerAbortDoesNotInventReleaseResponse() {

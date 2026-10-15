@@ -185,6 +185,9 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     val storageLocationInfo = archive.info
     val isMigrating = archive.busy
     val migrationStatusMessage = archive.message
+    val receptionStorageOptions = requireNotNull(storageManager).receptionOptions
+    fun updateReceptionStorageOptions(options: ru.medeng.dicomtool.data.storage.ReceptionStorageOptions) = archive.setReceptionOptions(options)
+    fun recoverRetainedIncoming() = archive.recoverIncoming()
 
     private val _selectedModalityFilter = MutableStateFlow("ALL")
     val selectedModalityFilter: StateFlow<String> = _selectedModalityFilter.asStateFlow()
@@ -585,23 +588,15 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     /**
-     * Изменение WW/WL на заданную дельту (или адаптивный шаг для 8-bit / 16-bit изображений).
+     * Изменение WW/WL на заданную дельту в единицах Modality Value.
      */
     fun adjustWindowWidthLevel(deltaW: Int, deltaL: Int) {
         if ((_viewerRenderState.value as? DicomViewerRenderState.Ready)?.descriptor?.photometricInterpretation == "RGB") return
         _viewerActiveVoiLutIndex.value = null
         preferredWindow = null
-        val ready = _viewerRenderState.value as? DicomViewerRenderState.Ready
-        val adaptiveScale = if (ready != null) {
-            val range = (ready.descriptor.maxModalityValue - ready.descriptor.minModalityValue).coerceAtLeast(255.0)
-            max(1, (range / 250.0).roundToInt())
-        } else {
-            1
-        }
-        val scaledDeltaW = deltaW * adaptiveScale
-        val scaledDeltaL = deltaL * adaptiveScale
-        _viewerWindowWidth.update { (it + scaledDeltaW).coerceIn(1, 131072) }
-        _viewerWindowCenter.update { (it + scaledDeltaL).coerceIn(-65536, 131072) }
+        // Controls choose a proportional step; do not apply a second range-dependent multiplier.
+        _viewerWindowWidth.update { (it + deltaW).coerceIn(1, 131072) }
+        _viewerWindowCenter.update { (it + deltaL).coerceIn(-65536, 131072) }
         triggerFrameDecodeAndRender(resetWindowToFileDefault = false)
     }
 

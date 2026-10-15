@@ -52,13 +52,15 @@ sealed interface DicomSaveResult {
         val destinationDescription: String,
         val savedSizeBytes: Long,
         val duplicateActionNote: String,
-        val sourceRetained: Boolean = false
+        val sourceRetained: Boolean = false,
+        val disposition: StorageDisposition = StorageDisposition.UNKNOWN
     ) : DicomSaveResult
 
     data class Failure(
         val errorReason: String,
         val isOutOfSpace: Boolean = false,
-        val exception: Throwable? = null
+        val exception: Throwable? = null,
+        val duplicateRejected: Boolean = false
     ) : DicomSaveResult
 }
 
@@ -93,6 +95,18 @@ class DicomStorageManager(
 
     private val context = context.applicationContext as android.app.Application
     private val prefs by lazy { context.getSharedPreferences("dicom_storage_settings", Context.MODE_PRIVATE) }
+
+    private val _receptionOptions by lazy {
+        kotlinx.coroutines.flow.MutableStateFlow(ReceptionStorageOptions(
+            duplicates = runCatching { IncomingDuplicatePolicy.valueOf(prefs.getString("incoming_duplicates", IncomingDuplicatePolicy.KEEP_EACH.name)!!) }.getOrDefault(IncomingDuplicatePolicy.KEEP_EACH),
+            patientFolderNames = prefs.getBoolean("patient_folder_names", false)))
+    }
+    val receptionOptions: kotlinx.coroutines.flow.StateFlow<ReceptionStorageOptions> get() = _receptionOptions
+    fun setReceptionOptions(options: ReceptionStorageOptions) {
+        prefs.edit().putString("incoming_duplicates", options.duplicates.name)
+            .putBoolean("patient_folder_names", options.patientFolderNames).apply()
+        _receptionOptions.value = options
+    }
 
     companion object {
         private const val PREF_KEY_STORAGE_TYPE = "storage_type"
@@ -302,13 +316,15 @@ class DicomStorageManager(
         tempIncomingFile: File,
         studyInstanceUid: String,
         seriesInstanceUid: String,
-        sopInstanceUid: String
+        sopInstanceUid: String,
+        duplicatePolicy: IncomingDuplicatePolicy = IncomingDuplicatePolicy.DEDUPLICATE,
+        studyFolderName: String = studyInstanceUid
     ): DicomSaveResult {
         val currentType = getCurrentStorageType()
         return if (currentType == StorageType.SAF) {
             val safUri = getSavedSafTreeUri()
             if (safUri != null && isSafStorageWritable(safUri)) {
-                saveToSafStorage(tempIncomingFile, safUri, studyInstanceUid, seriesInstanceUid, sopInstanceUid)
+                saveToSafStorage(tempIncomingFile, safUri, studyInstanceUid, seriesInstanceUid, sopInstanceUid, duplicatePolicy, studyFolderName)
             } else {
                 DicomSaveResult.Failure(
                     errorReason = "Пользовательский SAF-каталог недоступен (SD-карта отключена или отсутствуют права на запись)",
@@ -316,7 +332,7 @@ class DicomStorageManager(
                 )
             }
         } else {
-            saveToInternalStorage(tempIncomingFile, studyInstanceUid, seriesInstanceUid, sopInstanceUid)
+            saveToInternalStorage(tempIncomingFile, studyInstanceUid, seriesInstanceUid, sopInstanceUid, duplicatePolicy, studyFolderName)
         }
     }
 
@@ -325,11 +341,11 @@ class DicomStorageManager(
 
     private fun store(access: StorageAccess) = VerifiedDicomStore(access, ownership, coordinator)
 
-    private fun saveToInternalStorage(file: File, study: String, series: String, sop: String): DicomSaveResult =
-        store(FileStorageAccess(internalStorageDir)).save(file.storageSource(), study, series, sop)
+    private fun saveToInternalStorage(file: File, study: String, series: String, sop: String, policy: IncomingDuplicatePolicy = IncomingDuplicatePolicy.DEDUPLICATE, folder: String = study): DicomSaveResult =
+        store(FileStorageAccess(internalStorageDir)).save(file.storageSource(), study, series, sop, policy, folder)
 
-    private fun saveToSafStorage(file: File, treeUri: Uri, study: String, series: String, sop: String): DicomSaveResult = try {
-        store(SafStorageAccess(context, treeUri)).save(file.storageSource(), study, series, sop)
+    private fun saveToSafStorage(file: File, treeUri: Uri, study: String, series: String, sop: String, policy: IncomingDuplicatePolicy = IncomingDuplicatePolicy.DEDUPLICATE, folder: String = study): DicomSaveResult = try {
+        store(SafStorageAccess(context, treeUri)).save(file.storageSource(), study, series, sop, policy, folder)
     } catch (e: Exception) { DicomSaveResult.Failure("SAF unavailable: ${e.message}", exception = e) }
 
     /** Only ledger-backed documents may be destructively operated on in an arbitrary SAF tree. */

@@ -48,6 +48,52 @@ class StorageSafetyTest {
         VerifiedDicomStore(access, DocumentOwnership.forRoot(root), StorageCoordinator.forRoot(root))
     private fun source(bytes: ByteArray, remove: () -> Boolean = { true }) = StorageSource({ ByteArrayInputStream(bytes) }, remove)
 
+    @Test fun privateStorageSupportsSafeCyrillicStudyDirectoryAndKeepsOriginalBytes() {
+        val root = temp.newFolder("unicode-storage")
+        val store = engine(FileStorageAccess(root), root)
+        val label = StudyFolderNames.create("СИНТЕТИЧЕСКИЙ^ПАЦИЕНТ/../", study)
+        val bytes = dicom()
+        val result = store.save(source(bytes), study, series, sop, studyFolderName = label)
+        assertTrue(result.toString(), result is DicomSaveResult.Success)
+        assertArrayEquals(bytes, File((result as DicomSaveResult.Success).destinationDescription).readBytes())
+        assertTrue(File(root, label).isDirectory)
+    }
+    @Test fun keepEachReceiptStillDeduplicatesOnMigrationAndNeverChangesOriginalBytes() {
+        val access = MemoryAccess(); val store = engine(access); val original = dicom()
+        repeat(3) { assertTrue(store.save(source(original), study, series, sop, IncomingDuplicatePolicy.KEEP_EACH) is DicomSaveResult.Success) }
+        assertEquals(3, access.files().count { it.name.endsWith(".dcm") })
+        assertTrue(access.files().filter { it.name.endsWith(".dcm") }.all { access.read(it).readBytes().contentEquals(original) })
+        repeat(2) { assertTrue(store.save(source(original), study, series, sop) is DicomSaveResult.Success) }
+        assertEquals(3, access.files().count { it.name.endsWith(".dcm") })
+    }
+    @Test fun rejectOnlyExactPayloadAndAlwaysPreserveChangedPixelsWithSameUid() {
+        val access = MemoryAccess(); val store = engine(access)
+        store.save(source(dicom(1)), study, series, sop)
+        val rejected = store.save(source(dicom(1)), study, series, sop, IncomingDuplicatePolicy.REJECT_IDENTICAL)
+        assertTrue(rejected is DicomSaveResult.Failure && rejected.duplicateRejected)
+        assertTrue(store.save(source(dicom(2)), study, series, sop, IncomingDuplicatePolicy.REJECT_IDENTICAL) is DicomSaveResult.Success)
+        assertEquals(2, access.files().count { it.name.endsWith(".dcm") })
+    }
+    @Test fun patientFolderLabelsCannotTraverseAndExistingUidDirectoryIsReused() {
+        val access = MemoryAccess(); val store = engine(access)
+        val label = StudyFolderNames.create("СИНТЕТИЧЕСКИЙ^ТЕСТ/../../\\evil", study)
+        assertFalse(label.contains('/')); assertFalse(label.contains('\\'))
+        assertTrue(label.endsWith("__$study"))
+        assertEquals(label, StudyFolderNames.checked(label, study))
+        store.save(source(dicom(1)), study, series, sop)
+        store.save(source(dicom(2)), study, series, sop, studyFolderName = label)
+        assertTrue(access.children(access.root).any { it.directory && it.name == study })
+        assertFalse(access.children(access.root).any { it.name == label })
+        assertEquals(2, access.files().count { it.name.endsWith(".dcm") })
+    }
+    @Test fun newPatientLabelPersistsForChangedNameWithinSameStudy() {
+        val access = MemoryAccess(); val store = engine(access)
+        val first = StudyFolderNames.create("СИНТЕТИЧЕСКИЙ^А", study)
+        val second = StudyFolderNames.create("СИНТЕТИЧЕСКИЙ^Б", study)
+        store.save(source(dicom(1)), study, series, sop, studyFolderName = first)
+        store.save(source(dicom(2)), study, series, sop, studyFolderName = second)
+        assertEquals(listOf(first), access.children(access.root).filter { it.directory }.map { it.name })
+    }
     @Test fun sameLengthDifferentPixelDataPreservedInSafAlgorithm() {
         val access = MemoryAccess()
         val store = engine(access)

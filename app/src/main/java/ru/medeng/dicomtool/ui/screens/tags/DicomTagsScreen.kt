@@ -644,6 +644,10 @@ fun DicomTagsScreen(
                                     }
                                 }
 
+                                item {
+                                    Text("WW — ширина окна (контраст); WL — центр окна (яркость). Авто Мин/Макс охватывает диапазон значений текущего кадра. Числа в скобках — WW / WL.", fontSize = 12.sp, color = TextPrimaryDark)
+                                }
+
                                 // Пресеты
                                 val presets = readyDescriptor?.windowPresets.orEmpty()
                                 if (presets.isNotEmpty()) {
@@ -689,8 +693,8 @@ fun DicomTagsScreen(
                                             fontFamily = FontFamily.Monospace
                                         )
                                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                            SmallStepButton(label = "−") { onAdjustWindow(-5, 0) }
-                                            SmallStepButton(label = "+") { onAdjustWindow(5, 0) }
+                                            SmallStepButton(label = "−") { onAdjustWindow(-(viewerWindowWidth / 20).coerceAtLeast(1), 0) }
+                                            SmallStepButton(label = "+") { onAdjustWindow((viewerWindowWidth / 20).coerceAtLeast(1), 0) }
                                         }
                                     }
                                     Slider(
@@ -718,8 +722,8 @@ fun DicomTagsScreen(
                                             fontFamily = FontFamily.Monospace
                                         )
                                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                            SmallStepButton(label = "−") { onAdjustWindow(0, -5) }
-                                            SmallStepButton(label = "+") { onAdjustWindow(0, 5) }
+                                            SmallStepButton(label = "−") { onAdjustWindow(0, -(viewerWindowWidth / 20).coerceAtLeast(1)) }
+                                            SmallStepButton(label = "+") { onAdjustWindow(0, (viewerWindowWidth / 20).coerceAtLeast(1)) }
                                         }
                                     }
                                     Slider(

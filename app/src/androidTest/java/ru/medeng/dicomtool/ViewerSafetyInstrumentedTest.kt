@@ -66,6 +66,42 @@ class ViewerSafetyInstrumentedTest {
         return uri to rootId
     }
     private fun ready(model: DicomToolViewModel, uri: Uri) = model.viewerRenderState.value.let { it is DicomViewerRenderState.Ready && it.filePath == uri.toString() }
+    @Test fun fullScreenWindowButtonsChangeBrightnessAndContrastWithoutEditingSource() {
+        val uri = source(dataset("SYNTHETIC^WINDOW").apply {
+            setInt(Tag.BitsAllocated, VR.US, 16); setInt(Tag.BitsStored, VR.US, 16); setInt(Tag.HighBit, VR.US, 15)
+            setBytes(Tag.PixelData, VR.OW, java.nio.ByteBuffer.allocate(8).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                .putShort(0).putShort(10000).putShort(20000).putShort(30000).array())
+        }).first
+        val original = context.contentResolver.openInputStream(uri)!!.use { it.readBytes() }
+        val model = vm()
+        compose.onNodeWithText("Теги и просмотр").performClick()
+        compose.runOnIdle { model.loadExternalDicomFile(uri) }; await { ready(model, uri) }
+        compose.onNodeWithText("Изображение").performClick()
+        compose.runOnIdle { model.setWindowWidthLevel(20000, 10000); model.setViewerFullScreen(true) }
+        await { ready(model, uri) && model.viewerWindowWidth.value == 20000 }
+        val before = (model.viewerRenderState.value as DicomViewerRenderState.Ready).bitmap.getPixel(2, 0)
+        compose.onNodeWithText("WL+").performScrollTo().performClick()
+        val expected = DicomPixelDataDecoder.applyWindowFormula(20000.0, 11000.0, 20000.0)
+        try {
+            await { ready(model, uri) && model.viewerWindowCenter.value == 11000 &&
+                (model.viewerRenderState.value as DicomViewerRenderState.Ready).bitmap.getPixel(2, 0) and 255 == expected }
+        } catch (failure: AssertionError) {
+            val state = model.viewerRenderState.value
+            val pixels = (state as? DicomViewerRenderState.Ready)?.bitmap?.let { bmp -> (0 until 4).map { bmp.getPixel(it, 0) and 255 } }
+            throw AssertionError("WW=${model.viewerWindowWidth.value}; WL=${model.viewerWindowCenter.value}; invert=${model.viewerInverted.value}; pixels=$pixels; expected=$expected; state=${state.javaClass.simpleName}", failure)
+        }
+        assertNotEquals(before, (model.viewerRenderState.value as DicomViewerRenderState.Ready).bitmap.getPixel(2, 0))
+        compose.onNodeWithText("WW-").performScrollTo().performClick()
+        await { model.viewerWindowWidth.value == 19000 }
+        compose.onNodeWithText("WL-").performScrollTo().performClick()
+        await { ready(model, uri) && model.viewerWindowCenter.value == 10050 }
+        compose.waitForIdle()
+        // Dispatch through the Activity's Back handler; the navigation test separately injects real system Back keys.
+        compose.runOnIdle { compose.activity.onBackPressedDispatcher.onBackPressed() }
+        await { !model.isViewerFullScreen.value }
+        assertFalse(compose.activity.isFinishing)
+        assertArrayEquals(original, context.contentResolver.openInputStream(uri)!!.use { it.readBytes() })
+    }
     @Test fun lateProviderAResultCannotReplaceBAndOldMetadataClearsImmediately() {
         val model = vm(); val (a, root) = source(dataset("SYNTHETIC^A"), true)
         val b = source(dataset("SYNTHETIC^B", 50)).first

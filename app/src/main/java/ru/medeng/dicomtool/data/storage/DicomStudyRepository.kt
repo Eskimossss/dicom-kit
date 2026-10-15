@@ -88,18 +88,35 @@ class LocalDicomStudyRepository(
         studyInstanceUid: String,
         seriesInstanceUid: String,
         sopInstanceUid: String
-    ): DicomSaveResult = coordinator.receiving {
+    ): DicomSaveResult = saveWithOptions(tempIncomingFile, studyInstanceUid, seriesInstanceUid, sopInstanceUid,
+        storageManager?.receptionOptions?.value ?: ReceptionStorageOptions(duplicates = IncomingDuplicatePolicy.DEDUPLICATE))
+
+    internal fun saveRetainedIncoming(file: File, study: String, series: String, sop: String): DicomSaveResult =
+        saveWithOptions(file, study, series, sop, (storageManager?.receptionOptions?.value ?: ReceptionStorageOptions()).copy(duplicates = IncomingDuplicatePolicy.DEDUPLICATE))
+
+    private fun saveWithOptions(tempIncomingFile: File, studyInstanceUid: String, seriesInstanceUid: String,
+                                sopInstanceUid: String, options: ReceptionStorageOptions): DicomSaveResult = coordinator.receiving {
+        val folder = if (options.patientFolderNames) runCatching {
+            DicomInputStream(tempIncomingFile).use { dis ->
+                dis.includeBulkData = DicomInputStream.IncludeBulkData.NO
+                ru.medeng.dicomtool.dicom.tags.BoundedDicomRead.install(dis)
+                dis.readFileMetaInformation()
+                val ds = dis.readDatasetUntilPixelData()
+                StudyFolderNames.create(DicomCharsetDecoder.decodeStringAttribute(ds, Tag.PatientName, VR.PN, "").value, studyInstanceUid)
+            }
+        }.getOrDefault(studyInstanceUid) else studyInstanceUid
         val result = if (storageManager != null) {
             storageManager.saveIncomingDicomFile(
                 tempIncomingFile = tempIncomingFile,
                 studyInstanceUid = studyInstanceUid,
                 seriesInstanceUid = seriesInstanceUid,
-                sopInstanceUid = sopInstanceUid
+                sopInstanceUid = sopInstanceUid,
+                duplicatePolicy = options.duplicates, studyFolderName = folder
             )
         } else {
             VerifiedDicomStore(FileStorageAccess(storageRootDir), DocumentOwnership.forRoot(storageRootDir),
                 StorageCoordinator.forRoot(storageRootDir)).save(tempIncomingFile.storageSource(),
-                studyInstanceUid, seriesInstanceUid, sopInstanceUid)
+                studyInstanceUid, seriesInstanceUid, sopInstanceUid, options.duplicates, folder)
         }
         if (result is DicomSaveResult.Success) {
             // Read only the verified destination; indexing is not a second C-STORE transaction.

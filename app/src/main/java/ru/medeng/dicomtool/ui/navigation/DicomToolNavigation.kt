@@ -32,6 +32,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -93,6 +94,7 @@ enum class ActiveSubScreen {
 fun DicomToolAppRoot(
     viewModel: DicomToolViewModel = viewModel()
 ) {
+    val receptionOptions by viewModel.receptionStorageOptions.collectAsStateWithLifecycle()
     val archiveIndex by viewModel.archiveIndexState.collectAsStateWithLifecycle()
     val archiveBusy by viewModel.isMigrating.collectAsStateWithLifecycle()
     val scpState by viewModel.scpState.collectAsStateWithLifecycle()
@@ -144,10 +146,6 @@ fun DicomToolAppRoot(
     val context = LocalContext.current
     val activity = context as? Activity
 
-    // Перехват системной кнопки / жеста "Назад" при активном полноэкранном режиме
-    BackHandler(enabled = isViewerFullScreen) {
-        viewModel.setViewerFullScreen(false)
-    }
 
     // Управление системными панелями Android (status bar и navigation bar)
     DisposableEffect(isViewerFullScreen) {
@@ -175,6 +173,23 @@ fun DicomToolAppRoot(
     val processId = ru.medeng.dicomtool.data.logging.DicomSessionManager.appRunId
     var currentTab by rememberSaveable(key = "main-tab-$processId") { mutableStateOf(MainBottomTab.RECEIVER) }
     var activeSubScreen by rememberSaveable(key = "sub-screen-$processId") { mutableStateOf(ActiveSubScreen.NONE) }
+    var lastExitBack by remember { mutableStateOf(0L) }
+    androidx.compose.runtime.LaunchedEffect(currentTab, activeSubScreen, isViewerFullScreen) { lastExitBack = 0L }
+    BackHandler {
+        when {
+            isViewerFullScreen -> viewModel.setViewerFullScreen(false)
+            activeSubScreen != ActiveSubScreen.NONE -> {
+                viewModel.selectTagForDetail(null)
+                activeSubScreen = ActiveSubScreen.NONE
+                lastExitBack = 0L
+            }
+            lastExitBack != 0L && android.os.SystemClock.elapsedRealtime() - lastExitBack in 1L..2000L -> activity?.finish()
+            else -> {
+                lastExitBack = android.os.SystemClock.elapsedRealtime()
+                android.widget.Toast.makeText(context, "Нажмите «Назад» ещё раз для выхода", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val isExpandedWidth = maxWidth >= 700.dp
@@ -261,6 +276,9 @@ fun DicomToolAppRoot(
                     ActiveSubScreen.SETTINGS_AND_CLEANUP -> {
                         SettingsAndCleanupScreen(
                             storageInfo = storageLocationInfo,
+                            receptionOptions = receptionOptions,
+                            onReceptionOptionsChange = viewModel::updateReceptionStorageOptions,
+                            onRecoverIncoming = viewModel::recoverRetainedIncoming,
                             isMigrating = isMigrating,
                             migrationStatusMessage = migrationStatusMessage,
                             studiesCount = studies.size,

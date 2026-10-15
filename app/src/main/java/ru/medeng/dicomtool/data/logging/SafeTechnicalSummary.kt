@@ -3,7 +3,7 @@ package ru.medeng.dicomtool.data.logging
 import org.dcm4che3.data.UID
 import ru.medeng.dicomtool.domain.model.DicomLogEntry
 
-/** Closed output schema. No raw titles, names, paths, instance UIDs, AE, timestamps or exception text. */
+/** Closed output schema. No raw titles, names, paths, instance UIDs, AE, timestamps or exception text. Validated short session labels are allowed. */
 object SafeTechnicalSummary {
     const val NOTICE = "Безопасная техническая сводка: только разрешённые поля. Это не гарантия юридической анонимизации."
     private val syntaxes = setOf(UID.ImplicitVRLittleEndian, UID.ExplicitVRLittleEndian, UID.ExplicitVRBigEndian,
@@ -24,7 +24,9 @@ object SafeTechnicalSummary {
         value.matches(Regex("[0-9a-fA-F]{4}[Hh]")) -> "0x" + value.take(4).uppercase()
         else -> null
     }
+    private fun label(raw: String): String? = raw.takeIf { it.matches(Regex("(?:SCP|SCU)-[1-9][0-9]{0,8}")) }
     fun event(entry: DicomLogEntry): String = buildString {
+        label(entry.associationId)?.let { appendLine("Сеанс: $it") }
         appendLine("Категория: ${entry.category.name}; направление: ${entry.direction.name}; ошибка: ${entry.isError}")
         for ((key, value) in entry.technicalDetails) {
             val field = when (key) {
@@ -34,6 +36,7 @@ object SafeTechnicalSummary {
                 "Max PDU Length", "Max PDU Length (AC)", "Max PDU Length (RQ)" -> unsigned(value, 4_294_967_295)?.let { "$key: $it" }
                 "Transfer Syntax UID", "Accepted Transfer Syntax" -> value.takeIf { it in syntaxes }?.let { "Transfer Syntax UID: $it" }
                 "SOP Class UID", "Affected SOP Class UID", "Abstract Syntax UID" -> value.takeIf { it in classes }?.let { "SOP Class UID: $it" }
+                "Storage Disposition" -> value.takeIf { it in setOf("NEW_COPY", "REPEAT_COPY", "DUPLICATE_CONFIRMED", "CONTENT_COLLISION", "UNKNOWN") }?.let { "Хранение: $it" }
                 "Response Write" -> value.takeIf { it in setOf("ATTEMPTED", "LOCAL_COMPLETED", "FAILED") }?.let { "Локальная запись ответа: $it" }
                 "SCU File Result" -> value.takeIf { it in outcomes }?.let { "Результат файла: $it" }
                 "Response Valid", "Rotation Pending", "SCU Cancellation", "SCU Association Complete", "SCU Batch Complete", "SCU Closure Warning" ->
@@ -47,6 +50,8 @@ object SafeTechnicalSummary {
         }
     }
     fun session(session: DicomSessionSummary): String = buildString {
+        label(session.associationId)?.let { appendLine("Сеанс: $it") }
+        session.role.takeIf { it in setOf("SCP", "SCU", "SYS") }?.let { appendLine("Роль: $it") }
         appendLine("Итог выбранного сеанса: ${session.status.name}")
         appendLine("Событий в выборке: ${session.events.size}")
         session.events.forEachIndexed { index, entry -> appendLine("Событие ${index + 1}"); append(event(entry)) }

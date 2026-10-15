@@ -66,6 +66,50 @@ class ArchiveOperations(private val repository: LocalDicomStudyRepository, priva
     fun refresh() = run(refresh = true) { repository.refreshFromDisk() }
     fun deleteStudy(uid: String) = run { repository.deleteStudy(uid) }
     fun clearStudies() = run { repository.clearAllStudies() }
+    fun setReceptionOptions(options: ReceptionStorageOptions) = run {
+        repository.storageManager?.setReceptionOptions(options)
+    }
+    fun recoverIncoming() = run {
+        val folder = java.io.File(repository.storageRootDir, ".incoming_tmp")
+        val files = IncomingPayloadTracker.inactiveFiles(folder).filter {
+            it.extension == "part" && it.isFile && !java.nio.file.Files.isSymbolicLink(it.toPath()) &&
+                runCatching { StoragePaths.contained(repository.storageRootDir, it) }.isSuccess
+        }
+        var recovered = 0; var retained = 0
+        for (file in files) {
+            val result = runCatching {
+                // Full structural read skips bulk data but detects truncated values; never rewrites the source.
+                val ids = org.dcm4che3.io.DicomInputStream(object : java.io.FilterInputStream(file.inputStream().buffered()) {
+                    // FileInputStream.skip may seek beyond EOF. Consume actual bytes so truncated bulk data fails validation.
+                    override fun skip(n: Long): Long {
+                        var remaining = n
+                        val buffer = ByteArray(65536)
+                        while (remaining > 0) {
+                            val count = read(buffer, 0, minOf(remaining, buffer.size.toLong()).toInt())
+                            if (count < 0) break
+                            remaining -= count
+                        }
+                        return n - remaining
+                    }
+                }).use { input ->
+                    input.includeBulkData = org.dcm4che3.io.DicomInputStream.IncludeBulkData.NO
+                    ru.medeng.dicomtool.dicom.tags.BoundedDicomRead.install(input)
+                    val fmi = requireNotNull(input.readFileMetaInformation())
+                    val ds = input.readDataset()
+                    val sop = requireNotNull(ds.getString(org.dcm4che3.data.Tag.SOPInstanceUID))
+                    require(sop == fmi.getString(org.dcm4che3.data.Tag.MediaStorageSOPInstanceUID))
+                    require(ds.getString(org.dcm4che3.data.Tag.SOPClassUID) == fmi.getString(org.dcm4che3.data.Tag.MediaStorageSOPClassUID))
+                    Triple(requireNotNull(ds.getString(org.dcm4che3.data.Tag.StudyInstanceUID)),
+                        requireNotNull(ds.getString(org.dcm4che3.data.Tag.SeriesInstanceUID)), sop)
+                }
+                repository.saveRetainedIncoming(file, ids.first, ids.second, ids.third)
+            }.getOrNull()
+            if (result is DicomSaveResult.Success && !result.sourceRetained) recovered++ else retained++
+        }
+        _message.value = "Повторно сохранено/проверено: $recovered. Осталось непроверенных источников: $retained. " +
+            "Исходные данные не исправлялись. Непроверенные файлы не удалены."
+        _info.update { it.copy(retainedIncoming = RetainedIncoming.inspect(repository.storageRootDir)) }
+    }
     fun setSaf(uri: android.net.Uri) = run {
         StorageCoordinator.forRoot(repository.storageRootDir).maintenance {
             repository.storageManager?.setCustomSafStorage(uri)?.getOrThrow()

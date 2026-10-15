@@ -149,7 +149,8 @@ object DicomLogExportUtils {
         appendLine("==================================================\n")
 
         if (isBriefMode) {
-            sessions.forEach { session ->
+            sessions.forEachIndexed { index, session ->
+                if (sanitizePhi) appendLine("Сеанс экспорта ${index + 1}")
                 appendLine(formatSession(session, sanitizePhi))
                 appendLine()
             }

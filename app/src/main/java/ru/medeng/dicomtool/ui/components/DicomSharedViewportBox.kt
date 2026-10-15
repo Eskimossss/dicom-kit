@@ -443,10 +443,16 @@ fun DicomSharedViewportBox(
                             onToggleInvert()
                         }
                         ViewerToolButton(icon = Icons.Default.Contrast, label = "WW-", description = "Уменьшить WW") {
-                            onAdjustWindow(-10, 0)
+                            onAdjustWindow(-(windowWidth / 20).coerceAtLeast(1), 0)
                         }
                         ViewerToolButton(icon = Icons.Default.Contrast, label = "WW+", description = "Увеличить WW") {
-                            onAdjustWindow(10, 0)
+                            onAdjustWindow((windowWidth / 20).coerceAtLeast(1), 0)
+                        }
+                        ViewerToolButton(icon = Icons.Default.Brightness6, label = "WL-", description = "Уменьшить WL") {
+                            onAdjustWindow(0, -(windowWidth / 20).coerceAtLeast(1))
+                        }
+                        ViewerToolButton(icon = Icons.Default.Brightness6, label = "WL+", description = "Увеличить WL") {
+                            onAdjustWindow(0, (windowWidth / 20).coerceAtLeast(1))
                         }
                         ViewerToolButton(icon = Icons.Default.Refresh, label = "Сброс", description = "Сброс WW/WL и масштаба") {
                             onResetTransform()

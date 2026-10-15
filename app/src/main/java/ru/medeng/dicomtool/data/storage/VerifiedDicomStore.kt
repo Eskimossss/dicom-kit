@@ -126,8 +126,8 @@ internal object StoragePaths {
         return candidate
     }
     fun component(name: String): String {
-        require(name.isNotEmpty() && name != "." && name != ".." && name.length <= 200 &&
-            name.matches(Regex("[a-zA-Z0-9._-]+"))) { "Unsafe storage component" }
+        require(name.isNotEmpty() && name != "." && name != ".." && name.toByteArray(Charsets.UTF_8).size <= 220 &&
+            name.all { it.isLetterOrDigit() || it in " ._-" }) { "Unsafe storage component" }
         return name
     }
     fun dicomFiles(root: File): Sequence<File> = root.walkTopDown().onEnter { dir ->
@@ -146,19 +146,29 @@ internal class VerifiedDicomStore(
     private val ownership: DocumentOwnership,
     private val coordinator: StorageCoordinator
 ) {
-    fun save(source: StorageSource, study: String, series: String, sop: String): DicomSaveResult = try {
+    fun save(source: StorageSource, study: String, series: String, sop: String,
+             duplicatePolicy: IncomingDuplicatePolicy = IncomingDuplicatePolicy.DEDUPLICATE,
+             studyFolderName: String = study): DicomSaveResult = try {
         StoragePaths.uid(study); StoragePaths.uid(series); StoragePaths.uid(sop)
         coordinator.receiving {
             val expected = fingerprint(source.open)
-            val studyDir = ensureDirectory(access.root, study)
+            val studyDir = coordinator.keyed("${access.scope}:study:$study") {
+                val existing = access.children(access.root).filter { it.directory && StudyFolderNames.belongs(it.name, study) }
+                require(existing.size <= 1) { "Ambiguous study directories; sources retained" }
+                existing.singleOrNull() ?: ensureDirectory(access.root, StudyFolderNames.checked(studyFolderName, study))
+            }
             val seriesDir = ensureDirectory(studyDir, series)
             coordinator.keyed("${access.scope}:${seriesDir.id}:$sop") {
                 val candidates = access.children(seriesDir).filter { !it.directory &&
                     (it.name == "$sop.dcm" || (it.name.startsWith("${sop}_dup_") && it.name.endsWith(".dcm"))) }
                 val identical = candidates.firstOrNull { fingerprint { access.read(it) } == expected }
-                if (identical != null) {
+                if (identical != null && duplicatePolicy == IncomingDuplicatePolicy.REJECT_IDENTICAL) {
+                    // Only a verified identical private temporary source may be discarded.
+                    finish(source, identical, expected, "Verified duplicate rejected by receiver policy")
+                    DicomSaveResult.Failure("Exact duplicate rejected by receiver policy", duplicateRejected = true)
+                } else if (identical != null && duplicatePolicy == IncomingDuplicatePolicy.DEDUPLICATE) {
                     // Do not claim ownership of an existing, possibly user-created, identical document.
-                    finish(source, identical, expected, "Identical re-transmission (verified SHA-256)")
+                    finish(source, identical, expected, "Identical re-transmission (verified SHA-256)", StorageDisposition.DUPLICATE_CONFIRMED)
                 } else {
                     var stage: StorageNode? = null
                     var target: StorageNode? = null
@@ -178,7 +188,9 @@ internal class VerifiedDicomStore(
                         ownership.record(OwnedDocument(access.scope, published.id, published.name, study, series, sop, expected))
                         committed = true
                         // The source survives crashes until content verification AND durable ownership commit.
-                        finish(source, published, expected, if (candidates.isEmpty()) "Verified new instance" else "Different content preserved separately")
+                        finish(source, published, expected, if (identical != null) "Identical re-transmission saved as separate copy"
+                            else if (candidates.isEmpty()) "Verified new instance" else "Different content preserved separately",
+                            if (identical != null) StorageDisposition.REPEAT_COPY else if (candidates.isEmpty()) StorageDisposition.NEW_COPY else StorageDisposition.CONTENT_COLLISION)
                     } catch (e: Exception) {
                         if (!committed) target?.let { runCatching { access.deleteFile(it) } }
                         throw e
@@ -196,11 +208,12 @@ internal class VerifiedDicomStore(
             require(existing.size <= 1 && existing.none { !it.directory }) { "Ambiguous destination directory" }
             existing.firstOrNull() ?: access.directory(parent, name)
         }
-    private fun finish(source: StorageSource, target: StorageNode, expected: ContentDigest, note: String): DicomSaveResult.Success {
+    private fun finish(source: StorageSource, target: StorageNode, expected: ContentDigest, note: String,
+                       disposition: StorageDisposition = StorageDisposition.UNKNOWN): DicomSaveResult.Success {
         require(fingerprint(source.open) == expected) { "Source changed during transfer; retained" }
         val removed = source.remove()
         return DicomSaveResult.Success(target.id, expected.bytes,
-            note + if (removed) "" else "; $RETAINED_SOURCE_WARNING", sourceRetained = !removed)
+            note + if (removed) "" else "; $RETAINED_SOURCE_WARNING", sourceRetained = !removed, disposition = disposition)
     }
     private fun copyAndVerify(open: () -> InputStream, target: StorageNode, expected: ContentDigest) {
         val copied = open().use { input -> access.write(target).use { output -> digest(input, output).also { output.flush() } } }

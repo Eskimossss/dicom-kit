@@ -116,6 +116,9 @@ data class DicomSessionSummary(
 object DicomSessionGrouper {
 
     private val timeFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+    // Patterns are immutable and thread safe; do not recompile them for every event/session.
+    private val legacySessionLabel = Regex("(?:SCU|SCP|ASSOC)-[0-9]+")
+    private val processSessionIdentity = Regex("^(?:SCU|SCP)-(R[0-9a-z]+-[0-9a-f]{6,32})-[0-9]+.*$")
 
     /**
      * Преобразует список сырых записей журнала в упорядоченный список сеансов (от новых к старым).
@@ -135,7 +138,7 @@ object DicomSessionGrouper {
         for (entry in rawEntries) {
             val key: String
             if (entry.sessionUid.isNotBlank() && (entry.sessionUid == entry.associationId ||
-                    entry.sessionUid.matches(Regex("(?:SCU|SCP|ASSOC)-[0-9]+")))) {
+                    legacySessionLabel.matches(entry.sessionUid))) {
                 // A short display label in legacy TSV is not a globally unique session identity.
                 key = "LEGACY-UNPROVEN-${entry.id}-${++legacyCounter}"
             } else if (entry.sessionUid.isNotBlank()) {
@@ -506,7 +509,7 @@ object DicomSessionGrouper {
         primaryOp: String,
         files: List<TransferredFileItem>
     ): Triple<SessionOutcomeStatus, String, String> {
-        val runId = Regex("^(?:SCU|SCP)-(R[0-9a-z]+-[0-9a-f]{6,32})-[0-9]+.*$")
+        val runId = processSessionIdentity
             .matchEntire(events.first().sessionUid)?.groupValues?.get(1)
         val terminal = events.any { it.category in setOf(DicomLogCategory.TCP_DISCONNECT, DicomLogCategory.ASSOCIATE_RJ, DicomLogCategory.ABORT) ||
             it.technicalDetails["SCU Batch Complete"] == "true" || it.technicalDetails["SCU Association Complete"] == "true" }

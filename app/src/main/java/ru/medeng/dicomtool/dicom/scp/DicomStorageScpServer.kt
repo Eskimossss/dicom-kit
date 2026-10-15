@@ -127,6 +127,13 @@ class DicomStorageScpServer(
     private val sockets = ConcurrentHashMap<Socket, DicomSessionManager.SessionIdentity>()
     private val storing = ConcurrentHashMap.newKeySet<Socket>()
     private val associations = ConcurrentHashMap<Socket, Association>()
+    private val recentNodes = ConcurrentHashMap<String, Long>()
+    private fun rememberNode(association: Association) {
+        val ae = association.callingAET ?: return
+        val ip = association.socket.inetAddress?.hostAddress ?: return
+        recentNodes["$ae ($ip)"] = System.currentTimeMillis()
+        if (recentNodes.size > 256) recentNodes.entries.minByOrNull { it.value }?.let { recentNodes.remove(it.key, it.value) }
+    }
 
     private val _state = MutableStateFlow(
         ScpReceiverState(
@@ -350,6 +357,8 @@ class DicomStorageScpServer(
             scheduledExecutor = sched
             synchronized(connectionGate) {
                 if (stopRequested) throw IOException("SCP start cancelled")
+                recentNodes.clear()
+                _state.update { it.copy(connectedNodes = emptyList()) }
                 accepting = true
                 scpDevice.bindConnections()
             }
@@ -513,8 +522,13 @@ class DicomStorageScpServer(
                     "Exception" to (ex?.toString() ?: "No exception observed")),
                 isError = ex != null, sessionUid = session.sessionUid)
         }
-        val nodes = associations.values.map { "${it.callingAET} (${it.socket.inetAddress.hostAddress})" }.distinct()
-        _state.update { it.copy(activeConnectionsCount = sockets.size, connectedNodes = nodes) }
+        synchronized(connectionGate) {
+            val nodes = recentNodes.entries.sortedByDescending { it.value }.map {
+                "${it.key} · последнее обращение ${java.text.SimpleDateFormat("HH:mm:ss", Locale.US).format(java.util.Date(it.value))}"
+            }
+            _state.update { it.copy(activeConnectionsCount = sockets.size,
+                connectedNodes = if (it.status == ScpServerStatus.STOPPED) emptyList() else nodes) }
+        }
     }
 
     private fun createConnectionMonitor(): ConnectionMonitor = object : ConnectionMonitor {
@@ -656,6 +670,7 @@ class DicomStorageScpServer(
         override fun onAssociationAccepted(asAssoc: Association) {
             associationIdentity(asAssoc)
             associations[asAssoc.socket] = asAssoc
+            rememberNode(asAssoc)
             val assocId = formatAssocId(asAssoc)
             val sessionUid = formatSessionUid(asAssoc)
             val rq: AAssociateRQ? = asAssoc.aAssociateRQ
@@ -827,6 +842,8 @@ class DicomStorageScpServer(
             cmd: Attributes,
             data: Attributes?
         ) {
+            rememberNode(asAssoc)
+            updateConnections()
             val assocId = formatAssocId(asAssoc)
             val sessionUid = formatSessionUid(asAssoc)
             val msgId = cmd.getInt(Tag.MessageID, 0)
@@ -932,6 +949,8 @@ class DicomStorageScpServer(
             data: PDVInputStream,
             rsp: Attributes
         ) {
+            rememberNode(asAssoc)
+            updateConnections()
             val startNs = System.nanoTime()
             val assocId = formatAssocId(asAssoc)
             val sessionUid = formatSessionUid(asAssoc)
@@ -943,7 +962,7 @@ class DicomStorageScpServer(
             val tsuid = pc.transferSyntax ?: UID.ImplicitVRLittleEndian
 
             val tmpDir = File(studyRepository.storageRootDir, ".incoming_tmp").apply { mkdirs() }
-            val tempFile = try { File.createTempFile("scp_${sanitizeFileName(iuid)}_", ".part", tmpDir) }
+            val tempFile = try { ru.medeng.dicomtool.data.storage.IncomingPayloadTracker.create(tmpDir, "scp_${sanitizeFileName(iuid)}_") }
             catch (e: IOException) {
                 throw DicomServiceException(if (e.message?.contains("ENOSPC", true) == true) Status.OutOfResources else Status.ProcessingFailure, e)
             }
@@ -997,7 +1016,8 @@ class DicomStorageScpServer(
                             title = "C-STORE storage verified (${formatByteCount(saveResult.savedSizeBytes)}); response pending",
                             summaryLines = listOf(
                                 "Status: 0x0000 (Success) | Время: ${String.format(Locale.US, "%.3f s", elapsedSec)}",
-                                "SOP Instance UID: $datasetSopUid"
+                                "SOP Instance UID: $datasetSopUid",
+                                saveResult.disposition.label
                             ),
                             technicalDetails = mapOf(
                                 "Association ID" to assocId,
@@ -1012,7 +1032,8 @@ class DicomStorageScpServer(
                                 "Saved Destination" to saveResult.destinationDescription,
                                 "Payload Size" to "${saveResult.savedSizeBytes} bytes (${formatByteCount(saveResult.savedSizeBytes)})",
                                 "Duration" to String.format(Locale.US, "%.4f s", elapsedSec),
-                                "Duplicate Policy" to saveResult.duplicateActionNote
+                                "Duplicate Policy" to saveResult.duplicateActionNote,
+                                "Storage Disposition" to saveResult.disposition.name
                             ),
                             sessionUid = sessionUid
                         )
@@ -1025,7 +1046,7 @@ class DicomStorageScpServer(
                             category = DicomLogCategory.SERVER_LIFECYCLE,
                             direction = DicomTrafficDirection.OUTBOUND,
                             associationId = assocId,
-                            title = "C-STORE storage failed ($statusHex); response pending",
+                            title = if (saveResult.duplicateRejected) "Точный повтор отклонён настройкой приёма; response pending" else "C-STORE storage failed ($statusHex); response pending",
                             summaryLines = listOf(
                                 "SOP Instance UID: $datasetSopUid",
                                 "Error: ${saveResult.errorReason}"
@@ -1073,6 +1094,8 @@ class DicomStorageScpServer(
                 )
                 if (e is DicomServiceException) throw e
                 throw DicomServiceException(Status.ProcessingFailure, e)
+            } finally {
+                ru.medeng.dicomtool.data.storage.IncomingPayloadTracker.release(tempFile)
             }
         }
     }
