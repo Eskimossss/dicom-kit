@@ -222,6 +222,7 @@ fun DicomLogScreen(
             .fillMaxSize()
             .background(CardSurfaceWhite)
     ) {
+        if (loggerHealth.historyLoading) Text("Загрузка сохранённой истории журнала…", fontSize = 12.sp)
         if (loggerHealth.needsAttention) Surface(color = WarningAmber.copy(alpha = 0.12f), modifier = Modifier.fillMaxWidth()
             .clickable { showLoggerDetails = true }) {
             Text(loggerHealth.warning, color = TextPrimaryDark, fontSize = 12.sp, modifier = Modifier.padding(10.dp))

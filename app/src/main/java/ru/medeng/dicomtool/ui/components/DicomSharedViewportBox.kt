@@ -91,6 +91,7 @@ fun DicomSharedViewportBox(
     windowCenter: Int,
     currentFrame: Int,
     totalFrames: Int,
+    modifier: Modifier = Modifier,
     currentInstance: Int = 1,
     totalInstances: Int = 1,
     defaultColumns: Int = 0,
@@ -106,8 +107,7 @@ fun DicomSharedViewportBox(
     onToggleInvert: () -> Unit,
     onAdjustWindow: (Int, Int) -> Unit,
     onStepFrame: (Int) -> Unit,
-    onToggleFullScreen: () -> Unit,
-    modifier: Modifier = Modifier
+    onToggleFullScreen: () -> Unit
 ) {
     var controlsVisible by remember { mutableStateOf(true) }
 

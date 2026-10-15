@@ -50,6 +50,34 @@ class ViewerStage54Test {
             })
         }
     }
+    @Test fun extensionlessSyntheticFileKeepsCyrillicAndPixelsWithoutChangingSource() {
+        val ds = attrs().apply {
+            setString(Tag.SpecificCharacterSet, VR.CS, "ISO_IR 192")
+            setString(Tag.PatientName, VR.PN, "СИНТЕТИЧЕСКИЙ^БЕЗРАСШИРЕНИЯ")
+        }
+        val file = java.nio.file.Files.createTempDirectory("stage56-extensionless").resolve("synthetic").toFile()
+        try {
+            val original = bytes(ds); file.writeBytes(original)
+            val metadata = DicomFileReader.readFromStream(file.inputStream(), fileName = file.name, fileSizeBytes = file.length())
+            assertEquals("СИНТЕТИЧЕСКИЙ^БЕЗРАСШИРЕНИЯ", metadata.summary.patientName)
+            assertTrue(DicomPixelDataDecoder.decodeFrameFromSource(file.path, streamOpener = { file.inputStream() }) is DicomPixelDecodeResult.Success)
+            assertArrayEquals(original, file.readBytes())
+        } finally { file.delete(); file.parentFile?.delete() }
+    }
+    @Test fun wrongDeclaredTransferSyntaxDoesNotBecomeVerifiedPixelImageOrMutateBytes() {
+        val ds = attrs()
+        val malformed = ByteArrayOutputStream().also { out ->
+            DicomOutputStream(out, UID.ExplicitVRLittleEndian).use {
+                it.writeFileMetaInformation(ds.createFileMetaInformation(UID.ExplicitVRLittleEndian))
+                it.switchTransferSyntax(UID.ImplicitVRLittleEndian)
+                ds.writeTo(it)
+            }
+        }.toByteArray()
+        val before = malformed.copyOf()
+        val result = DicomPixelDataDecoder.decodeFrameFromSource("synthetic-wrong-ts", streamOpener = { ByteArrayInputStream(malformed) })
+        assertFalse(result.toString(), result is DicomPixelDecodeResult.Success)
+        assertArrayEquals(before, malformed)
+    }
     @Test fun enhancedTransformsAndVoiAreResolvedForEachFrame() {
         val ds = enhanced(); val a = frame(ds); val b = frame(ds, 1)
         assertEquals(2.0, a.descriptor.rescaleSlope, 0.0); assertEquals(-100.0, a.descriptor.rescaleIntercept, 0.0)

@@ -22,7 +22,9 @@ class PersistentDicomTechnicalLogger(
     private val maxFileSizeBytes: Long = DEFAULT_MAX_FILE_SIZE_BYTES,
     private val maxRotatedFiles: Int = DEFAULT_MAX_ROTATED_FILES,
     private val queueCapacity: Int = DEFAULT_QUEUE_CAPACITY,
-    private val disk: LoggerDisk = FileLoggerDisk()
+    private val disk: LoggerDisk = FileLoggerDisk(),
+    private val deferHistoryLoad: Boolean = false,
+    private val beforeHistoryLoad: () -> Unit = {}
 ) : DicomTechnicalLogger {
     companion object {
         const val DEFAULT_MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024L
@@ -55,7 +57,7 @@ class PersistentDicomTechnicalLogger(
     private var stopped = false
     private var diskFailed = false
     private val stoppedLatch = CountDownLatch(1)
-    private var health = LoggerHealth()
+    private var health = LoggerHealth(historyLoading = deferHistoryLoad)
     private val _healthFlow = MutableStateFlow(health)
     val healthFlow: StateFlow<LoggerHealth> = _healthFlow.asStateFlow()
     private val _logsFlow = MutableStateFlow<List<DicomLogEntry>>(emptyList())
@@ -67,8 +69,11 @@ class PersistentDicomTechnicalLogger(
 
     init {
         require(queueCapacity > 0 && maxRotatedFiles >= 1 && maxFileSizeBytes > 0)
-        loadFromDisk()
-        writer.submit { writerLoop() }
+        if (!deferHistoryLoad) loadFromDisk()
+        writer.submit {
+            if (deferHistoryLoad) loadFromDisk()
+            writerLoop()
+        }
     }
     fun formatNow(): String = synchronized(timeFormatter) { timeFormatter.format(Date()) }
     private fun publishHealth() {
@@ -309,7 +314,10 @@ class PersistentDicomTechnicalLogger(
         if (rotationBackup().exists()) disk.delete(rotationBackup())
     }
     private fun loadFromDisk() {
-        if (rotationBackup().exists()) health = health.copy(rotationPending = true,
+        beforeHistoryLoad()
+        val loaded = ArrayDeque<DicomLogEntry>()
+        var recovered = LoggerHealth()
+        if (rotationBackup().exists()) recovered = recovered.copy(rotationPending = true,
             lastError = "Найдена незавершённая ротация; резервный файл прочитан и не удаляется автоматически")
         val files = listOf(rotationBackup()) + (maxRotatedFiles downTo 0).map { getRotatedFile(it) }
         for (file in files) {
@@ -317,24 +325,45 @@ class PersistentDicomTechnicalLogger(
             try {
                 file.useLines(Charsets.UTF_8) { lines -> lines.filter { it.isNotBlank() }.forEach { line ->
                     val entry = deserializeEntry(line)
-                    if (entry == null) health = health.copy(readFailures = health.readFailures + 1)
+                    if (entry == null) recovered = recovered.copy(readFailures = recovered.readFailures + 1)
                     else {
-                        memory.addLast(++sequence to entry)
-                        while (memory.size > 2000) memory.removeFirst()
+                        loaded.addLast(entry)
+                        while (loaded.size > 2000) loaded.removeFirst()
                         if (entry.technicalDetails["Logger Health"] == "1") {
                             fun number(key: String) = entry.technicalDetails[key]?.toLongOrNull()?.coerceAtLeast(0) ?: 0
-                            health = health.copy(droppedNormal = number("Dropped Normal"), droppedCritical = number("Dropped Critical"),
+                            recovered = recovered.copy(droppedNormal = number("Dropped Normal"), droppedCritical = number("Dropped Critical"),
                                 writeUnconfirmed = number("Write Unconfirmed"), criticalWriteUnconfirmed = number("Critical Write Unconfirmed"),
                                 rejectedAfterStop = number("Rejected After Stop"), rejectedCriticalAfterStop = number("Rejected Critical After Stop"),
-                                readFailures = maxOf(health.readFailures, number("Read Failures")), controlRejected = number("Control Rejected"),
+                                readFailures = maxOf(recovered.readFailures, number("Read Failures")), controlRejected = number("Control Rejected"),
                                 controlTimeouts = number("Control Timeouts"), controlFailures = number("Control Failures"))
                         }
                     }
                 } }
-            } catch (e: Exception) { health = health.copy(readFailures = health.readFailures + 1, lastError = "Чтение журнала: ${e.javaClass.simpleName}") }
+            } catch (e: Exception) { recovered = recovered.copy(readFailures = recovered.readFailures + 1, lastError = "Чтение журнала: ${e.javaClass.simpleName}") }
         }
-        _logsFlow.value = memory.map { it.second }
-        publishHealth()
+        synchronized(gate) {
+            val live = memory.toList()
+            memory.clear()
+            var historicalSequence = -loaded.size.toLong()
+            loaded.forEach { memory.addLast(historicalSequence++ to it) }
+            live.forEach { memory.addLast(it) }
+            while (memory.size > 2000) memory.removeFirst()
+            health = health.copy(historyLoading = false,
+                droppedNormal = health.droppedNormal + recovered.droppedNormal,
+                droppedCritical = health.droppedCritical + recovered.droppedCritical,
+                writeUnconfirmed = health.writeUnconfirmed + recovered.writeUnconfirmed,
+                criticalWriteUnconfirmed = health.criticalWriteUnconfirmed + recovered.criticalWriteUnconfirmed,
+                rejectedAfterStop = health.rejectedAfterStop + recovered.rejectedAfterStop,
+                rejectedCriticalAfterStop = health.rejectedCriticalAfterStop + recovered.rejectedCriticalAfterStop,
+                readFailures = health.readFailures + recovered.readFailures,
+                controlRejected = health.controlRejected + recovered.controlRejected,
+                controlTimeouts = health.controlTimeouts + recovered.controlTimeouts,
+                controlFailures = health.controlFailures + recovered.controlFailures,
+                rotationPending = health.rotationPending || recovered.rotationPending,
+                lastError = health.lastError ?: recovered.lastError)
+            _logsFlow.value = memory.map { it.second }
+            publishHealth()
+        }
     }
 
     // --- Защита PHI (Patient Health Information) ---

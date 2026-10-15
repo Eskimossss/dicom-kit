@@ -35,7 +35,8 @@ object DicomRuntimeRegistry {
             LocalDicomStudyRepository(
                 storageRootDir = dir,
                 context = appCtx,
-                storageManager = storageManager
+                storageManager = storageManager,
+                eagerLoad = false
             ).also { studyRepositoryInstance = it }
         }
     }
@@ -44,7 +45,7 @@ object DicomRuntimeRegistry {
     fun getTechnicalLogger(context: Context): PersistentDicomTechnicalLogger {
         return technicalLoggerInstance ?: run {
             val logFile = File(context.applicationContext.filesDir, "logs/dicom_technical_log.tsv")
-            PersistentDicomTechnicalLogger(logFile).also { technicalLoggerInstance = it }
+            PersistentDicomTechnicalLogger(logFile, deferHistoryLoad = true).also { technicalLoggerInstance = it }
         }
     }
 
@@ -69,6 +70,13 @@ object DicomRuntimeRegistry {
             DicomScuClient(logger, scuCacheDir).also { scuClientInstance = it }
         }
     }
+
+    private var archiveInstance: ru.medeng.dicomtool.data.storage.ArchiveOperations? = null
+
+    @Synchronized
+    fun getArchiveOperations(context: Context): ru.medeng.dicomtool.data.storage.ArchiveOperations =
+        archiveInstance ?: ru.medeng.dicomtool.data.storage.ArchiveOperations(getStudyRepository(context), getScpServer(context))
+            .also { archiveInstance = it }
 
     fun clearScuTempCache(context: Context) {
         val scuCacheDir = File(context.applicationContext.cacheDir, "scu_temp")

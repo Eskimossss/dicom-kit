@@ -1,5 +1,6 @@
 package ru.medeng.dicomtool.ui.navigation
 
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
@@ -27,7 +28,6 @@ import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -93,51 +93,53 @@ enum class ActiveSubScreen {
 fun DicomToolAppRoot(
     viewModel: DicomToolViewModel = viewModel()
 ) {
+    val archiveIndex by viewModel.archiveIndexState.collectAsStateWithLifecycle()
+    val archiveBusy by viewModel.isMigrating.collectAsStateWithLifecycle()
     val scpState by viewModel.scpState.collectAsStateWithLifecycle()
-    val aeTitleInput by viewModel.aeTitleInput.collectAsState()
-    val portInput by viewModel.portInput.collectAsState()
-    val dcm4cheReport by viewModel.dcm4cheReport.collectAsState()
-    val loggerHealth by viewModel.loggerHealth.collectAsState()
-    val studies by viewModel.studies.collectAsState()
-    val selectedModality by viewModel.selectedModalityFilter.collectAsState()
-    val selectedStudyUid by viewModel.selectedStudyUid.collectAsState()
-    val selectedSeriesUid by viewModel.selectedSeriesUid.collectAsState()
-    val selectedInstanceIndex by viewModel.selectedInstanceIndex.collectAsState()
-    val selectedTagForDetail by viewModel.selectedTagForDetail.collectAsState()
-    val tagSearchQuery by viewModel.tagSearchQuery.collectAsState()
-    val viewerZoom by viewModel.viewerZoom.collectAsState()
-    val viewerPan by viewModel.viewerPan.collectAsState()
-    val viewerInverted by viewModel.viewerInverted.collectAsState()
-    val viewerWW by viewModel.viewerWindowWidth.collectAsState()
-    val viewerWL by viewModel.viewerWindowCenter.collectAsState()
-    val viewerFrame by viewModel.viewerCurrentFrame.collectAsState()
-    val viewerRenderState by viewModel.viewerRenderState.collectAsState()
-    val receivedTags by viewModel.receivedTags.collectAsState()
-    val isViewerFullScreen by viewModel.isViewerFullScreen.collectAsState()
-    val scuConfig by viewModel.scuConfig.collectAsState()
-    val preparedScuObject by viewModel.preparedScuObject.collectAsState()
-    val freehandStrokes by viewModel.freehandStrokes.collectAsState()
-    val candidateFiles by viewModel.candidateFiles.collectAsState()
-    val batchProgress by viewModel.batchProgress.collectAsState()
-    val logDisplayMode by viewModel.logDisplayMode.collectAsState()
-    val logTrafficFilter by viewModel.logTrafficFilter.collectAsState()
-    val logOutcomeFilter by viewModel.logOutcomeFilter.collectAsState()
-    val logSearchQuery by viewModel.logSearchQuery.collectAsState()
-    val filteredSessionSummaries by viewModel.filteredSessionSummaries.collectAsState()
-    val filteredLogs by viewModel.filteredLogs.collectAsState()
-    val logs by viewModel.logs.collectAsState()
-    val expandedSessionKeys by viewModel.expandedSessionKeys.collectAsState()
-    val expandedLogIds by viewModel.expandedLogIds.collectAsState()
-    val autoScrollLogs by viewModel.autoScrollLogs.collectAsState()
-    val storageLocationInfo by viewModel.storageLocationInfo.collectAsState()
-    val isMigrating by viewModel.isMigrating.collectAsState()
-    val migrationStatusMessage by viewModel.migrationStatusMessage.collectAsState()
-    val externalSummary by viewModel.externalFileSummary.collectAsState()
-    val externalTags by viewModel.externalFileTags.collectAsState()
-    val isExternalLoading by viewModel.isExternalFileLoading.collectAsState()
-    val externalError by viewModel.externalFileError.collectAsState()
-    val externalSearchQuery by viewModel.externalTagSearchQuery.collectAsState()
-    val externalEncodingOverride by viewModel.externalTagEncodingOverride.collectAsState()
+    val aeTitleInput by viewModel.aeTitleInput.collectAsStateWithLifecycle()
+    val portInput by viewModel.portInput.collectAsStateWithLifecycle()
+    val dcm4cheReport by viewModel.dcm4cheReport.collectAsStateWithLifecycle()
+    val loggerHealth by viewModel.loggerHealth.collectAsStateWithLifecycle()
+    val studies by viewModel.studies.collectAsStateWithLifecycle()
+    val selectedModality by viewModel.selectedModalityFilter.collectAsStateWithLifecycle()
+    val selectedStudyUid by viewModel.selectedStudyUid.collectAsStateWithLifecycle()
+    val selectedSeriesUid by viewModel.selectedSeriesUid.collectAsStateWithLifecycle()
+    val selectedInstanceIndex by viewModel.selectedInstanceIndex.collectAsStateWithLifecycle()
+    val selectedTagForDetail by viewModel.selectedTagForDetail.collectAsStateWithLifecycle()
+    val tagSearchQuery by viewModel.tagSearchQuery.collectAsStateWithLifecycle()
+    val viewerZoom by viewModel.viewerZoom.collectAsStateWithLifecycle()
+    val viewerPan by viewModel.viewerPan.collectAsStateWithLifecycle()
+    val viewerInverted by viewModel.viewerInverted.collectAsStateWithLifecycle()
+    val viewerWW by viewModel.viewerWindowWidth.collectAsStateWithLifecycle()
+    val viewerWL by viewModel.viewerWindowCenter.collectAsStateWithLifecycle()
+    val viewerFrame by viewModel.viewerCurrentFrame.collectAsStateWithLifecycle()
+    val viewerRenderState by viewModel.viewerRenderState.collectAsStateWithLifecycle()
+    val receivedTags by viewModel.receivedTags.collectAsStateWithLifecycle()
+    val isViewerFullScreen by viewModel.isViewerFullScreen.collectAsStateWithLifecycle()
+    val scuConfig by viewModel.scuConfig.collectAsStateWithLifecycle()
+    val preparedScuObject by viewModel.preparedScuObject.collectAsStateWithLifecycle()
+    val freehandStrokes by viewModel.freehandStrokes.collectAsStateWithLifecycle()
+    val candidateFiles by viewModel.candidateFiles.collectAsStateWithLifecycle()
+    val batchProgress by viewModel.batchProgress.collectAsStateWithLifecycle()
+    val logDisplayMode by viewModel.logDisplayMode.collectAsStateWithLifecycle()
+    val logTrafficFilter by viewModel.logTrafficFilter.collectAsStateWithLifecycle()
+    val logOutcomeFilter by viewModel.logOutcomeFilter.collectAsStateWithLifecycle()
+    val logSearchQuery by viewModel.logSearchQuery.collectAsStateWithLifecycle()
+    val filteredSessionSummaries by viewModel.filteredSessionSummaries.collectAsStateWithLifecycle()
+    val filteredLogs by viewModel.filteredLogs.collectAsStateWithLifecycle()
+    val logs by viewModel.logs.collectAsStateWithLifecycle()
+    val expandedSessionKeys by viewModel.expandedSessionKeys.collectAsStateWithLifecycle()
+    val expandedLogIds by viewModel.expandedLogIds.collectAsStateWithLifecycle()
+    val autoScrollLogs by viewModel.autoScrollLogs.collectAsStateWithLifecycle()
+    val storageLocationInfo by viewModel.storageLocationInfo.collectAsStateWithLifecycle()
+    val isMigrating by viewModel.isMigrating.collectAsStateWithLifecycle()
+    val migrationStatusMessage by viewModel.migrationStatusMessage.collectAsStateWithLifecycle()
+    val externalSummary by viewModel.externalFileSummary.collectAsStateWithLifecycle()
+    val externalTags by viewModel.externalFileTags.collectAsStateWithLifecycle()
+    val isExternalLoading by viewModel.isExternalFileLoading.collectAsStateWithLifecycle()
+    val externalError by viewModel.externalFileError.collectAsStateWithLifecycle()
+    val externalSearchQuery by viewModel.externalTagSearchQuery.collectAsStateWithLifecycle()
+    val externalEncodingOverride by viewModel.externalTagEncodingOverride.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
     val activity = context as? Activity
@@ -168,8 +170,11 @@ fun DicomToolAppRoot(
         }
     }
 
-    var currentTab by rememberSaveable { mutableStateOf(MainBottomTab.RECEIVER) }
-    var activeSubScreen by rememberSaveable { mutableStateOf(ActiveSubScreen.NONE) }
+    // Keep navigation across Activity recreation, but do not restore a Viewer/queue screen
+    // into a new process whose transient source, bitmap and network operation no longer exist.
+    val processId = ru.medeng.dicomtool.data.logging.DicomSessionManager.appRunId
+    var currentTab by rememberSaveable(key = "main-tab-$processId") { mutableStateOf(MainBottomTab.RECEIVER) }
+    var activeSubScreen by rememberSaveable(key = "sub-screen-$processId") { mutableStateOf(ActiveSubScreen.NONE) }
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val isExpandedWidth = maxWidth >= 700.dp
@@ -178,6 +183,7 @@ fun DicomToolAppRoot(
             containerColor = AppBackgroundGray,
             contentWindowInsets = if (isViewerFullScreen) WindowInsets(0, 0, 0, 0) else WindowInsets.safeDrawing,
             topBar = {
+                Column {
                 if (!isViewerFullScreen && activeSubScreen == ActiveSubScreen.NONE) {
                     val topBarTitle = when (currentTab) {
                         MainBottomTab.RECEIVER -> "DICOM Приёмник (SCP)"
@@ -190,6 +196,10 @@ fun DicomToolAppRoot(
                         title = topBarTitle,
                         onOpenSettings = { activeSubScreen = ActiveSubScreen.SETTINGS_AND_CLEANUP }
                     )
+                }
+                if (!isViewerFullScreen && (archiveBusy || archiveIndex.isLoading || archiveIndex.warning != null)) {
+                    Text(archiveIndex.warning ?: "Архив обновляется: список и счётчики пока не окончательные…", modifier = Modifier.padding(8.dp), fontSize = 12.sp)
+                }
                 }
             },
             bottomBar = {
@@ -242,7 +252,7 @@ fun DicomToolAppRoot(
                 }
             }
         ) { innerPadding ->
-            BoxWithConstraints(
+            Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(if (isViewerFullScreen) androidx.compose.foundation.layout.PaddingValues(0.dp) else innerPadding)

@@ -62,8 +62,7 @@ class ScpLifecycleStage55Test {
         setInt(Tag.HighBit, VR.US, 7); setInt(Tag.PixelRepresentation, VR.US, 0)
         setBytes(Tag.PixelData, VR.OB, byteArrayOf(12, 34))
     }
-    private fun store(a: Association): Int {
-        val ds = data()
+    private fun store(a: Association, ds: Attributes = data()): Int {
         val rsp = a.cstore(UID.SecondaryCaptureImageStorage, ds.getString(Tag.SOPInstanceUID), 0,
             DataWriterAdapter(ds), UID.ExplicitVRLittleEndian)
         assertTrue(rsp.next()); return rsp.command.getInt(Tag.Status, -1)
@@ -97,7 +96,7 @@ class ScpLifecycleStage55Test {
     }
     @Test fun parallelConnectionsUseOneIdentityFromTcpThroughDimse() {
         start(); val connections = (1..6).map { connect() }
-        connections.map { a -> exec.submit { echo(a); assertEquals(0, store(a)) } }.forEach { it.get(10, TimeUnit.SECONDS) }
+        connections.map { a -> exec.submit { echo(a); val status = store(a); assertEquals(logger.logsFlow.value.filter { it.isError }.joinToString { it.technicalDetails.toString() }, 0, status) } }.forEach { it.get(10, TimeUnit.SECONDS) }
         connections.forEach { it.release() }
         await { server.state.value.activeConnectionsCount == 0 }
         val logs = logger.logsFlow.value
@@ -111,6 +110,32 @@ class ScpLifecycleStage55Test {
             assertEquals(1, group.count { it.category == DicomLogCategory.C_STORE_RSP })
         }
         assertFalse(logs.any { it.category == DicomLogCategory.RELEASE_RP || it.category == DicomLogCategory.RELEASE_RQ })
+    }
+    @Test fun parallelDifferentPixelsWithSameUidPreserveEveryObjectAndLeaveNoParts() {
+        start()
+        repeat(3) { batch ->
+            val connections = (0 until 8).map { connect() }
+            connections.mapIndexed { n, a -> exec.submit {
+                val ds = data().apply { setBytes(Tag.PixelData, VR.OB, byteArrayOf((batch * 8 + n).toByte(), 42)) }
+                assertEquals(0, store(a, ds))
+            } }.forEach { it.get(15, TimeUnit.SECONDS) }
+            connections.forEach { it.release() }
+            await { server.state.value.activeConnectionsCount == 0 }
+        }
+        val files = repo.storageRootDir.walkTopDown().filter { it.isFile && it.extension == "dcm" }.toList()
+        assertEquals(24, files.size)
+        val pixels = files.map { file -> org.dcm4che3.io.DicomInputStream(file).use { input ->
+            input.readFileMetaInformation(); input.readDataset().getBytes(Tag.PixelData)[0].toInt()
+        } }.toSet()
+        assertEquals((0 until 24).toSet(), pixels)
+        assertEquals(24, repo.getTotalSavedFilesCount())
+        assertTrue(File(repo.storageRootDir, ".incoming_tmp").listFiles().orEmpty().isEmpty())
+    }
+    @Test fun shortInstanceUidCannotViolateTemporaryFilePrefixContract() {
+        start(); val a = connect()
+        assertEquals(0, store(a, data().apply { setString(Tag.SOPInstanceUID, VR.UI, "1") }))
+        assertEquals(1, repo.getTotalSavedFilesCount())
+        assertTrue(File(repo.storageRootDir, ".incoming_tmp").listFiles().orEmpty().isEmpty())
     }
     @Test fun reusedSourcePortGetsNewIdentity() {
         start()

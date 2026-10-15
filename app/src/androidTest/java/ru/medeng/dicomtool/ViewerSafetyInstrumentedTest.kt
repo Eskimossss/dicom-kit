@@ -37,7 +37,8 @@ class ViewerSafetyInstrumentedTest {
     }
     private fun dataset(name: String, value: Int = 150, columns: Int = 4, photo: String = "MONOCHROME2") = Attributes().apply {
         setString(Tag.SOPClassUID, VR.UI, UID.SecondaryCaptureImageStorage)
-        val suffix = System.nanoTime().toString().takeLast(12)
+        // A clock substring can start with 0 and accidentally generate an invalid UI component.
+        val suffix = System.nanoTime().toString().takeLast(12).toLong().toString()
         setString(Tag.StudyInstanceUID, VR.UI, "1.2.840.999.54.$suffix")
         setString(Tag.SeriesInstanceUID, VR.UI, "1.2.840.999.541.$suffix")
         setString(Tag.SOPInstanceUID, VR.UI, "1.2.840.999.542.$suffix")
@@ -87,8 +88,10 @@ class ViewerSafetyInstrumentedTest {
         val ds = dataset("SYNTHETIC^RECEIVED", 200)
         val repo = DicomRuntimeRegistry.getStudyRepository(context)
         compose.runOnIdle { model.resetToInternalStorage() }
+        await { !model.isMigrating.value } // Storage changes now finish on the archive worker.
         val temp = File(context.cacheDir, "stage54-${UUID.randomUUID()}.dcm").apply { writeBytes(bytes(ds)) }
-        repo.saveIncomingInstance(temp, ds.getString(Tag.StudyInstanceUID), ds.getString(Tag.SeriesInstanceUID), ds.getString(Tag.SOPInstanceUID))
+        val saved = repo.saveIncomingInstance(temp, ds.getString(Tag.StudyInstanceUID), ds.getString(Tag.SeriesInstanceUID), ds.getString(Tag.SOPInstanceUID))
+        assertTrue(saved.toString(), saved is ru.medeng.dicomtool.data.storage.DicomSaveResult.Success)
         repo.refreshFromDisk(); await { model.studies.value.any { it.studyInstanceUid == ds.getString(Tag.StudyInstanceUID) } }
         compose.runOnIdle { model.selectStudy(ds.getString(Tag.StudyInstanceUID)) }
         await { model.viewerSource.value is ViewerSource.Received && model.viewerRenderState.value.let { it is DicomViewerRenderState.Ready && it.filePath != external.toString() } }
@@ -102,6 +105,34 @@ class ViewerSafetyInstrumentedTest {
         compose.runOnIdle { recreated.setViewerFullScreen(false); recreated.ensureExternalViewer() }
         await { ready(recreated, external) }
         assertEquals("SYNTHETIC^EXTERNAL", recreated.externalFileSummary.value!!.patientName)
+    }
+    @Test fun receivedSafObjectUsesResolverForPixelsAndLeavesOriginalUntouched() {
+        val model = vm()
+        val ds = dataset("SYNTHETIC^RECEIVED^SAF", 210)
+        val (seed, _) = source(dataset("SYNTHETIC^SEED"))
+        val tree = android.provider.DocumentsContract.buildTreeDocumentUri(seed.authority,
+            android.provider.DocumentsContract.getTreeDocumentId(seed))
+        await { !model.isMigrating.value }
+        compose.runOnIdle { model.setCustomSafStorage(tree) }
+        await { !model.isMigrating.value }
+        assertEquals(ru.medeng.dicomtool.data.storage.StorageType.SAF, model.storageLocationInfo.value.type)
+        val original = bytes(ds)
+        val incoming = File(context.cacheDir, "stage56-saf-${UUID.randomUUID()}").apply { writeBytes(original) }
+        val repo = DicomRuntimeRegistry.getStudyRepository(context)
+        try {
+            val result = repo.saveIncomingInstance(incoming, ds.getString(Tag.StudyInstanceUID),
+                ds.getString(Tag.SeriesInstanceUID), ds.getString(Tag.SOPInstanceUID))
+            assertTrue(result.toString(), result is ru.medeng.dicomtool.data.storage.DicomSaveResult.Success)
+            val path = (result as ru.medeng.dicomtool.data.storage.DicomSaveResult.Success).destinationDescription
+            assertTrue(path.startsWith("content://"))
+            compose.runOnIdle { model.selectStudy(ds.getString(Tag.StudyInstanceUID)) }
+            await { model.viewerRenderState.value.let { it is DicomViewerRenderState.Ready && it.filePath == path } }
+            assertEquals(210, (model.viewerRenderState.value as DicomViewerRenderState.Ready).bitmap.getPixel(0, 0) and 255)
+            assertArrayEquals(original, context.contentResolver.openInputStream(Uri.parse(path))!!.use { it.readBytes() })
+        } finally {
+            compose.runOnIdle { model.resetToInternalStorage() }
+            await { !model.isMigrating.value }
+        }
     }
     @Test fun externalFullscreenUsesSharedViewportAndReturnsToSameObject() {
         val model = vm(); val uri = source(dataset("SYNTHETIC^FULLSCREEN")).first

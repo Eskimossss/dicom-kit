@@ -10,6 +10,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -111,6 +113,7 @@ sealed class DicomViewerRenderState {
 class DicomToolViewModel(application: Application) : AndroidViewModel(application) {
 
     private val appContext = application.applicationContext
+    private val scuLeaseOwner = java.util.UUID.randomUUID().toString()
     private val engineVerifier = Dcm4cheEngineVerifier()
     private val studyRepository = DicomRuntimeRegistry.getStudyRepository(appContext)
     private val technicalLogger = DicomRuntimeRegistry.getTechnicalLogger(appContext)
@@ -174,30 +177,14 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
 
     // Состояние раздела 2: Принятые исследования из реального внутреннего хранилища
     val studies: StateFlow<List<DicomStudyItem>> = studyRepository.studiesFlow
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), studyRepository.studiesFlow.value)
 
     val storageManager: DicomStorageManager? = (studyRepository as? ru.medeng.dicomtool.data.storage.LocalDicomStudyRepository)?.storageManager
 
-    private val _storageLocationInfo = MutableStateFlow(
-        storageManager?.getStorageLocationInfo(
-            totalBytes = studyRepository.getTotalStorageBytes(),
-            filesCount = studyRepository.getTotalSavedFilesCount(),
-            studiesCount = studyRepository.studiesFlow.value.size
-        ) ?: StorageLocationInfo(
-            type = StorageType.INTERNAL,
-            displayPath = studyRepository.storageRootDir.absolutePath,
-            totalBytes = studyRepository.getTotalStorageBytes(),
-            filesCount = studyRepository.getTotalSavedFilesCount(),
-            studiesCount = studyRepository.studiesFlow.value.size
-        )
-    )
-    val storageLocationInfo: StateFlow<StorageLocationInfo> = _storageLocationInfo.asStateFlow()
-
-    private val _migrationStatusMessage = MutableStateFlow<String?>(null)
-    val migrationStatusMessage: StateFlow<String?> = _migrationStatusMessage.asStateFlow()
-
-    private val _isMigrating = MutableStateFlow(false)
-    val isMigrating: StateFlow<Boolean> = _isMigrating.asStateFlow()
+    private val archive = DicomRuntimeRegistry.getArchiveOperations(appContext)
+    val archiveIndexState = studyRepository.indexState
+    val storageLocationInfo = archive.info
+    val isMigrating = archive.busy
+    val migrationStatusMessage = archive.message
 
     private val _selectedModalityFilter = MutableStateFlow("ALL")
     val selectedModalityFilter: StateFlow<String> = _selectedModalityFilter.asStateFlow()
@@ -291,7 +278,6 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
 
     // Состояние раздела «Журнал DICOM» (Этап 4.3.2: Краткий и Подробный режимы, фильтрация, поиск)
     val logs: StateFlow<List<DicomLogEntry>> = technicalLogger.logsFlow
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val loggerHealth = technicalLogger.healthFlow
 
     private val _logDisplayMode = MutableStateFlow(DicomLogDisplayMode.BRIEF)
@@ -320,6 +306,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
         .combine(_logSearchQuery) { rawLogs, _ ->
             DicomSessionGrouper.groupEvents(rawLogs)
         }
+        .flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // Отфильтрованные сеансы для Краткого режима
@@ -427,7 +414,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     // --- Действия раздела «Принятые исследования», DICOM Viewer и экрана тегов ---
 
     fun refreshReceivedStudies() {
-        scpServer.refreshCountersFromRepository()
+        archive.refresh()
     }
 
     fun setModalityFilter(modality: String) {
@@ -729,7 +716,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
                 val result = withContext(Dispatchers.IO) { viewerWorkMutex.withLock {
                     check()
                     val decoded = DicomPixelDataDecoder.decodeFrameFromSource(filePath,
-                        streamOpener = { if (external != null) appContext.contentResolver.openInputStream(Uri.parse(filePath)) else File(filePath).inputStream() },
+                        streamOpener = { if (external != null || filePath.startsWith("content://")) appContext.contentResolver.openInputStream(Uri.parse(filePath)) else File(filePath).inputStream() },
                         frameIndex = frameIndex, cache = frameCache, checkCancelled = check)
                     if (decoded is DicomPixelDecodeResult.Success) {
                         val d = decoded.frame.descriptor
@@ -772,17 +759,12 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
         renderJob?.cancel()
         frameCache.clear()
         lastLoadedFilePath = null
-        studyRepository.deleteStudy(studyInstanceUid)
-        scpServer.refreshCountersFromRepository()
+        archive.deleteStudy(studyInstanceUid)
         if (_selectedStudyUid.value == studyInstanceUid) {
-            val nextUid = studyRepository.studiesFlow.value.firstOrNull()?.studyInstanceUid
-            _selectedStudyUid.value = nextUid
+            _selectedStudyUid.value = null
+            _selectedSeriesUid.value = null
             _selectedTagForDetail.value = null
-            if (nextUid != null) {
-                selectStudy(nextUid)
-            } else {
-                _viewerRenderState.value = DicomViewerRenderState.Idle
-            }
+            changeViewerSource(ru.medeng.dicomtool.domain.model.ViewerSource.None)
         }
     }
 
@@ -791,8 +773,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
         renderJob?.cancel()
         frameCache.clear()
         lastLoadedFilePath = null
-        studyRepository.clearAllStudies()
-        scpServer.refreshCountersFromRepository()
+        archive.clearStudies()
         _selectedStudyUid.value = null
         _selectedSeriesUid.value = null
         _selectedTagForDetail.value = null
@@ -893,6 +874,8 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
         val snapshot = _scuConfig.value
         if (snapshot.isOperationInProgress) return
 
+        val lease = ru.medeng.dicomtool.dicom.scu.ScuOperationGate.acquire(scuLeaseOwner, "C-ECHO") ?: return
+
         _scuConfig.update {
             it.copy(
                 isOperationInProgress = true,
@@ -904,7 +887,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
             )
         }
 
-        viewModelScope.launch {
+        val operationJob = viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
                 scuClient.performCEcho(
                     remoteHost = snapshot.remoteIp,
@@ -915,6 +898,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
             }
             applyScuOperationResult(result)
         }
+        operationJob.invokeOnCompletion { ru.medeng.dicomtool.dicom.scu.ScuOperationGate.release(lease) }
     }
 
     /**
@@ -977,6 +961,8 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
 
         val prepared = _preparedScuObject.value ?: syncPreparedScuObject(forceNewObject = false)
 
+        val lease = ru.medeng.dicomtool.dicom.scu.ScuOperationGate.acquire(scuLeaseOwner, "C-STORE") ?: return
+
         _scuConfig.update {
             it.copy(
                 isOperationInProgress = true,
@@ -988,7 +974,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
             )
         }
 
-        viewModelScope.launch {
+        val operationJob = viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
                 scuClient.performCStore(
                     remoteHost = snapshot.remoteIp,
@@ -1003,6 +989,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
             }
             applyScuOperationResult(result)
         }
+        operationJob.invokeOnCompletion { ru.medeng.dicomtool.dicom.scu.ScuOperationGate.release(lease) }
     }
 
     /**
@@ -1040,6 +1027,8 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
 
         val prepared = syncPreparedScuObject(forceNewObject = false)
 
+        val lease = ru.medeng.dicomtool.dicom.scu.ScuOperationGate.acquire(scuLeaseOwner, "C-STORE") ?: return
+
         _scuConfig.update {
             it.copy(
                 isOperationInProgress = true,
@@ -1051,7 +1040,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
             )
         }
 
-        viewModelScope.launch {
+        val operationJob = viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
                 scuClient.performCStore(
                     remoteHost = snapshot.remoteIp,
@@ -1066,6 +1055,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
             }
             applyScuOperationResult(result)
         }
+        operationJob.invokeOnCompletion { ru.medeng.dicomtool.dicom.scu.ScuOperationGate.release(lease) }
     }
 
     // --- Действия пакетной отправки DICOM-файлов (Этап 4.2) ---
@@ -1152,6 +1142,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
             _batchProgress.value.isScanning || sendJob?.isActive == true) return
         val files = _candidateFiles.value.filter { it.isValidDicom }.toList()
         if (files.isEmpty()) return
+        val lease = ru.medeng.dicomtool.dicom.scu.ScuOperationGate.acquire(scuLeaseOwner, "C-STORE batch") ?: return
         val snapshot = _scuConfig.value
         val cancellation = ru.medeng.dicomtool.dicom.scu.ScuCancellation()
         sendCancellation = cancellation
@@ -1213,59 +1204,20 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
                 }
             }
         }
+        sendJob?.invokeOnCompletion { ru.medeng.dicomtool.dicom.scu.ScuOperationGate.release(lease) }
     }
     // --- Действия раздела «Хранилище DICOM и SAF» ---
 
 
-    init {
-        // Failed receptions do not update the study index. Monitor retained payloads independently.
-        viewModelScope.launch(Dispatchers.IO) {
-            while (true) {
-                val retained = ru.medeng.dicomtool.data.storage.RetainedIncoming.inspect(studyRepository.storageRootDir)
-                _storageLocationInfo.update { it.copy(retainedIncoming = retained) }
-                kotlinx.coroutines.delay(5_000)
-            }
-        }
-    }
-
-    fun refreshStorageInfo() {
-        val count = studyRepository.getTotalSavedFilesCount()
-        val bytes = studyRepository.getTotalStorageBytes()
-        val studiesCount = studyRepository.studiesFlow.value.size
-        _storageLocationInfo.value = (storageManager?.getStorageLocationInfo(
-            totalBytes = bytes,
-            filesCount = count,
-            studiesCount = studiesCount
-        ) ?: StorageLocationInfo(
-            type = StorageType.INTERNAL,
-            displayPath = studyRepository.storageRootDir.absolutePath,
-            totalBytes = bytes,
-            filesCount = count,
-            studiesCount = studiesCount
-        )).copy(retainedIncoming = ru.medeng.dicomtool.data.storage.RetainedIncoming.inspect(studyRepository.storageRootDir))
-    }
-
-    fun setCustomSafStorage(treeUri: Uri): Result<Unit> {
-        val sm = storageManager ?: return Result.failure(IllegalStateException("Менеджер хранилища недоступен"))
-        val result = sm.setCustomSafStorage(treeUri)
-        if (result.isSuccess) {
-            studyRepository.refreshFromDisk()
-            refreshStorageInfo()
-        }
-        return result
-    }
-
-    fun resetToInternalStorage() {
-        storageManager?.resetToInternalStorage()
-        studyRepository.refreshFromDisk()
-        refreshStorageInfo()
-    }
+    fun refreshStorageInfo() = archive.refresh()
+    fun setCustomSafStorage(treeUri: Uri) = archive.setSaf(treeUri)
+    fun resetToInternalStorage() = archive.resetInternal()
 
     /**
      * Открывает активный каталог хранения в системном файловом менеджере Android (если настроен SAF).
      */
     fun openStorageFolder(context: android.content.Context) {
-        val info = _storageLocationInfo.value
+        val info = storageLocationInfo.value
         if (info.type == StorageType.SAF && !info.safTreeUriString.isNullOrBlank()) {
             val uri = Uri.parse(info.safTreeUriString)
             try {
@@ -1291,29 +1243,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    fun migrateStudies(fromInternalToSaf: Boolean) {
-        val sm = storageManager ?: return
-        if (_isMigrating.value) return
-        _isMigrating.value = true
-        _migrationStatusMessage.value = "Выполняется безопасный перенос исследований..."
-        viewModelScope.launch {
-            val res = withContext(Dispatchers.IO) {
-                sm.migrateFiles(fromInternalToSaf) { current, total ->
-                    _migrationStatusMessage.value = "Перенос: $current из $total файлов..."
-                }
-            }
-            studyRepository.refreshFromDisk()
-            refreshStorageInfo()
-            _isMigrating.value = false
-            _migrationStatusMessage.value = (if (res.failedCount == 0) {
-                "Успешно перенесено ${res.successfullyMigrated} файлов."
-            } else {
-                "Перенесено ${res.successfullyMigrated} файлов. Ошибок: ${res.failedCount} (${res.errorDetails.firstOrNull() ?: ""})"
-            }) + if (res.retainedSourceCount > 0) {
-                "\nПроверенные копии сохранены, но не удалось удалить исходные файлы: ${res.retainedSourceCount}. Источники оставлены на месте. Повторите перенос после восстановления доступа; одинаковые копии не будут созданы повторно."
-            } else ""
-        }
-    }
+    fun migrateStudies(fromInternalToSaf: Boolean) = archive.migrate(fromInternalToSaf)
 
     private fun applyScuOperationResult(result: ScuOperationResult) {
         when (result) {
@@ -1471,6 +1401,33 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
         _externalTagSearchQuery.value = query
     }
 
+    init {
+        viewModelScope.launch {
+            var observingOtherOwner = false
+            ru.medeng.dicomtool.dicom.scu.ScuOperationGate.active.collect { lease ->
+                if (lease != null && lease.owner != scuLeaseOwner) {
+                    observingOtherOwner = true
+                    _scuConfig.update { it.copy(isOperationInProgress = true, activeOperationName = lease.operation,
+                        lastStatusTitle = "Операция ещё выполняется", lastStatusMessage = "Ожидается завершение сетевой операции предыдущего экрана и освобождение ресурсов.", isLastOperationSuccess = null) }
+                } else if (lease == null && observingOtherOwner) {
+                    observingOtherOwner = false
+                    _scuConfig.update { it.copy(isOperationInProgress = false, activeOperationName = null,
+                        lastStatusTitle = "Операция завершена", lastStatusMessage = "Проверьте результаты файлов, ответы узла и состояние записи технического журнала.", isLastOperationSuccess = null) }
+                }
+            }
+        }
+        viewModelScope.launch {
+            combine(studies, archive.busy, archiveIndexState) { list, busy, state -> Triple(list, busy, state) }
+                .collect { (list, busy, state) ->
+                    val source = _viewerSource.value as? ru.medeng.dicomtool.domain.model.ViewerSource.Received
+                    if (!busy && !state.isLoading && source != null && list.none { it.studyInstanceUid == source.studyInstanceUid }) {
+                        changeViewerSource(ru.medeng.dicomtool.domain.model.ViewerSource.None)
+                        _selectedStudyUid.value = null
+                    }
+                }
+        }
+    }
+
     override fun onCleared() {
         receivedTagRequests.next(); receivedTagJob?.cancel()
         metadataRequests.next(); renderRequests.next(); externalLoadJob?.cancel()
@@ -1479,6 +1436,6 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
         super.onCleared()
         renderJob?.cancel()
         frameCache.clear()
-        DicomRuntimeRegistry.clearScuTempCache(appContext)
+        // Each SCU operation cleans up only its own temporary file in finally.
     }
 }

@@ -7,6 +7,7 @@ enum class LoggerWriteState(val labelRu: String) {
 
 data class LoggerHealth(
     val state: LoggerWriteState = LoggerWriteState.ACTIVE,
+    val historyLoading: Boolean = false,
     val accepted: Long = 0, val persisted: Long = 0,
     val droppedNormal: Long = 0, val droppedCritical: Long = 0,
     val writeUnconfirmed: Long = 0, val criticalWriteUnconfirmed: Long = 0, val readFailures: Long = 0,

@@ -56,6 +56,69 @@ class ScpLifecycleInstrumentedTest {
         compose.runOnIdle { DicomScpForegroundService.startScpService(context, "ANDROID_SYNTH55", port) }
         await { server.state.value.status == ScpServerStatus.RUNNING && nm.activeNotifications.any { it.id == 11112 } }
     }
+    @Test fun sustainedSyntheticTrafficRecordsMemoryAndThreadsForThreeMinutes() {
+        val repo = DicomRuntimeRegistry.getStudyRepository(context)
+        DicomRuntimeRegistry.getArchiveOperations(context).resetInternal()
+        await { !DicomRuntimeRegistry.getArchiveOperations(context).busy.value }
+        start()
+        val exec = java.util.concurrent.Executors.newCachedThreadPool()
+        val sched = java.util.concurrent.Executors.newSingleThreadScheduledExecutor()
+        val device = Device("stage56-soak")
+        val conn = Connection().apply { connectTimeout = 3000; responseTimeout = 5000; releaseTimeout = 2000 }
+        val ae = ApplicationEntity("SYNTHETIC56")
+        ae.addConnection(conn); device.addConnection(conn); device.addApplicationEntity(ae)
+        device.executor = exec; device.scheduledExecutor = sched
+        val rq = AAssociateRQ().apply {
+            callingAET = "SYNTHETIC56"; calledAET = "ANDROID_SYNTH55"
+            addPresentationContext(PresentationContext(1, UID.Verification, UID.ImplicitVRLittleEndian))
+            addPresentationContext(PresentationContext(3, UID.SecondaryCaptureImageStorage, UID.ExplicitVRLittleEndian))
+        }
+        val study = "1.2.826.0.1.56.${System.currentTimeMillis()}"
+        var association: Association? = null
+        try {
+            association = ae.connect(conn, Connection("scp", "127.0.0.1", port), rq)
+            val samples = mutableListOf<String>()
+            fun sample(seconds: Long) {
+                val info = android.os.Debug.MemoryInfo(); android.os.Debug.getMemoryInfo(info)
+                val threads = java.io.File("/proc/self/task").list().orEmpty().size
+                samples.add("$seconds,${info.totalPss},$threads")
+            }
+            System.gc(); Thread.sleep(500)
+            val begin = System.nanoTime(); var sent = 0; var lastSample = -1L
+            while (TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - begin) < 180) {
+                val ds = Attributes().apply {
+                    setString(Tag.SOPClassUID, VR.UI, UID.SecondaryCaptureImageStorage)
+                    setString(Tag.StudyInstanceUID, VR.UI, study)
+                    setString(Tag.SeriesInstanceUID, VR.UI, "$study.1")
+                    setString(Tag.SOPInstanceUID, VR.UI, "$study.1.${sent + 1}")
+                    setString(Tag.PatientName, VR.PN, "SYNTHETIC^SOAK56")
+                    setInt(Tag.Rows, VR.US, 1); setInt(Tag.Columns, VR.US, 2)
+                    setInt(Tag.SamplesPerPixel, VR.US, 1); setInt(Tag.BitsAllocated, VR.US, 8)
+                    setInt(Tag.BitsStored, VR.US, 8); setInt(Tag.HighBit, VR.US, 7)
+                    setInt(Tag.PixelRepresentation, VR.US, 0)
+                    setString(Tag.PhotometricInterpretation, VR.CS, "MONOCHROME2")
+                    setBytes(Tag.PixelData, VR.OB, byteArrayOf(sent.toByte(), 42))
+                }
+                val response = association.cstore(UID.SecondaryCaptureImageStorage, ds.getString(Tag.SOPInstanceUID), 0,
+                    DataWriterAdapter(ds), UID.ExplicitVRLittleEndian)
+                assertTrue(response.next()); assertEquals(0, response.command.getInt(Tag.Status, -1)); sent++
+                val echo = association.cecho(); assertTrue(echo.next()); assertEquals(0, echo.command.getInt(Tag.Status, -1))
+                val seconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - begin)
+                if (seconds / 30 > lastSample) { sample(seconds); lastSample = seconds / 30 }
+                Thread.sleep(500)
+            }
+            sample(180)
+            System.gc(); Thread.sleep(1000); sample(181) // Separate post-GC observation, not a no-leak assertion.
+            association.release(); association.waitForSocketClose()
+            assertTrue(sent >= 100)
+            assertEquals(sent, repo.studiesFlow.value.single { it.studyInstanceUid == study }.instancesCount)
+            val metrics = "seconds,pss_kib,process_threads\n" + samples.joinToString("\n") + "\naccepted=$sent\n"
+            java.io.File(context.filesDir, "stage56-soak.csv").writeText(metrics)
+            android.util.Log.i("STAGE56", metrics)
+        } finally {
+            association?.socket?.close(); exec.shutdownNow(); sched.shutdownNow(); stop()
+        }
+    }
     private fun stop() {
         compose.runOnIdle { DicomScpForegroundService.stopScpService(context) }
         await { server.state.value.status in listOf(ScpServerStatus.STOPPED, ScpServerStatus.ERROR) && !server.state.value.serviceStopping && nm.activeNotifications.none { it.id == 11112 } }
@@ -120,6 +183,9 @@ class ScpLifecycleInstrumentedTest {
         val old = shell("device_config get activity_manager data_sync_fgs_timeout_duration").trim()
         try {
             shell("device_config put activity_manager data_sync_fgs_timeout_duration 2000")
+            // DeviceConfig's listener is asynchronous. Starting before ActivityManager has
+            // applied the value schedules the normal six-hour callback instead of this test's 2 s.
+            await { Regex("(?m)^\\s*data_sync_fgs_timeout_duration=2000\\s*$").containsMatchIn(shell("dumpsys activity settings")) }
             start()
             context.startActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             await { server.state.value.errorMessage?.contains("Android остановил dataSync") == true }

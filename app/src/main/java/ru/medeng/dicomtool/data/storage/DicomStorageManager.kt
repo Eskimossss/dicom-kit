@@ -87,20 +87,18 @@ data class MigrationResult(
  * - Перенос файлов с проверкой успешности копирования до удаления оригинала.
  */
 class DicomStorageManager(
-    private val context: Context,
+    context: Context,
     val internalStorageDir: File = File(context.filesDir, "received_dicom")
 ) {
 
-    private val prefs = context.getSharedPreferences("dicom_storage_settings", Context.MODE_PRIVATE)
+    private val context = context.applicationContext as android.app.Application
+    private val prefs by lazy { context.getSharedPreferences("dicom_storage_settings", Context.MODE_PRIVATE) }
 
     companion object {
         private const val PREF_KEY_STORAGE_TYPE = "storage_type"
         private const val PREF_KEY_SAF_URI = "saf_tree_uri"
     }
 
-    init {
-        internalStorageDir.mkdirs()
-    }
 
     /**
      * Возвращает текущий тип активного хранилища (INTERNAL или SAF).
@@ -322,8 +320,8 @@ class DicomStorageManager(
         }
     }
 
-    private val coordinator = StorageCoordinator.forRoot(internalStorageDir)
-    private val ownership = DocumentOwnership.forRoot(internalStorageDir)
+    private val coordinator by lazy { StorageCoordinator.forRoot(internalStorageDir) }
+    private val ownership by lazy { DocumentOwnership.forRoot(internalStorageDir) }
 
     private fun store(access: StorageAccess) = VerifiedDicomStore(access, ownership, coordinator)
 

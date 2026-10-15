@@ -64,17 +64,23 @@ interface DicomStudyRepository {
  */
 class LocalDicomStudyRepository(
     override val storageRootDir: File,
-    val context: Context? = null,
-    override val storageManager: DicomStorageManager? = null
+    context: Context? = null,
+    override val storageManager: DicomStorageManager? = null,
+    eagerLoad: Boolean = true,
+    private val onHeaderRead: () -> Unit = {}
 ) : DicomStudyRepository {
 
+    private val context = context?.applicationContext as? android.app.Application
     private val lock = ReentrantLock()
+    private val coordinator by lazy { StorageCoordinator.forRoot(storageRootDir) }
+    private val records = LinkedHashMap<String, ParsedRecord>()
+    private val _indexState = MutableStateFlow(ArchiveIndexState(isLoading = !eagerLoad))
+    val indexState: StateFlow<ArchiveIndexState> = _indexState.asStateFlow()
     private val _studiesFlow = MutableStateFlow<List<DicomStudyItem>>(emptyList())
     override val studiesFlow: StateFlow<List<DicomStudyItem>> = _studiesFlow.asStateFlow()
 
     init {
-        storageRootDir.mkdirs()
-        refreshFromDisk()
+        if (eagerLoad) refreshFromDisk()
     }
 
     override fun saveIncomingInstance(
@@ -82,8 +88,8 @@ class LocalDicomStudyRepository(
         studyInstanceUid: String,
         seriesInstanceUid: String,
         sopInstanceUid: String
-    ): DicomSaveResult {
-        return if (storageManager != null) {
+    ): DicomSaveResult = coordinator.receiving {
+        val result = if (storageManager != null) {
             storageManager.saveIncomingDicomFile(
                 tempIncomingFile = tempIncomingFile,
                 studyInstanceUid = studyInstanceUid,
@@ -95,11 +101,36 @@ class LocalDicomStudyRepository(
                 StorageCoordinator.forRoot(storageRootDir)).save(tempIncomingFile.storageSource(),
                 studyInstanceUid, seriesInstanceUid, sopInstanceUid)
         }
+        if (result is DicomSaveResult.Success) {
+            // Read only the verified destination; indexing is not a second C-STORE transaction.
+            runCatching {
+                val path = result.destinationDescription
+                val rec = if (path.startsWith("content://")) {
+                    val uri = Uri.parse(path)
+                    parseSummaryFromSource(path, uri.lastPathSegment ?: "received.dcm", result.savedSizeBytes,
+                        System.currentTimeMillis()) { context?.contentResolver?.openInputStream(uri) }
+                } else {
+                    val file = File(path)
+                    parseSummaryFromSource(path, file.name, result.savedSizeBytes, file.lastModified()) { FileInputStream(file) }
+                }
+                lock.withLock {
+                    if (rec != null) {
+                        records[path] = rec
+                        _indexState.value = _indexState.value.copy(indexedFiles = records.size)
+                        publishRecords(records.values.filter { it.studyInstanceUid == rec.studyInstanceUid }, rec.studyInstanceUid)
+                    } else _indexState.value = _indexState.value.copy(warning = "Файл сохранён, но заголовок не включён в индекс: неподдерживаемые или повреждённые metadata")
+                }
+            }.onFailure { _indexState.value = _indexState.value.copy(warning = "Файл сохранён; индекс требует обновления: ${it.javaClass.simpleName}") }
+        }
+        result
     }
 
-    override fun refreshFromDisk() {
-        lock.withLock {
+    override fun refreshFromDisk() = coordinator.maintenance {
+        _indexState.value = ArchiveIndexState(isLoading = true)
+        try { lock.withLock {
+            storageRootDir.mkdirs()
             val parsedRecords = ArrayList<ParsedRecord>()
+            var unreadable = 0
 
             // 1. Сканируем внутреннее хранилище (если существует)
             if (storageRootDir.exists()) {
@@ -113,12 +144,13 @@ class LocalDicomStudyRepository(
                         lastModified = file.lastModified(),
                         streamOpener = { FileInputStream(file) }
                     )
-                    if (rec != null) parsedRecords.add(rec)
+                    if (rec != null) parsedRecords.add(rec) else unreadable++
                 }
             }
 
             // 2. Сканируем настроенный SAF каталог (если настроен, доступен и context != null)
             val safUri = storageManager?.getSavedSafTreeUri()
+            var warning: String? = null
             if (context != null && safUri != null && storageManager?.isSafStorageWritable(safUri) == true) {
                 try {
                     val rootDoc = DocumentFile.fromTreeUri(context, safUri)
@@ -136,21 +168,23 @@ class LocalDicomStudyRepository(
                                         lastModified = doc.lastModified(),
                                         streamOpener = { context.contentResolver.openInputStream(doc.uri) }
                                     )
-                                    if (rec != null) parsedRecords.add(rec)
+                                    if (rec != null) parsedRecords.add(rec) else unreadable++
                                 }
                             }
                         }
                     }
-                } catch (_: Exception) {
-                    // Ошибки сканирования SAF (например временное отключение карты) не ломают чтение внутреннего хранилища
-                }
-            }
+                } catch (e: Exception) { warning = "Индекс SAF неполон: ${e.javaClass.simpleName}" }
+            } else if (safUri != null) warning = "SAF недоступен: доступ отозван или провайдер отключён. Показаны только доступные внутренние файлы."
+            records.clear()
+            parsedRecords.forEach { records[it.path] = it }
+            publishRecords(parsedRecords)
+            _indexState.value = ArchiveIndexState(warning = warning ?: if (unreadable > 0) "Не прочитаны заголовки: $unreadable. Файлы не изменены." else null, indexedFiles = parsedRecords.size)
+        } } catch (e: Exception) {
+            _indexState.value = ArchiveIndexState(warning = "Обновление индекса не завершено: ${e.javaClass.simpleName}")
+        }
+    }
 
-            if (parsedRecords.isEmpty()) {
-                _studiesFlow.value = emptyList()
-                return
-            }
-
+    private fun publishRecords(parsedRecords: Collection<ParsedRecord>, affectedStudy: String? = null) {
             // Группируем по StudyInstanceUID
             val groupedByStudy = parsedRecords.groupBy { it.studyInstanceUid }
 
@@ -160,6 +194,7 @@ class LocalDicomStudyRepository(
 
                 val seriesGroups = groupedBySeries.map { (seriesUid, seriesRecords) ->
                     val firstInSeries = seriesRecords.first()
+                    val duplicateCounts = seriesRecords.groupingBy { it.sopInstanceUid }.eachCount()
                     val sortedInstances = seriesRecords
                         .sortedWith(compareBy({ it.instanceNumber }, { it.sopInstanceUid }, { it.displayName }))
                         .map { rec ->
@@ -186,7 +221,7 @@ class LocalDicomStudyRepository(
                                 encodingWarning = rec.encodingWarning,
                                 filePath = rec.path,
                                 fileSizeBytes = rec.fileSize,
-                                duplicateCopyCount = seriesRecords.count { it.sopInstanceUid == rec.sopInstanceUid } - 1
+                                duplicateCopyCount = (duplicateCounts[rec.sopInstanceUid] ?: 1) - 1
                             )
                         }
                     DicomSeriesGroup(
@@ -236,8 +271,8 @@ class LocalDicomStudyRepository(
                 )
             }.sortedByDescending { it.studyDateFormatted }
 
-            _studiesFlow.value = studyItems
-        }
+            _studiesFlow.value = if (affectedStudy == null) studyItems else
+                (_studiesFlow.value.filterNot { it.studyInstanceUid == affectedStudy } + studyItems).sortedByDescending { it.studyDateFormatted }
     }
 
     override fun getTagsForStudy(
@@ -287,10 +322,10 @@ class LocalDicomStudyRepository(
         }
     }
 
-    override fun deleteStudy(studyInstanceUid: String): Boolean = lock.withLock {
-        StorageCoordinator.forRoot(storageRootDir).maintenance {
+    override fun deleteStudy(studyInstanceUid: String): Boolean = coordinator.maintenance {
+        lock.withLock {
             val study = _studiesFlow.value.firstOrNull { it.studyInstanceUid == studyInstanceUid }
-                ?: return@maintenance false
+                ?: return@withLock false
             var removed = (storageManager?.clearOwnedSaf(studyInstanceUid) ?: 0) > 0
             for (inst in study.seriesList.flatMap { it.instances }) {
                 if (inst.filePath.startsWith("content://")) continue // SAF deletion only through ownership ledger.
@@ -302,8 +337,8 @@ class LocalDicomStudyRepository(
         }
     }
 
-    override fun clearAllStudies(): Int = lock.withLock {
-        StorageCoordinator.forRoot(storageRootDir).maintenance {
+    override fun clearAllStudies(): Int = coordinator.maintenance {
+        lock.withLock {
             var removed = storageManager?.clearOwnedSaf() ?: 0
             // The internal root is private app storage. Never follow paths outside it or delete directories.
             StoragePaths.dicomFiles(storageRootDir).forEach { candidate ->
@@ -370,6 +405,7 @@ class LocalDicomStudyRepository(
         streamOpener: () -> InputStream?
     ): ParsedRecord? {
         return try {
+            onHeaderRead()
             val rawStream = streamOpener() ?: return null
             DicomInputStream(BufferedInputStream(rawStream, 65536)).use { dis ->
                 dis.includeBulkData = DicomInputStream.IncludeBulkData.NO

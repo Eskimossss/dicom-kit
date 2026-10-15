@@ -116,12 +116,12 @@ import java.util.Locale
 fun DicomTagsBrowserComponent(
     tags: List<DicomTagEntry>,
     searchQuery: String,
+    modifier: Modifier = Modifier,
     encodingWarning: String? = null,
     currentEncodingOverride: DicomEncodingOverride = DicomEncodingOverride.AUTO,
     showEncodingSelector: Boolean = false,
     onSearchQueryChange: (String) -> Unit,
-    onEncodingOverrideChange: ((DicomEncodingOverride) -> Unit)? = null,
-    modifier: Modifier = Modifier
+    onEncodingOverrideChange: ((DicomEncodingOverride) -> Unit)? = null
 ) {
     var onlyFilled by rememberSaveable { mutableStateOf(false) }
     var selectedTagForDetail by remember { mutableStateOf<DicomTagEntry?>(null) }

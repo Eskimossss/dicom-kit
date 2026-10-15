@@ -506,6 +506,13 @@ object DicomSessionGrouper {
         primaryOp: String,
         files: List<TransferredFileItem>
     ): Triple<SessionOutcomeStatus, String, String> {
+        val runId = Regex("^(?:SCU|SCP)-(R[0-9a-z]+-[0-9a-f]{6,32})-[0-9]+.*$")
+            .matchEntire(events.first().sessionUid)?.groupValues?.get(1)
+        val terminal = events.any { it.category in setOf(DicomLogCategory.TCP_DISCONNECT, DicomLogCategory.ASSOCIATE_RJ, DicomLogCategory.ABORT) ||
+            it.technicalDetails["SCU Batch Complete"] == "true" || it.technicalDetails["SCU Association Complete"] == "true" }
+        if (runId != null && runId != DicomSessionManager.appRunId && !terminal)
+            return Triple(SessionOutcomeStatus.UNKNOWN, "Незавершённый сеанс предыдущего процесса",
+                "Сохранённые индивидуальные ответы доступны; исход незавершённых операций неизвестен. Проверьте удалённый узел перед повтором.")
         val single = events.singleOrNull()
         if (single != null && single.sessionUid == single.associationId &&
             single.category in listOf(DicomLogCategory.C_STORE_RSP, DicomLogCategory.C_ECHO_RSP)) {

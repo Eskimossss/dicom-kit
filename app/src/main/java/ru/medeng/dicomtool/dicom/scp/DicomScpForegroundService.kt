@@ -46,8 +46,7 @@ class DicomScpForegroundService : Service() {
                 putExtra(EXTRA_TCP_PORT, port)
             }
             try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent)
-                else context.startService(intent)
+                context.startForegroundService(intent)
             } catch (e: RuntimeException) {
                 DicomRuntimeRegistry.getScpServer(context).reportServiceError(
                     "Android запретил запуск SCP: ${e.message}. Откройте приложение и повторите запуск вручную.")
@@ -227,7 +226,7 @@ class DicomScpForegroundService : Service() {
     }
 
     private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        run {
             val channel = NotificationChannel(
                 NOTIFICATION_CHANNEL_ID,
                 "DICOM Storage SCP Сервер",

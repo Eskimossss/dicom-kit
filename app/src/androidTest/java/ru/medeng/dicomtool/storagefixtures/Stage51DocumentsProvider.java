@@ -62,9 +62,11 @@ public class Stage51DocumentsProvider extends DocumentsProvider {
         return c;
     }
     @Override public Cursor queryDocument(String id, String[] projection) {
+        delayQuery(id);
         MatrixCursor c = new MatrixCursor(projection == null ? COLUMNS : projection); add(c, id); return c;
     }
     @Override public Cursor queryChildDocuments(String parent, String[] projection, String sortOrder) {
+        delayQuery(parent);
         MatrixCursor c = new MatrixCursor(projection == null ? COLUMNS : projection);
         File[] children = file(parent).listFiles();
         if (children != null) for (File child : children) add(c, parent + "/" + child.getName());
@@ -91,6 +93,15 @@ public class Stage51DocumentsProvider extends DocumentsProvider {
         return f.delete();
     }
     @Override public android.os.Bundle call(String method, String arg, android.os.Bundle extras) {
+        if (method.startsWith("stage56-") && arg != null && arg.startsWith("stage56query") && !arg.contains("/")) {
+            android.os.Bundle result = new android.os.Bundle();
+            try {
+                if (method.equals("stage56-block")) new File(getContext().getCacheDir(), arg + ".block").createNewFile();
+                if (method.equals("stage56-release")) new File(getContext().getCacheDir(), arg + ".release").createNewFile();
+                result.putBoolean("started", new File(getContext().getCacheDir(), arg + ".started").exists());
+                return result;
+            } catch (IOException ex) { throw new IllegalStateException(ex); }
+        }
         if ((method.equals("stage54-status") || method.equals("stage54-release")) && arg.startsWith("stage54delay") && !arg.contains("/")) {
             android.os.Bundle result = new android.os.Bundle();
             getContext().getCacheDir().mkdirs();
@@ -101,6 +112,17 @@ public class Stage51DocumentsProvider extends DocumentsProvider {
             } catch (IOException ex) { throw new IllegalStateException(ex); }
         }
         return super.call(method, arg, extras);
+    }
+    private void delayQuery(String id) {
+        if (!id.startsWith("stage56query")) return;
+        String root = id.split("/", 2)[0];
+        File cache = getContext().getCacheDir();
+        if (!new File(cache, root + ".block").exists()) return;
+        try {
+            new File(cache, root + ".started").createNewFile();
+            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(30);
+            while (!new File(cache, root + ".release").exists() && System.nanoTime() < deadline) Thread.sleep(10);
+        } catch (IOException | InterruptedException ex) { throw new IllegalStateException(ex); }
     }
     @Override public ParcelFileDescriptor openDocument(String id, String mode, CancellationSignal signal) throws FileNotFoundException {
         if (mode.equals("r") && id.startsWith("stage54delay")) {

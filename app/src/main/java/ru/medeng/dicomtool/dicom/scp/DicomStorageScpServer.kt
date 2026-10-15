@@ -142,7 +142,7 @@ class DicomStorageScpServer(
     val state: StateFlow<ScpReceiverState> = _state.asStateFlow()
 
     init {
-        refreshCountersFromRepository()
+        refreshCountersFromRepository(rescan = false)
     }
 
     fun detectLocalIpv4Interface(): NetworkInterfaceInfo {
@@ -202,14 +202,14 @@ class DicomStorageScpServer(
         }
     }
 
-    fun refreshCountersFromRepository() {
-        studyRepository.refreshFromDisk()
+    fun refreshCountersFromRepository(rescan: Boolean = true) {
+        if (rescan) studyRepository.refreshFromDisk()
         val studiesList = studyRepository.studiesFlow.value
         val studiesCount = studiesList.size
         val imagesCount = studiesList.sumOf { it.instancesCount }
         val activeStoragePath = studyRepository.storageManager?.let { sm ->
             if (sm.getCurrentStorageType() == ru.medeng.dicomtool.data.storage.StorageType.SAF) {
-                sm.getSavedSafTreeUri()?.let { sm.getReadablePathForSaf(it) }
+                sm.getSavedSafTreeUri()?.toString()
             } else null
         } ?: studyRepository.storageRootDir.absolutePath
 
@@ -943,7 +943,10 @@ class DicomStorageScpServer(
             val tsuid = pc.transferSyntax ?: UID.ImplicitVRLittleEndian
 
             val tmpDir = File(studyRepository.storageRootDir, ".incoming_tmp").apply { mkdirs() }
-            val tempFile = File(tmpDir, "${sanitizeFileName(iuid)}_${System.nanoTime()}.part")
+            val tempFile = try { File.createTempFile("scp_${sanitizeFileName(iuid)}_", ".part", tmpDir) }
+            catch (e: IOException) {
+                throw DicomServiceException(if (e.message?.contains("ENOSPC", true) == true) Status.OutOfResources else Status.ProcessingFailure, e)
+            }
 
             var payloadComplete = false
             try {
@@ -985,7 +988,7 @@ class DicomStorageScpServer(
 
                 when (saveResult) {
                     is DicomSaveResult.Success -> {
-                        refreshCountersFromRepository()
+                        refreshCountersFromRepository(rescan = false)
 
                         logger.recordTechnicalEvent(
                             category = DicomLogCategory.SERVER_LIFECYCLE,
@@ -1153,7 +1156,7 @@ class DicomStorageScpServer(
     private fun startUptimeTicker() {
         uptimeTimer?.cancel()
         val timer = Timer("ScpUptimeTicker", true)
-        timer.scheduleAtFixedRate(object : TimerTask() {
+        timer.schedule(object : TimerTask() {
             override fun run() {
                 synchronized(lock) {
                     finishStopIfTerminated()
