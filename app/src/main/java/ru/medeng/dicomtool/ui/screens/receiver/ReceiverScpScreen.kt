@@ -130,6 +130,7 @@ fun ReceiverScpScreen(
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
 
+        Text("SCP: сеанс до 4 часов. Android может остановить фоновый приём раньше; круглосуточная работа не гарантируется. После остановки нужен ручной запуск.", fontSize = 12.sp)
         if (isExpandedWidth) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -149,6 +150,7 @@ fun ReceiverScpScreen(
                         aeTitle = aeTitleInput,
                         portText = portInput,
                         isRunning = state.status == ScpServerStatus.RUNNING,
+                        busy = state.serviceStopping || state.status in listOf(ScpServerStatus.STARTING, ScpServerStatus.STOPPING),
                         validationError = state.validationError,
                         errorMessage = state.errorMessage,
                         onAeTitleChange = onAeTitleChange,
@@ -178,6 +180,7 @@ fun ReceiverScpScreen(
                 aeTitle = aeTitleInput,
                 portText = portInput,
                 isRunning = state.status == ScpServerStatus.RUNNING,
+                        busy = state.serviceStopping || state.status in listOf(ScpServerStatus.STARTING, ScpServerStatus.STOPPING),
                 validationError = state.validationError,
                 errorMessage = state.errorMessage,
                 onAeTitleChange = onAeTitleChange,
@@ -258,6 +261,7 @@ private fun AeAndPortControls(
     aeTitle: String,
     portText: String,
     isRunning: Boolean,
+    busy: Boolean,
     validationError: String?,
     errorMessage: String?,
     onAeTitleChange: (String) -> Unit,
@@ -268,7 +272,7 @@ private fun AeAndPortControls(
     DiagnosticOutlinedField(
         label = "AE Title (Called / Local SCP)",
         value = aeTitle,
-        enabled = !isRunning,
+        enabled = !isRunning && !busy,
         isError = validationError != null,
         onValueChange = onAeTitleChange
     )
@@ -276,12 +280,12 @@ private fun AeAndPortControls(
     DiagnosticOutlinedField(
         label = "Порт (1024..65535)",
         value = portText,
-        enabled = !isRunning,
+        enabled = !isRunning && !busy,
         isError = validationError != null,
         onValueChange = onPortChange,
         keyboardType = KeyboardType.Number,
         trailingIcon = {
-            if (!isRunning) {
+            if (!isRunning && !busy) {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     modifier = Modifier.padding(end = 4.dp)
@@ -328,7 +332,7 @@ private fun AeAndPortControls(
 
     Button(
         onClick = onToggleServerState,
-        enabled = isRunning || validationError == null,
+        enabled = !busy && (isRunning || validationError == null),
         modifier = Modifier
             .fillMaxWidth()
             .height(50.dp),
@@ -345,7 +349,7 @@ private fun AeAndPortControls(
         )
         Spacer(modifier = Modifier.width(8.dp))
         Text(
-            text = if (isRunning) "Остановить сервер" else "Запустить сервер",
+            text = if (busy) "Ожидание завершения…" else if (isRunning) "Остановить сервер" else "Запустить сервер",
             fontSize = 16.sp,
             fontWeight = FontWeight.SemiBold
         )
@@ -391,6 +395,8 @@ private fun ScpStatusCard(
             Spacer(modifier = Modifier.width(8.dp))
             Text(
                 text = when {
+                    state.serviceStopping || state.status == ScpServerStatus.STOPPING -> "SCP останавливается: ожидание освобождения ресурсов"
+                    state.status == ScpServerStatus.STARTING -> "SCP запускается"
                     isRunning -> "Сервер запущен (${state.callingAeTitle}:${state.tcpPort})"
                     isError -> "Ошибка запуска сервера"
                     else -> "Сервер остановлен"
@@ -409,6 +415,8 @@ private fun ScpStatusCard(
         Text(
             text = if (isRunning) {
                 "Слушает 0.0.0.0:${state.tcpPort} (C-ECHO SCP, C-STORE SCP Implicit/Explicit VR Little Endian)"
+            } else if (state.serviceStopping || state.status == ScpServerStatus.STOPPING) {
+                "Новые соединения отключены; выполняется освобождение ресурсов. Повторный запуск пока недоступен."
             } else {
                 "Ожидание запуска приёмника..."
             },

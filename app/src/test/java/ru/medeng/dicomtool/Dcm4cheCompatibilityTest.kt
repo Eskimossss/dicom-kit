@@ -253,8 +253,9 @@ class DicomScpStage2IntegrationTest {
         assertTrue(logEntries.any { it.category == DicomLogCategory.C_STORE_RQ })
         assertTrue(logEntries.any { it.category == DicomLogCategory.C_STORE_RSP })
         assertTrue(logEntries.any { it.category == DicomLogCategory.ASSOCIATE_RJ })
-        assertTrue(logEntries.any { it.category == DicomLogCategory.RELEASE_RQ })
-        assertTrue(logEntries.any { it.category == DicomLogCategory.RELEASE_RP })
+        // Decoder termination does not prove that an A-RELEASE PDU was observed.
+        assertTrue(logEntries.any { it.category == DicomLogCategory.TCP_DISCONNECT })
+        assertFalse(logEntries.any { it.category == DicomLogCategory.RELEASE_RP })
 
         // Убеждаемся, что ФИО пациента не попало в технический журнал
         val allLogStrings = logEntries.flatMap { it.summaryLines + it.technicalDetails.values + it.title }

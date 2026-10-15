@@ -366,10 +366,21 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
 
     // --- Действия раздела «Приёмник (SCP)» ---
 
+    private fun persistScpConfiguration() {
+        val ae = _aeTitleInput.value.trim()
+        val port = _portInput.value.toIntOrNull() ?: return
+        if (DicomValidationUtils.validateAeTitle(ae) is DicomValidationUtils.ValidationResult.Valid &&
+            DicomValidationUtils.validateScpPort(port) is DicomValidationUtils.ValidationResult.Valid) {
+            appContext.getSharedPreferences("scp_configuration", android.content.Context.MODE_PRIVATE)
+                .edit().putString("ae", ae).putInt("port", port).apply()
+        }
+    }
+
     fun updateScpAeTitleInput(raw: String) {
         _aeTitleInput.value = raw
         val portNum = _portInput.value.toIntOrNull() ?: -1
         scpServer.updateConfiguration(raw, portNum)
+        persistScpConfiguration()
     }
 
     fun updateScpPortInput(raw: String) {
@@ -377,6 +388,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
         _portInput.value = digitsOnly
         val portNum = digitsOnly.toIntOrNull() ?: -1
         scpServer.updateConfiguration(_aeTitleInput.value, portNum)
+        persistScpConfiguration()
     }
 
     fun incrementScpPort(delta: Int) {
@@ -384,6 +396,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
         val next = (current + delta).coerceIn(1024, 65535)
         _portInput.value = next.toString()
         scpServer.updateConfiguration(_aeTitleInput.value, next)
+        persistScpConfiguration()
     }
 
     fun refreshNetworkInterface() {
@@ -391,6 +404,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun toggleScpServer() {
+        if (scpState.value.serviceStopping || scpState.value.status in listOf(ScpServerStatus.STARTING, ScpServerStatus.STOPPING)) return
         if (scpState.value.status == ScpServerStatus.RUNNING) {
             DicomScpForegroundService.stopScpService(appContext)
         } else {
@@ -404,6 +418,8 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
                 scpServer.updateConfiguration(ae, port)
                 return
             }
+            appContext.getSharedPreferences("scp_configuration", android.content.Context.MODE_PRIVATE)
+                .edit().putString("ae", ae).putInt("port", port).apply()
             DicomScpForegroundService.startScpService(appContext, ae, port)
         }
     }

@@ -53,7 +53,11 @@ object DicomRuntimeRegistry {
         return scpServerInstance ?: run {
             val repo = getStudyRepository(context)
             val logger = getTechnicalLogger(context)
-            DicomStorageScpServer(repo, logger).also { scpServerInstance = it }
+            DicomStorageScpServer(repo, logger).also {
+                val prefs = context.applicationContext.getSharedPreferences("scp_configuration", Context.MODE_PRIVATE)
+                it.updateConfiguration(prefs.getString("ae", "ANDROID_PACS") ?: "ANDROID_PACS", prefs.getInt("port", 11112))
+                scpServerInstance = it
+            }
         }
     }
 

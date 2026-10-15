@@ -42,15 +42,11 @@ import ru.medeng.dicomtool.domain.model.ScpReceiverState
 import ru.medeng.dicomtool.domain.model.ScpServerStatus
 import java.io.BufferedOutputStream
 import java.io.File
-import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.net.Socket
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption
-import java.security.MessageDigest
 import java.util.Locale
 import java.util.Timer
 import java.util.TimerTask
@@ -58,7 +54,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.TimeUnit
 
 /**
  * Настоящий DICOM Storage SCP сервер на базе dcm4che 5.33.1 (PS3.7 DIMSE, PS3.8 Upper Layer, PS3.10 Media Storage).
@@ -124,8 +120,13 @@ class DicomStorageScpServer(
     private var uptimeTimer: Timer? = null
     private var serverStartTimeMs: Long = 0L
 
-    private val activeConnections = AtomicInteger(0)
-    private val connectedNodesSet = ConcurrentHashMap.newKeySet<String>()
+    @Volatile private var accepting = false
+    @Volatile private var stopRequested = false
+    private var cleanupStarted = false
+    private val connectionGate = Any()
+    private val sockets = ConcurrentHashMap<Socket, DicomSessionManager.SessionIdentity>()
+    private val storing = ConcurrentHashMap.newKeySet<Socket>()
+    private val associations = ConcurrentHashMap<Socket, Association>()
 
     private val _state = MutableStateFlow(
         ScpReceiverState(
@@ -183,6 +184,7 @@ class DicomStorageScpServer(
     }
 
     fun updateConfiguration(aeTitle: String, port: Int) {
+        if (_state.value.status in listOf(ScpServerStatus.RUNNING, ScpServerStatus.STARTING, ScpServerStatus.STOPPING)) return
         val aeCheck = DicomValidationUtils.validateAeTitle(aeTitle)
         val portCheck = DicomValidationUtils.validateScpPort(port)
         val validationError = when {
@@ -227,6 +229,9 @@ class DicomStorageScpServer(
         aeTitle: String = _state.value.callingAeTitle.trim(),
         port: Int = _state.value.tcpPort
     ): Result<Unit> = synchronized(lock) {
+        if (_state.value.status == ScpServerStatus.STOPPING) {
+            return Result.failure(IllegalStateException("SCP ещё освобождает ресурсы"))
+        }
         if (_state.value.status == ScpServerStatus.RUNNING) {
             return Result.success(Unit)
         }
@@ -253,6 +258,8 @@ class DicomStorageScpServer(
             return Result.failure(IllegalArgumentException(portValidation.messageRu))
         }
 
+        stopRequested = false
+        cleanupStarted = false
         _state.update {
             it.copy(
                 status = ScpServerStatus.STARTING,
@@ -265,8 +272,8 @@ class DicomStorageScpServer(
         }
 
         return try {
-            val exec = Executors.newCachedThreadPool()
-            val sched = Executors.newSingleThreadScheduledExecutor()
+            val exec = Executors.newCachedThreadPool().also { executor = it }
+            val sched = Executors.newSingleThreadScheduledExecutor().also { scheduledExecutor = it }
 
             val scpDevice = Device("dicomtool-scp-device")
             val conn = Connection("dicom-scp-conn", "0.0.0.0", port).apply {
@@ -337,17 +344,23 @@ class DicomStorageScpServer(
             scpDevice.executor = exec
             scpDevice.scheduledExecutor = sched
 
-            scpDevice.bindConnections()
-
+            // Publish resources before bind so a partial start failure can release them.
             device = scpDevice
             executor = exec
             scheduledExecutor = sched
+            synchronized(connectionGate) {
+                if (stopRequested) throw IOException("SCP start cancelled")
+                accepting = true
+                scpDevice.bindConnections()
+            }
             serverStartTimeMs = System.currentTimeMillis()
             startUptimeTicker()
 
             val netInfo = detectLocalIpv4Interface()
             refreshCountersFromRepository()
-            _state.update {
+            synchronized(connectionGate) {
+                if (stopRequested) throw IOException("SCP start cancelled")
+                _state.update {
                 it.copy(
                     status = ScpServerStatus.RUNNING,
                     callingAeTitle = aeTitle,
@@ -356,6 +369,7 @@ class DicomStorageScpServer(
                     uptimeFormatted = "00:00:00",
                     errorMessage = null
                 )
+                }
             }
 
             logger.recordTechnicalEvent(
@@ -380,10 +394,11 @@ class DicomStorageScpServer(
             Result.success(Unit)
         } catch (e: Exception) {
             stopServerInternal(logStop = false)
-            val errMsg = "Не удалось запустить SCP на порту $port: ${e.message ?: e.javaClass.simpleName}"
+            val errMsg = _state.value.errorMessage?.takeIf { stopRequested }
+                ?: "Не удалось запустить SCP на порту $port: ${e.message ?: e.javaClass.simpleName}"
             _state.update {
                 it.copy(
-                    status = ScpServerStatus.ERROR,
+                    status = if (it.status == ScpServerStatus.STOPPING) it.status else ScpServerStatus.ERROR,
                     errorMessage = errMsg
                 )
             }
@@ -411,55 +426,95 @@ class DicomStorageScpServer(
         stopServerInternal(logStop = true)
     }
 
-    private fun stopServerInternal(logStop: Boolean) {
-        val wasRunning = _state.value.status == ScpServerStatus.RUNNING
-        val prevPort = _state.value.tcpPort
-        val prevAe = _state.value.callingAeTitle
+    /** OS timeout / Service destruction: close networking without waiting for a blocked SAF writer. */
+    fun requestNetworkStop() {
+        synchronized(connectionGate) {
+            stopRequested = true
+            accepting = false
+            runCatching { device?.unbindConnections() }
+            sockets.keys.forEach { runCatching { it.close() } }
+            _state.update { if (it.status in listOf(ScpServerStatus.STARTING, ScpServerStatus.RUNNING))
+                it.copy(status = ScpServerStatus.STOPPING) else it }
+        }
+    }
 
+    private fun stopServerInternal(logStop: Boolean) {
+        if (device == null && executor == null) return
+        if (cleanupStarted) {
+            finishStopIfTerminated()
+            return
+        }
+        cleanupStarted = true
+        _state.update { it.copy(status = ScpServerStatus.STOPPING) }
+        synchronized(connectionGate) { accepting = false; stopRequested = true }
+        if (uptimeTimer == null) startUptimeTicker()
+        try { device?.unbindConnections() } catch (e: Exception) {
+            reportServiceError("Ошибка закрытия слушателя SCP: $e")
+        }
+        // Allow a bounded drain for in-flight storage. Release idle associations off this thread:
+        // an encoder can be blocked on a peer that is no longer reading.
+        device?.listOpenAssociations()?.forEach { assoc ->
+            executor?.execute { runCatching { if (assoc.isReadyForDataTransfer && !storing.contains(assoc.socket)) assoc.release() } }
+        }
+        executor?.shutdown()
+        executor?.awaitTermination(1200, TimeUnit.MILLISECONDS)
+        synchronized(connectionGate) { sockets.keys.forEach { runCatching { it.close() } } }
+        executor?.shutdownNow()
+        scheduledExecutor?.shutdownNow()
+        executor?.awaitTermination(300, TimeUnit.MILLISECONDS)
+        finishStopIfTerminated()
+        if (logStop) logger.recordTechnicalEvent(
+            category = DicomLogCategory.SERVER_LIFECYCLE, direction = DicomTrafficDirection.LOCAL,
+            associationId = "SCP", title = "SCP stop: listener closed; connections drained or forcibly closed",
+            summaryLines = listOf("State: ${_state.value.status}"),
+            technicalDetails = mapOf("State" to _state.value.status.name))
+    }
+
+    private fun finishStopIfTerminated() {
+        if (_state.value.status != ScpServerStatus.STOPPING || executor?.isTerminated == false ||
+            scheduledExecutor?.isTerminated == false) return
+        updateConnections()
+        sockets.clear()
+        associations.clear()
+        storing.clear()
+        loggedRejectedAssocIds.clear()
+        device = null
+        executor = null
+        scheduledExecutor = null
         uptimeTimer?.cancel()
         uptimeTimer = null
+        _state.update { it.copy(status = ScpServerStatus.STOPPED, activeConnectionsCount = 0,
+            connectedNodes = emptyList(), uptimeFormatted = "00:00:00") }
+    }
 
-        try {
-            device?.unbindConnections()
-        } catch (_: Exception) {
-        }
-        device = null
+    fun setServiceStopping(stopping: Boolean) {
+        _state.update { it.copy(serviceStopping = stopping) }
+    }
 
-        try {
-            executor?.shutdownNow()
-        } catch (_: Exception) {
-        }
-        executor = null
+    fun reportServiceError(message: String) {
+        logger.recordTechnicalEvent(category = DicomLogCategory.SERVER_LIFECYCLE,
+            direction = DicomTrafficDirection.LOCAL, associationId = "SCP", title = "SCP service warning",
+            summaryLines = listOf(message), technicalDetails = mapOf("Reason" to message), isError = true)
+        _state.update { it.copy(errorMessage = message,
+            status = if (it.status == ScpServerStatus.STOPPED) ScpServerStatus.ERROR else it.status) }
+    }
 
-        try {
-            scheduledExecutor?.shutdownNow()
-        } catch (_: Exception) {
-        }
-        scheduledExecutor = null
+    private fun identity(socket: Socket): DicomSessionManager.SessionIdentity =
+        sockets.computeIfAbsent(socket) { DicomSessionManager.nextScpSession() }
 
-        activeConnections.set(0)
-        _state.update {
-            it.copy(
-                status = ScpServerStatus.STOPPED,
-                activeConnectionsCount = 0,
-                uptimeFormatted = "00:00:00"
-            )
+    private fun updateConnections() {
+        sockets.keys.filter { it.isClosed }.forEach { socket ->
+            val session = sockets.remove(socket) ?: return@forEach
+            val ex = associations.remove(socket)?.exception
+            logger.recordTechnicalEvent(category = DicomLogCategory.TCP_DISCONNECT,
+                direction = DicomTrafficDirection.LOCAL, associationId = session.displayLabel,
+                title = "TCP socket locally closed; release PDU not inferred", summaryLines = emptyList(),
+                technicalDetails = mapOf("Remote Socket" to "${socket.inetAddress?.hostAddress}:${socket.port}",
+                    "Exception" to (ex?.toString() ?: "No exception observed")),
+                isError = ex != null, sessionUid = session.sessionUid)
         }
-
-        if (logStop && wasRunning) {
-            logger.recordTechnicalEvent(
-                category = DicomLogCategory.SERVER_LIFECYCLE,
-                direction = DicomTrafficDirection.LOCAL,
-                associationId = "SCP",
-                title = "DICOM Storage SCP stopped (port $prevPort released)",
-                summaryLines = listOf("AE Title: $prevAe, Port: $prevPort"),
-                technicalDetails = mapOf(
-                    "AE Title" to prevAe,
-                    "Port" to prevPort.toString(),
-                    "State" to "Unbound & Executor Shutdown"
-                )
-            )
-        }
+        val nodes = associations.values.map { "${it.callingAET} (${it.socket.inetAddress.hostAddress})" }.distinct()
+        _state.update { it.copy(activeConnectionsCount = sockets.size, connectedNodes = nodes) }
     }
 
     private fun createConnectionMonitor(): ConnectionMonitor = object : ConnectionMonitor {
@@ -512,11 +567,15 @@ class DicomStorageScpServer(
         }
 
         override fun onConnectionAccepted(conn: Connection, s: Socket) {
-            val currentActive = activeConnections.incrementAndGet()
+            synchronized(connectionGate) {
+                if (!accepting) { s.close(); return }
+                identity(s)
+            }
+            val currentActive = sockets.size
             _state.update { it.copy(activeConnectionsCount = currentActive) }
             val remoteIp = s.inetAddress?.hostAddress ?: "unknown"
             val remotePort = s.port
-            val tcpSession = DicomSessionManager.scpTcpSession(remotePort)
+            val tcpSession = identity(s)
             logger.recordTechnicalEvent(
                 category = DicomLogCategory.TCP_CONNECT,
                 direction = DicomTrafficDirection.INBOUND,
@@ -536,16 +595,16 @@ class DicomStorageScpServer(
 
     private val loggedRejectedAssocIds = ConcurrentHashMap.newKeySet<String>()
 
-    private fun logAssociationRejection(asAssoc: Association, rq: AAssociateRQ?, rj: AAssociateRJ) {
+    private fun logAssociationRejection(asAssoc: Association, rq: AAssociateRQ?, rj: AAssociateRJ, localWritten: Boolean = false) {
         val assocId = formatAssocId(asAssoc)
         val sessionUid = formatSessionUid(asAssoc)
-        if (!loggedRejectedAssocIds.add(assocId)) {
+        if (!loggedRejectedAssocIds.add("$assocId:$localWritten")) {
             return
         }
         val remoteIp = asAssoc.socket?.inetAddress?.hostAddress ?: "unknown"
         val remotePort = asAssoc.socket?.port ?: 0
 
-        if (rq != null) {
+        if (rq != null && !localWritten) {
             logger.recordTechnicalEvent(
                 category = DicomLogCategory.ASSOCIATE_RQ,
                 direction = DicomTrafficDirection.INBOUND,
@@ -566,10 +625,10 @@ class DicomStorageScpServer(
         }
 
         logger.recordTechnicalEvent(
-            category = DicomLogCategory.ASSOCIATE_RJ,
+            category = if (localWritten) DicomLogCategory.ASSOCIATE_RJ else DicomLogCategory.SERVER_LIFECYCLE,
             direction = DicomTrafficDirection.OUTBOUND,
             associationId = assocId,
-            title = "A-ASSOCIATE-RJ sent (${rj.message})",
+            title = if (localWritten) "A-ASSOCIATE-RJ local write completed; peer receipt unconfirmed" else "A-ASSOCIATE-RJ selected; local write not yet confirmed",
             summaryLines = listOf(
                 "Calling AE: ${rq?.callingAET ?: asAssoc.callingAET} | Called AE: ${rq?.calledAET ?: asAssoc.calledAET}",
                 "Reason: ${explainAssociateRjReason(rj)}"
@@ -590,10 +649,13 @@ class DicomStorageScpServer(
 
     private fun createAssociationMonitor(): AssociationMonitor = object : AssociationMonitor {
         override fun onAssociationEstablished(asAssoc: Association) {
-            // Вызывается при установке ассоциации
+            associationIdentity(asAssoc)
+            associations[asAssoc.socket] = asAssoc
         }
 
         override fun onAssociationAccepted(asAssoc: Association) {
+            associationIdentity(asAssoc)
+            associations[asAssoc.socket] = asAssoc
             val assocId = formatAssocId(asAssoc)
             val sessionUid = formatSessionUid(asAssoc)
             val rq: AAssociateRQ? = asAssoc.aAssociateRQ
@@ -601,9 +663,7 @@ class DicomStorageScpServer(
             val remoteIp = asAssoc.socket?.inetAddress?.hostAddress ?: "unknown"
             val remotePort = asAssoc.socket?.port ?: 0
 
-            val nodeTag = "${asAssoc.callingAET} ($remoteIp)"
-            connectedNodesSet.add(nodeTag)
-            _state.update { it.copy(connectedNodes = connectedNodesSet.toList()) }
+            updateConnections()
 
             if (rq != null) {
                 logger.recordTechnicalEvent(
@@ -635,7 +695,7 @@ class DicomStorageScpServer(
                     category = DicomLogCategory.ASSOCIATE_AC,
                     direction = DicomTrafficDirection.OUTBOUND,
                     associationId = assocId,
-                    title = "A-ASSOCIATE-AC sent",
+                    title = "A-ASSOCIATE-AC local write completed; peer receipt unconfirmed",
                     summaryLines = listOf(
                         "Result: Accepted (${ac.callingAET} -> ${ac.calledAET})"
                     ),
@@ -689,7 +749,7 @@ class DicomStorageScpServer(
         }
 
         override fun onAssociationRejected(asAssoc: Association, rj: AAssociateRJ) {
-            logAssociationRejection(asAssoc, asAssoc.aAssociateRQ, rj)
+            logAssociationRejection(asAssoc, asAssoc.aAssociateRQ, rj, localWritten = true)
         }
 
         override fun onAssociationFailed(asAssoc: Association, e: Throwable) {
@@ -722,6 +782,10 @@ class DicomStorageScpServer(
 
     private fun createAssociationHandler(): AssociationHandler = object : AssociationHandler() {
         override fun negotiate(asAssoc: Association, rq: AAssociateRQ): AAssociateAC {
+            associationIdentity(asAssoc)
+            associations[asAssoc.socket] = asAssoc
+            if (!accepting) throw AAssociateRJ(AAssociateRJ.RESULT_REJECTED_TRANSIENT,
+                AAssociateRJ.SOURCE_SERVICE_PROVIDER_ACSE, 1)
             return try {
                 // Проверяем совпадение Called AE Title с настроенным AE Title приёмника
                 val configuredAe = _state.value.callingAeTitle.trim()
@@ -741,58 +805,17 @@ class DicomStorageScpServer(
 
         override fun onClose(asAssoc: Association) {
             super.onClose(asAssoc)
-            val remaining = activeConnections.decrementAndGet().coerceAtLeast(0)
-            _state.update { it.copy(activeConnectionsCount = remaining) }
-
-            val assocId = formatAssocId(asAssoc)
-            val sessionUid = formatSessionUid(asAssoc)
+            val session = associationIdentity(asAssoc)
             val ex = asAssoc.exception
-            val remoteIp = asAssoc.socket?.inetAddress?.hostAddress ?: "unknown"
-            val remotePort = asAssoc.socket?.port ?: 0
-
-            if (ex == null) {
-                logger.recordTechnicalEvent(
-                    category = DicomLogCategory.RELEASE_RQ,
-                    direction = DicomTrafficDirection.INBOUND,
-                    associationId = assocId,
-                    title = "A-RELEASE-RQ received",
-                    summaryLines = listOf("Calling AE: ${asAssoc.callingAET ?: "-"}"),
-                    technicalDetails = mapOf(
-                        "Association ID" to assocId,
-                        "PDU" to "05H (A-RELEASE-RQ)",
-                        "Calling AE Title" to (asAssoc.callingAET ?: "-")
-                    ),
-                    sessionUid = sessionUid
-                )
-                logger.recordTechnicalEvent(
-                    category = DicomLogCategory.RELEASE_RP,
-                    direction = DicomTrafficDirection.OUTBOUND,
-                    associationId = assocId,
-                    title = "A-RELEASE-RP sent & TCP closed",
-                    summaryLines = listOf("Remote: $remoteIp:$remotePort"),
-                    technicalDetails = mapOf(
-                        "Association ID" to assocId,
-                        "PDU" to "06H (A-RELEASE-RP)",
-                        "Remote Socket" to "$remoteIp:$remotePort"
-                    ),
-                    sessionUid = sessionUid
-                )
-            } else {
-                logger.recordTechnicalEvent(
-                    category = DicomLogCategory.TCP_DISCONNECT,
-                    direction = DicomTrafficDirection.INBOUND,
-                    associationId = assocId,
-                    title = "TCP disconnected with exception ($remoteIp:$remotePort)",
-                    summaryLines = listOf("Reason: ${ex.message ?: ex.javaClass.simpleName}"),
-                    technicalDetails = mapOf(
-                        "Association ID" to assocId,
-                        "Remote Socket" to "$remoteIp:$remotePort",
-                        "Exception" to "${ex.javaClass.name}: ${ex.message}"
-                    ),
-                    isError = true,
-                    sessionUid = sessionUid
-                )
-            }
+            logger.recordTechnicalEvent(
+                category = when { ex is AAbort -> DicomLogCategory.ABORT; ex != null -> DicomLogCategory.NETWORK_ERROR; else -> DicomLogCategory.SERVER_LIFECYCLE },
+                direction = DicomTrafficDirection.LOCAL, associationId = session.displayLabel,
+                title = if (ex is AAbort) "dcm4che reported A-ABORT; wire direction not inferred" else "Association processing ended; release PDU not inferred",
+                summaryLines = listOf(ex?.toString() ?: "No exception reported"),
+                technicalDetails = mapOf("Exception" to (ex?.toString() ?: "none")),
+                isError = ex != null, sessionUid = session.sessionUid)
+            // Some decoder callbacks run before the delayed physical close; ticker prunes sockets.
+            updateConnections()
         }
     }
 
@@ -804,7 +827,6 @@ class DicomStorageScpServer(
             cmd: Attributes,
             data: Attributes?
         ) {
-            val startNs = System.nanoTime()
             val assocId = formatAssocId(asAssoc)
             val sessionUid = formatSessionUid(asAssoc)
             val msgId = cmd.getInt(Tag.MessageID, 0)
@@ -830,27 +852,11 @@ class DicomStorageScpServer(
                 sessionUid = sessionUid
             )
 
-            super.onDimseRQ(asAssoc, pc, dimse, cmd, data)
+            if (dimse != Dimse.C_ECHO_RQ) throw DicomServiceException(Status.UnrecognizedOperation)
+            writeResponse(asAssoc, pc, Commands.mkEchoRSP(cmd, Status.Success), DicomLogCategory.C_ECHO_RSP)
+            return
 
-            val elapsedSec = (System.nanoTime() - startNs) / 1_000_000_000.0
-            logger.recordTechnicalEvent(
-                category = DicomLogCategory.C_ECHO_RSP,
-                direction = DicomTrafficDirection.OUTBOUND,
-                associationId = assocId,
-                title = "C-ECHO-RSP sent",
-                summaryLines = listOf(
-                    "Status: 0x0000 (Success)",
-                    String.format(Locale.US, "Время: %.3f s", elapsedSec)
-                ),
-                technicalDetails = mapOf(
-                    "Association ID" to assocId,
-                    "DIMSE Command" to "8030H (C-ECHO-RSP)",
-                    "Message ID Being Responded To" to msgId.toString(),
-                    "DICOM Status" to "0x0000 (Success)",
-                    "Duration" to String.format(Locale.US, "%.4f s", elapsedSec)
-                ),
-                sessionUid = sessionUid
-            )
+
         }
     }
 
@@ -908,8 +914,15 @@ class DicomStorageScpServer(
             )
 
             val rsp = Commands.mkCStoreRSP(rq, Status.Success)
-            store(asAssoc, pc, rq, data, rsp)
-            asAssoc.tryWriteDimseRSP(pc, rsp)
+            storing.add(asAssoc.socket)
+            try {
+                store(asAssoc, pc, rq, data, rsp)
+            } catch (e: DicomServiceException) {
+                rsp.setInt(Tag.Status, org.dcm4che3.data.VR.US, e.status)
+                rsp.setString(Tag.ErrorComment, org.dcm4che3.data.VR.LO, e.message?.take(64))
+            }
+            try { writeResponse(asAssoc, pc, rsp, DicomLogCategory.C_STORE_RSP) }
+            finally { storing.remove(asAssoc.socket) }
         }
 
         override fun store(
@@ -975,10 +988,10 @@ class DicomStorageScpServer(
                         refreshCountersFromRepository()
 
                         logger.recordTechnicalEvent(
-                            category = DicomLogCategory.C_STORE_RSP,
+                            category = DicomLogCategory.SERVER_LIFECYCLE,
                             direction = DicomTrafficDirection.OUTBOUND,
                             associationId = assocId,
-                            title = "C-STORE-RSP sent (${formatByteCount(saveResult.savedSizeBytes)})",
+                            title = "C-STORE storage verified (${formatByteCount(saveResult.savedSizeBytes)}); response pending",
                             summaryLines = listOf(
                                 "Status: 0x0000 (Success) | Время: ${String.format(Locale.US, "%.3f s", elapsedSec)}",
                                 "SOP Instance UID: $datasetSopUid"
@@ -1006,10 +1019,10 @@ class DicomStorageScpServer(
                         val status = if (saveResult.isOutOfSpace) Status.OutOfResources else Status.ProcessingFailure
                         val statusHex = if (saveResult.isOutOfSpace) "0xA700 (OutOfResources)" else "0x0110 (ProcessingFailure)"
                         logger.recordTechnicalEvent(
-                            category = DicomLogCategory.C_STORE_RSP,
+                            category = DicomLogCategory.SERVER_LIFECYCLE,
                             direction = DicomTrafficDirection.OUTBOUND,
                             associationId = assocId,
-                            title = "C-STORE failed ($statusHex)",
+                            title = "C-STORE storage failed ($statusHex); response pending",
                             summaryLines = listOf(
                                 "SOP Instance UID: $datasetSopUid",
                                 "Error: ${saveResult.errorReason}"
@@ -1035,10 +1048,10 @@ class DicomStorageScpServer(
                 }
                 val elapsedSec = (System.nanoTime() - startNs) / 1_000_000_000.0
                 logger.recordTechnicalEvent(
-                    category = DicomLogCategory.C_STORE_RSP,
+                    category = DicomLogCategory.SERVER_LIFECYCLE,
                     direction = DicomTrafficDirection.OUTBOUND,
                     associationId = assocId,
-                    title = "C-STORE failed (0x0110 ProcessingFailure)",
+                    title = "C-STORE processing failed; response pending",
                     summaryLines = listOf(
                         "SOP Instance UID: $iuid",
                         "Error: ${e.message ?: e.javaClass.simpleName}"
@@ -1046,7 +1059,7 @@ class DicomStorageScpServer(
                     technicalDetails = mapOf(
                         "Association ID" to assocId,
                         "Message ID" to msgId.toString(),
-                        "DICOM Status" to "0x0110 (ProcessingFailure)",
+                        "DICOM Status" to String.format("0x%04X", if (e is DicomServiceException) e.status else Status.ProcessingFailure),
                         "SOP Class UID" to formatUidWithName(cuid),
                         "SOP Instance UID" to iuid,
                         "Duration" to String.format(Locale.US, "%.4f s", elapsedSec),
@@ -1061,55 +1074,44 @@ class DicomStorageScpServer(
         }
     }
 
-    private fun moveAtomically(source: File, target: File) {
+    private fun writeResponse(assoc: Association, pc: PresentationContext, rsp: Attributes,
+                              category: DicomLogCategory) {
+        val session = associationIdentity(assoc)
+        val status = String.format("0x%04X", rsp.getInt(Tag.Status, Status.ProcessingFailure))
+        logger.recordTechnicalEvent(category = DicomLogCategory.SERVER_LIFECYCLE, direction = DicomTrafficDirection.LOCAL,
+            associationId = session.displayLabel, title = "${category.name} local write attempted",
+            summaryLines = emptyList(), technicalDetails = mapOf("DICOM Status" to status, "Response Write" to "ATTEMPTED"),
+            sessionUid = session.sessionUid)
         try {
-            Files.move(
-                source.toPath(),
-                target.toPath(),
-                StandardCopyOption.REPLACE_EXISTING,
-                StandardCopyOption.ATOMIC_MOVE
-            )
-        } catch (_: Exception) {
-            Files.move(
-                source.toPath(),
-                target.toPath(),
-                StandardCopyOption.REPLACE_EXISTING
-            )
+            assoc.writeDimseRSP(pc, rsp) // dcm4che encoder writes and flushes before returning.
+            logger.recordTechnicalEvent(category = category, direction = DicomTrafficDirection.OUTBOUND,
+                associationId = session.displayLabel, title = "${category.name} local write completed; peer receipt unconfirmed",
+                summaryLines = listOf("Status: $status"), technicalDetails = mapOf("DICOM Status" to status,
+                    "Response Write" to "LOCAL_COMPLETED", "Message ID Being Responded To" to rsp.getInt(Tag.MessageIDBeingRespondedTo, 0).toString()),
+                isError = rsp.getInt(Tag.Status, 0) != Status.Success, sessionUid = session.sessionUid)
+        } catch (e: IOException) {
+            logger.recordTechnicalEvent(category = DicomLogCategory.NETWORK_ERROR, direction = DicomTrafficDirection.LOCAL,
+                associationId = session.displayLabel, title = "${category.name} local write failed; peer result unknown",
+                summaryLines = listOf(e.toString()), technicalDetails = mapOf("DICOM Status" to status,
+                    "Response Write" to "FAILED", "Exception" to e.toString()), isError = true, sessionUid = session.sessionUid)
+            throw e
         }
-    }
-
-    private fun areFilesIdentical(f1: File, f2: File): Boolean {
-        if (f1.length() != f2.length()) return false
-        return try {
-            val h1 = sha256(f1)
-            val h2 = sha256(f2)
-            h1.contentEquals(h2)
-        } catch (_: IOException) {
-            false
-        }
-    }
-
-    private fun sha256(file: File): ByteArray {
-        val digest = MessageDigest.getInstance("SHA-256")
-        val buffer = ByteArray(32768)
-        FileInputStream(file).use { fis ->
-            var read = fis.read(buffer)
-            while (read > 0) {
-                digest.update(buffer, 0, read)
-                read = fis.read(buffer)
-            }
-        }
-        return digest.digest()
     }
 
     private fun sanitizeFileName(raw: String): String =
         raw.replace(Regex("[^a-zA-Z0-9._-]"), "_").take(96).ifBlank { "UNNAMED" }
 
+    private fun associationIdentity(assoc: Association): DicomSessionManager.SessionIdentity = synchronized(assoc) {
+        (assoc.getProperty("stage55.identity") as? DicomSessionManager.SessionIdentity) ?: identity(assoc.socket).also {
+            assoc.setProperty("stage55.identity", it)
+        }
+    }
+
     private fun formatAssocId(asAssoc: Association): String =
-        "ASSOC-${asAssoc.serialNo}"
+        associationIdentity(asAssoc).displayLabel
 
     private fun formatSessionUid(asAssoc: Association): String =
-        DicomSessionManager.nextScpSession(asAssoc.serialNo).sessionUid
+        associationIdentity(asAssoc).sessionUid
 
     private fun formatUidWithName(uid: String): String {
         val name = runCatching { UID.nameOf(uid) }.getOrNull()
@@ -1153,6 +1155,14 @@ class DicomStorageScpServer(
         val timer = Timer("ScpUptimeTicker", true)
         timer.scheduleAtFixedRate(object : TimerTask() {
             override fun run() {
+                synchronized(lock) {
+                    finishStopIfTerminated()
+                    if (_state.value.status == ScpServerStatus.RUNNING && device?.listConnections()?.none { it.isListening } == true) {
+                        reportServiceError("Listening socket SCP закрыт; сервер останавливается")
+                        stopServerInternal(logStop = true)
+                    }
+                }
+                updateConnections()
                 if (_state.value.status == ScpServerStatus.RUNNING) {
                     val elapsedSec = ((System.currentTimeMillis() - serverStartTimeMs) / 1000L).coerceAtLeast(0L)
                     val hours = elapsedSec / 3600
@@ -1162,7 +1172,7 @@ class DicomStorageScpServer(
                     _state.update { it.copy(uptimeFormatted = formatted) }
                 }
             }
-        }, 1000L, 1000L)
+        }, 100L, 100L)
         uptimeTimer = timer
     }
 }

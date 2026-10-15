@@ -28,6 +28,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -92,7 +93,7 @@ enum class ActiveSubScreen {
 fun DicomToolAppRoot(
     viewModel: DicomToolViewModel = viewModel()
 ) {
-    val scpState by viewModel.scpState.collectAsState()
+    val scpState by viewModel.scpState.collectAsStateWithLifecycle()
     val aeTitleInput by viewModel.aeTitleInput.collectAsState()
     val portInput by viewModel.portInput.collectAsState()
     val dcm4cheReport by viewModel.dcm4cheReport.collectAsState()

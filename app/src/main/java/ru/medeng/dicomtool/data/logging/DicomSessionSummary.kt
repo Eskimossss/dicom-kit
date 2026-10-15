@@ -172,8 +172,8 @@ object DicomSessionGrouper {
             sessionBuckets.getOrPut(key) { mutableListOf() }.add(entry)
         }
 
-        // 2. Объединение одиноких предваряющих TCP_CONNECT событий с соответствующими ассоциациями SCP
-        val mergedBuckets = mergeTcpEventsWithScpSessions(sessionBuckets)
+        // 2. TCP and DIMSE share an explicit identity; legacy endpoint strings cannot prove a match.
+        val mergedBuckets = sessionBuckets // Only an explicit identity proves that events belong together.
 
         // 3. Формирование DicomSessionSummary для каждой корзины
         val summaries = mutableListOf<DicomSessionSummary>()
@@ -184,48 +184,6 @@ object DicomSessionGrouper {
 
         // Возвращаем в обратном порядке (сначала самые свежие сеансы)
         return summaries.asReversed()
-    }
-
-    private fun mergeTcpEventsWithScpSessions(
-        buckets: Map<String, List<DicomLogEntry>>
-    ): Map<String, List<DicomLogEntry>> {
-        val result = LinkedHashMap<String, MutableList<DicomLogEntry>>()
-        val tcpPending = mutableMapOf<String, MutableList<DicomLogEntry>>() // remoteSocket -> events
-
-        for ((key, events) in buckets) {
-            val first = events.firstOrNull() ?: continue
-            val isPureTcp = events.all { it.category == DicomLogCategory.TCP_CONNECT || it.category == DicomLogCategory.TCP_DISCONNECT }
-
-            if (isPureTcp && key.startsWith("TCP-")) {
-                val remoteSocket = first.technicalDetails["Remote Socket"]
-                    ?: first.title.substringAfter("from ", "").trim()
-                if (remoteSocket.isNotBlank()) {
-                    tcpPending.getOrPut(remoteSocket) { mutableListOf() }.addAll(events)
-                    continue
-                }
-            }
-
-            // Проверяем, есть ли для этой ассоциации отложенный TCP_CONNECT с тем же сокетом
-            val assocSocket = events.firstNotNullOfOrNull { it.technicalDetails["Remote Socket"] }
-            if (assocSocket != null && tcpPending.containsKey(assocSocket)) {
-                val prepended = tcpPending.remove(assocSocket)!!
-                val combined = mutableListOf<DicomLogEntry>()
-                combined.addAll(prepended)
-                combined.addAll(events)
-                result[key] = combined
-                continue
-            }
-
-            result[key] = events.toMutableList()
-        }
-
-        // Оставшиеся неассоциированные TCP события возвращаем как самостоятельные сеансы
-        for ((_, pendingEvents) in tcpPending) {
-            val key = pendingEvents.first().sessionUid.ifBlank { "TCP-${pendingEvents.first().id}" }
-            result[key] = pendingEvents
-        }
-
-        return result
     }
 
     private fun buildSessionSummary(
@@ -503,10 +461,10 @@ object DicomSessionGrouper {
                 isError = true
             } else {
                 // Если сессия еще активна или ответ не получен
-                statusText = "C-STORE-RSP не получен"
+                statusText = if (rq.direction == DicomTrafficDirection.INBOUND) "Локальная запись C-STORE-RSP не подтверждена; результат SCU неизвестен" else "C-STORE-RSP не получен"
                 isSuccess = false
                 isWarning = false
-                isError = true
+                isError = rq.direction != DicomTrafficDirection.INBOUND
             }
 
             result.add(
@@ -520,7 +478,7 @@ object DicomSessionGrouper {
                     isSuccess = isSuccess,
                     isWarning = isWarning,
                     isError = isError,
-                    scuOutcome = if (statusText.contains("не получен") || statusText.contains("не содержит")) "UNCONFIRMED" else null
+                    scuOutcome = if (statusText.contains("не получен") || statusText.contains("не содержит") || statusText.contains("не подтверждена")) "UNCONFIRMED" else null
                 )
             )
         }
@@ -589,12 +547,26 @@ object DicomSessionGrouper {
             if (closingError && files.all { it.isSuccess || it.isWarning }) return Triple(SessionOutcomeStatus.WARNING,
                 "Передача подтверждена, ошибка завершения соединения", "Подтверждено: ${files.size}; состояние соединения см. в подробном журнале")
         }
+        if (role == "SCP" && events.any { it.technicalDetails.containsKey("Response Write") || it.category == DicomLogCategory.C_STORE_RQ || it.category == DicomLogCategory.C_ECHO_RQ }) {
+            val failedWrite = events.any { it.technicalDetails["Response Write"] == "FAILED" }
+            val closed = events.any { it.category == DicomLogCategory.TCP_DISCONNECT || it.category == DicomLogCategory.ABORT }
+            if (failedWrite || (closed && (files.any { it.scuOutcome == "UNCONFIRMED" } ||
+                    events.any { it.category == DicomLogCategory.C_ECHO_RQ } && events.none { it.category == DicomLogCategory.C_ECHO_RSP })))
+                return Triple(SessionOutcomeStatus.UNKNOWN, "Ответ SCP не подтверждён локальной записью", "Сохранение и получение ответа удалённым узлом — разные результаты; см. подробный журнал")
+            if (closed && events.any { it.technicalDetails["Response Write"] == "LOCAL_COMPLETED" }) {
+                val error = events.any { it.technicalDetails["Response Write"] == "LOCAL_COMPLETED" && it.isError }
+                val closureError = events.any { it.category in setOf(DicomLogCategory.ABORT, DicomLogCategory.NETWORK_ERROR, DicomLogCategory.TCP_DISCONNECT) && it.isError }
+                return Triple(when { error -> SessionOutcomeStatus.FAILURE; closureError -> SessionOutcomeStatus.WARNING; else -> SessionOutcomeStatus.SUCCESS },
+                    when { error -> "SCP записал ответ с ошибкой"; closureError -> "Локальная запись ответа завершена; ошибка закрытия соединения"; else -> "SCP завершил локальную запись ответа" },
+                    "Получение ответа удалённым узлом не подтверждено")
+            }
+        }
         val hasAssociateRj = events.any { it.category == DicomLogCategory.ASSOCIATE_RJ }
         if (hasAssociateRj) {
             return Triple(
                 SessionOutcomeStatus.FAILURE,
                 "Ассоциация отклонена (A-ASSOCIATE-RJ)",
-                "PACS отклонил установление связи"
+                if (role == "SCP") "Локальный SCP записал A-ASSOCIATE-RJ; получение удалённым узлом не подтверждено" else "PACS отклонил установление связи"
             )
         }
 

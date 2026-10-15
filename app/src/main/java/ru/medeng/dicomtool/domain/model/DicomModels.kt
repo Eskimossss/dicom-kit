@@ -8,6 +8,7 @@ import android.net.Uri
 enum class ScpServerStatus {
     STOPPED,
     STARTING,
+    STOPPING,
     RUNNING,
     ERROR
 }
@@ -31,6 +32,7 @@ data class ScpReceiverState(
     val receivedStudiesCount: Int = 0,
     val receivedImagesCount: Int = 0,
     val activeConnectionsCount: Int = 0,
+    val serviceStopping: Boolean = false,
     val uptimeFormatted: String = "00:00:00",
     val storagePath: String = "",
     val connectedNodes: List<String> = emptyList(),
