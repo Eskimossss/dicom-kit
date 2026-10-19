@@ -73,7 +73,8 @@ class ArchiveStage56Test {
         val bad = File(root, "bad.dcm").apply { writeBytes(byteArrayOf(1, 2, 3)) }
         val keep = File(root, "keep.txt").apply { writeText("unrelated synthetic document") }
         val repo = LocalDicomStudyRepository(root)
-        assertNotNull(repo.indexState.value.warning)
+        assertEquals(1, repo.indexState.value.readProblems.size)
+        assertNull(repo.indexState.value.warning)
         assertArrayEquals(byteArrayOf(1, 2, 3), bad.readBytes())
         repo.clearAllStudies()
         assertTrue(keep.exists())

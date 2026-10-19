@@ -74,6 +74,8 @@ class LocalDicomStudyRepository(
     private val lock = ReentrantLock()
     private val coordinator by lazy { StorageCoordinator.forRoot(storageRootDir) }
     private val records = LinkedHashMap<String, ParsedRecord>()
+    private val readProblems = java.util.concurrent.ConcurrentHashMap<String, DicomReadProblem>()
+    private fun currentProblems() = readProblems.values.sortedBy { it.fileName }
     private val _indexState = MutableStateFlow(ArchiveIndexState(isLoading = !eagerLoad))
     val indexState: StateFlow<ArchiveIndexState> = _indexState.asStateFlow()
     private val _studiesFlow = MutableStateFlow<List<DicomStudyItem>>(emptyList())
@@ -133,9 +135,9 @@ class LocalDicomStudyRepository(
                 lock.withLock {
                     if (rec != null) {
                         records[path] = rec
-                        _indexState.value = _indexState.value.copy(indexedFiles = records.size)
+                        _indexState.value = _indexState.value.copy(indexedFiles = records.size, readProblems = currentProblems())
                         publishRecords(records.values.filter { it.studyInstanceUid == rec.studyInstanceUid }, rec.studyInstanceUid)
-                    } else _indexState.value = _indexState.value.copy(warning = "Файл сохранён, но заголовок не включён в индекс: неподдерживаемые или повреждённые metadata")
+                    } else _indexState.value = _indexState.value.copy(readProblems = currentProblems())
                 }
             }.onFailure { _indexState.value = _indexState.value.copy(warning = "Файл сохранён; индекс требует обновления: ${it.javaClass.simpleName}") }
         }
@@ -147,7 +149,7 @@ class LocalDicomStudyRepository(
         try { lock.withLock {
             storageRootDir.mkdirs()
             val parsedRecords = ArrayList<ParsedRecord>()
-            var unreadable = 0
+            readProblems.clear()
 
             // 1. Сканируем внутреннее хранилище (если существует)
             if (storageRootDir.exists()) {
@@ -161,7 +163,7 @@ class LocalDicomStudyRepository(
                         lastModified = file.lastModified(),
                         streamOpener = { FileInputStream(file) }
                     )
-                    if (rec != null) parsedRecords.add(rec) else unreadable++
+                    if (rec != null) parsedRecords.add(rec)
                 }
             }
 
@@ -185,7 +187,7 @@ class LocalDicomStudyRepository(
                                         lastModified = doc.lastModified(),
                                         streamOpener = { context.contentResolver.openInputStream(doc.uri) }
                                     )
-                                    if (rec != null) parsedRecords.add(rec) else unreadable++
+                                    if (rec != null) parsedRecords.add(rec)
                                 }
                             }
                         }
@@ -195,7 +197,7 @@ class LocalDicomStudyRepository(
             records.clear()
             parsedRecords.forEach { records[it.path] = it }
             publishRecords(parsedRecords)
-            _indexState.value = ArchiveIndexState(warning = warning ?: if (unreadable > 0) "Не прочитаны заголовки: $unreadable. Файлы не изменены." else null, indexedFiles = parsedRecords.size)
+            _indexState.value = ArchiveIndexState(warning = warning, indexedFiles = parsedRecords.size, readProblems = currentProblems())
         } } catch (e: Exception) {
             _indexState.value = ArchiveIndexState(warning = "Обновление индекса не завершено: ${e.javaClass.simpleName}")
         }
@@ -421,14 +423,19 @@ class LocalDicomStudyRepository(
         lastModified: Long,
         streamOpener: () -> InputStream?
     ): ParsedRecord? {
+        var stage = DicomReadStage.OPEN
         return try {
             onHeaderRead()
-            val rawStream = streamOpener() ?: return null
-            DicomInputStream(BufferedInputStream(rawStream, 65536)).use { dis ->
+            val rawStream = streamOpener() ?: throw java.io.FileNotFoundException("Source unavailable")
+            stage = DicomReadStage.FILE_META
+            rawStream.use { source -> DicomInputStream(BufferedInputStream(source, 65536)).use { dis ->
                 dis.includeBulkData = DicomInputStream.IncludeBulkData.NO
                 ru.medeng.dicomtool.dicom.tags.BoundedDicomRead.install(dis)
+                stage = DicomReadStage.FILE_META
                 val fmi = dis.readFileMetaInformation()
+                stage = DicomReadStage.HEADER
                 val ds = dis.readDatasetUntilPixelData()
+                stage = DicomReadStage.METADATA
 
                 val studyUid = ds.getString(Tag.StudyInstanceUID)?.takeIf { it.isNotBlank() }
                     ?: "UNKNOWN_STUDY"
@@ -491,6 +498,7 @@ class LocalDicomStudyRepository(
                     charsetDiag.warningMessage
                 ).firstOrNull()
 
+                readProblems.remove(path)
                 ParsedRecord(
                     path = path,
                     displayName = displayName,
@@ -529,8 +537,9 @@ class LocalDicomStudyRepository(
                     specificCharacterSet = charsetDiag.effectiveCharsetDescription,
                     encodingWarning = combinedWarning
                 )
-            }
-        } catch (_: Exception) {
+            } }
+        } catch (error: Exception) {
+            readProblems[path] = DicomReadProblem.from(path, displayName, stage, error)
             null
         }
     }

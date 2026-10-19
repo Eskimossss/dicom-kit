@@ -426,7 +426,8 @@ object DicomDiagnosticHandbook {
      * Извлечение целочисленного кода статуса DICOM из полей записи (title, details).
      */
     fun extractStatusCode(entry: DicomLogEntry): Int? {
-        val statusStr = entry.technicalDetails["Статус"]
+        val statusStr = entry.technicalDetails["DICOM Status"]
+            ?: entry.technicalDetails["Статус"]
             ?: entry.technicalDetails["Status"]
             ?: entry.technicalDetails["Код ответа"]
             ?: ""

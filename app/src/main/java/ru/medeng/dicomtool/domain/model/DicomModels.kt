@@ -358,7 +358,7 @@ enum class DicomTrafficDirection(val code: String) {
 
 /**
  * Запись подробного технического журнала DICOM обмена.
- * Сохраняется между перезапусками приложения. Не содержит Pixel Data и ФИО пациента.
+ * Сохраняется между перезапусками приложения. Не содержит Pixel Data. Структурированные данные пациентов хранятся приватно и исключаются из безопасного экспорта.
  */
 data class DicomLogEntry(
     val id: String,
@@ -370,7 +370,8 @@ data class DicomLogEntry(
     val summaryLines: List<String>,
     val technicalDetails: Map<String, String> = emptyMap(),
     val isError: Boolean = false,
-    val sessionUid: String = ""
+    val sessionUid: String = "",
+    val patients: List<ru.medeng.dicomtool.data.logging.DicomLogPatient> = emptyList()
 ) {
     val effectiveSessionUid: String
         get() = sessionUid.ifBlank { associationId }

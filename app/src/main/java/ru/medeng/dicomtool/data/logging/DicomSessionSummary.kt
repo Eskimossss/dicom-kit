@@ -61,7 +61,10 @@ data class TransferredFileItem(
     val isWarning: Boolean = false,
     val isError: Boolean = false,
     val scuOutcome: String? = null,
-    val transferSyntaxUid: String = ""
+    val transferSyntaxUid: String = "",
+    val storageResult: String? = null,
+    val responseWrite: String? = null,
+    val dimseStatus: Int? = null
 ) {
     val displayTitle: String
         get() {
@@ -100,7 +103,8 @@ data class DicomSessionSummary(
     val endTimeFormatted: String,
     val associationParameters: Map<String, String>,
     val events: List<DicomLogEntry>,
-    val diagnosticRecommendations: List<DiagnosticRecommendation>
+    val diagnosticRecommendations: List<DiagnosticRecommendation>,
+    val patients: List<DicomLogPatient> = emptyList()
 ) {
     val formattedRemoteNode: String
         get() {
@@ -309,7 +313,8 @@ object DicomSessionGrouper {
             endTimeFormatted = endTime,
             associationParameters = assocParams,
             events = events,
-            diagnosticRecommendations = recommendations
+            diagnosticRecommendations = recommendations,
+            patients = events.flatMap { it.patients }.distinctBy { it.identityKey }
         )
     }
 
@@ -410,6 +415,13 @@ object DicomSessionGrouper {
                 }
             }
 
+            fun matchesRequest(entry: DicomLogEntry): Boolean = requestId != null &&
+                (entry.technicalDetails["Message ID Being Responded To"] ?: entry.technicalDetails["Message ID"]) == requestId
+            val storage = events.lastOrNull { matchesRequest(it) && it.technicalDetails["Storage Result"] != null }
+                ?.technicalDetails?.get("Storage Result")
+            val write = events.lastOrNull { matchesRequest(it) && it.technicalDetails["Response Write"] in setOf("FAILED", "LOCAL_COMPLETED") }
+                ?.technicalDetails?.get("Response Write")
+
             val rawName = rq.technicalDetails["Имя файла"]
                 ?: rq.technicalDetails["Файл"]
                 ?: rq.technicalDetails["File"]
@@ -481,7 +493,9 @@ object DicomSessionGrouper {
                     isSuccess = isSuccess,
                     isWarning = isWarning,
                     isError = isError,
-                    scuOutcome = if (statusText.contains("не получен") || statusText.contains("не содержит") || statusText.contains("не подтверждена")) "UNCONFIRMED" else null
+                    scuOutcome = if (statusText.contains("не получен") || statusText.contains("не содержит") || statusText.contains("не подтверждена")) "UNCONFIRMED" else null,
+                    storageResult = storage, responseWrite = write,
+                    dimseStatus = pairRsp?.let { DicomDiagnosticHandbook.extractStatusCode(it) }
                 )
             )
         }
@@ -557,18 +571,37 @@ object DicomSessionGrouper {
             if (closingError && files.all { it.isSuccess || it.isWarning }) return Triple(SessionOutcomeStatus.WARNING,
                 "Передача подтверждена, ошибка завершения соединения", "Подтверждено: ${files.size}; состояние соединения см. в подробном журнале")
         }
-        if (role == "SCP" && events.any { it.technicalDetails.containsKey("Response Write") || it.category == DicomLogCategory.C_STORE_RQ || it.category == DicomLogCategory.C_ECHO_RQ }) {
+        if (role == "SCP" && primaryOp == "C-STORE" && files.isNotEmpty()) {
+            val closed = events.any { it.category in setOf(DicomLogCategory.TCP_DISCONNECT, DicomLogCategory.ABORT, DicomLogCategory.RELEASE_RP) }
+            val saved = files.count { it.storageResult == "VERIFIED" }
+            val failed = files.count { it.storageResult == "FAILED" || it.isError }
             val failedWrite = events.any { it.technicalDetails["Response Write"] == "FAILED" }
-            val closed = events.any { it.category == DicomLogCategory.TCP_DISCONNECT || it.category == DicomLogCategory.ABORT }
-            if (failedWrite || (closed && (files.any { it.scuOutcome == "UNCONFIRMED" } ||
-                    events.any { it.category == DicomLogCategory.C_ECHO_RQ } && events.none { it.category == DicomLogCategory.C_ECHO_RSP })))
-                return Triple(SessionOutcomeStatus.UNKNOWN, "Ответ SCP не подтверждён локальной записью", "Сохранение и получение ответа удалённым узлом — разные результаты; см. подробный журнал")
-            if (closed && events.any { it.technicalDetails["Response Write"] == "LOCAL_COMPLETED" }) {
-                val error = events.any { it.technicalDetails["Response Write"] == "LOCAL_COMPLETED" && it.isError }
-                val closureError = events.any { it.category in setOf(DicomLogCategory.ABORT, DicomLogCategory.NETWORK_ERROR, DicomLogCategory.TCP_DISCONNECT) && it.isError }
-                return Triple(when { error -> SessionOutcomeStatus.FAILURE; closureError -> SessionOutcomeStatus.WARNING; else -> SessionOutcomeStatus.SUCCESS },
-                    when { error -> "SCP записал ответ с ошибкой"; closureError -> "Локальная запись ответа завершена; ошибка закрытия соединения"; else -> "SCP завершил локальную запись ответа" },
-                    "Получение ответа удалённым узлом не подтверждено")
+            val complete = files.all { it.responseWrite == "LOCAL_COMPLETED" || it.dimseStatus != null }
+            val warning = files.any { it.isWarning }
+            val connectionError = events.any { it.category in setOf(DicomLogCategory.ABORT, DicomLogCategory.NETWORK_ERROR, DicomLogCategory.TCP_DISCONNECT) && it.isError }
+            val counts = "Сохранено: $saved; не сохранено/отказ: $failed; файлов: ${files.size}"
+            if (failed > 0) return Triple(if (failed == files.size) SessionOutcomeStatus.FAILURE else SessionOutcomeStatus.WARNING,
+                if (failed == files.size) "C-STORE: $failed файл(ов) не сохранены или отклонены" else "C-STORE: частичный успех",
+                counts + if (failedWrite) "; ошибка передачи ответа" else "")
+            if (failedWrite) return Triple(if (saved == files.size) SessionOutcomeStatus.WARNING else SessionOutcomeStatus.UNKNOWN,
+                "Ошибка передачи ответа C-STORE", "$counts. Результат получения ответа на SCU неизвестен")
+            if (closed && !complete) return Triple(SessionOutcomeStatus.UNKNOWN, "C-STORE: ответ не записан полностью", counts)
+            if (complete) return Triple(when { !closed -> SessionOutcomeStatus.IN_PROGRESS; warning || connectionError -> SessionOutcomeStatus.WARNING; else -> SessionOutcomeStatus.SUCCESS },
+                if (warning) "C-STORE: ответ с предупреждением" else if (saved == files.size) "C-STORE: ${files.size} файл(ов) успешно приняты" else "C-STORE: успешный статус ответа",
+                if (connectionError) "$counts. Ошибка завершения соединения" else counts)
+            return Triple(SessionOutcomeStatus.IN_PROGRESS, "C-STORE: приём выполняется", counts)
+        }
+        if (role == "SCP" && events.any { it.category == DicomLogCategory.C_ECHO_RQ }) {
+            val response = events.lastOrNull { it.category == DicomLogCategory.C_ECHO_RSP }
+            val failedWrite = events.any { it.technicalDetails["Response Write"] == "FAILED" }
+            if (failedWrite) return Triple(SessionOutcomeStatus.UNKNOWN, "Ошибка передачи ответа C-ECHO", "Ответ удалённого узла не подтверждается отдельным прикладным сообщением")
+            if (response != null) {
+                val code = DicomDiagnosticHandbook.extractStatusCode(response)
+                val closed = events.any { it.category in setOf(DicomLogCategory.TCP_DISCONNECT, DicomLogCategory.ABORT, DicomLogCategory.RELEASE_RP) }
+                val transportError = events.any { it.category in setOf(DicomLogCategory.ABORT, DicomLogCategory.NETWORK_ERROR, DicomLogCategory.TCP_DISCONNECT) && it.isError }
+                return Triple(when { code == null -> SessionOutcomeStatus.UNKNOWN; code != 0 && code !in 0xB000..0xBFFF -> SessionOutcomeStatus.FAILURE; code != 0 || transportError -> SessionOutcomeStatus.WARNING; !closed -> SessionOutcomeStatus.IN_PROGRESS; else -> SessionOutcomeStatus.SUCCESS },
+                    if (code == 0) "C-ECHO: успешный ответ записан" else "C-ECHO: статус ответа требует проверки",
+                    if (transportError) "Ошибка завершения соединения; сетевые события в подробном журнале" else "Локальная запись ответа выполнена")
             }
         }
         val hasAssociateRj = events.any { it.category == DicomLogCategory.ASSOCIATE_RJ }
@@ -776,7 +809,8 @@ fun DicomSessionSummary.matches(
     val q = query.trim().lowercase(Locale.US)
     if (q.isBlank()) return true
 
-    if (associationId.lowercase(Locale.US).contains(q) ||
+    if (patients.any { it.displayName.lowercase(Locale.US).contains(q) } ||
+        associationId.lowercase(Locale.US).contains(q) ||
         sessionUid.lowercase(Locale.US).contains(q) ||
         remoteAeTitle.lowercase(Locale.US).contains(q) ||
         calledAeTitle.lowercase(Locale.US).contains(q) ||
@@ -864,6 +898,7 @@ fun DicomLogEntry.matches(
     // 3. Поисковый запрос
     val q = query.trim().lowercase(Locale.US)
     if (q.isBlank()) return true
+    if (patients.any { it.displayName.lowercase(Locale.US).contains(q) }) return true
 
     if (associationId.lowercase(Locale.US).contains(q) ||
         sessionUid.lowercase(Locale.US).contains(q) ||

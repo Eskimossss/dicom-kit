@@ -126,11 +126,11 @@ class PersistentDicomTechnicalLogger(
     }
     fun recordTechnicalEvent(category: DicomLogCategory, direction: DicomTrafficDirection, associationId: String,
         title: String, summaryLines: List<String> = emptyList(), technicalDetails: Map<String, String> = emptyMap(),
-        isError: Boolean = false, sessionUid: String = "") {
+        isError: Boolean = false, sessionUid: String = "", patients: List<DicomLogPatient> = emptyList()) {
         val details = if (sessionUid.isNotBlank() && !technicalDetails.containsKey("ID сеанса (UID)"))
             technicalDetails + ("ID сеанса (UID)" to sessionUid) else technicalDetails
         recordEvent(DicomLogEntry(UUID.randomUUID().toString(), formatNow(), category, direction, associationId,
-            title, summaryLines, details, isError, sessionUid))
+            title, summaryLines, details, isError, sessionUid, patients))
     }
     private fun control(command: Command): Boolean = synchronized(gate) {
         if (!accepting || queuedControls >= 32) {
@@ -379,7 +379,7 @@ class PersistentDicomTechnicalLogger(
             val normalized = key.trim().lowercase(Locale.ROOT)
             forbiddenKeys.none { normalized.contains(it) }
         }
-        return entry.copy(technicalDetails = filteredDetails)
+        return entry.copy(technicalDetails = filteredDetails, patients = entry.patients.take(64).map { it.copy(name = it.name.take(2048).filterNot(Char::isISOControl), identityKey = it.identityKey.take(128)) })
     }
 
     // --- Сериализация и десериализация TSV (с обратной совместимостью) ---
@@ -431,7 +431,12 @@ class PersistentDicomTechnicalLogger(
             escapeField(e.title),
             summaryJoined,
             detailsJoined,
-            escapeField(e.sessionUid) // 10-я колонка: глобально уникальный ID сеанса
+            escapeField(e.sessionUid), // Existing ten columns remain unchanged.
+            "P1:" + e.patients.joinToString("|") { patient ->
+                val encoder = java.util.Base64.getEncoder()
+                encoder.encodeToString(patient.name.toByteArray(Charsets.UTF_8)) + ":" +
+                    encoder.encodeToString(patient.identityKey.toByteArray(Charsets.UTF_8))
+            }
         ).joinToString("\t")
     }
 
@@ -475,7 +480,14 @@ class PersistentDicomTechnicalLogger(
                 summaryLines = summaryLines,
                 technicalDetails = details,
                 isError = isError,
-                sessionUid = sessionUid
+                sessionUid = sessionUid,
+                patients = parts.getOrNull(10)?.takeIf { it.startsWith("P1:") }?.removePrefix("P1:")
+                    ?.split('|')?.take(64)?.mapNotNull { value -> runCatching {
+                        val fields = value.split(':', limit = 2)
+                        val decoder = java.util.Base64.getDecoder()
+                        DicomLogPatient(String(decoder.decode(fields[0]), Charsets.UTF_8).take(2048),
+                            String(decoder.decode(fields[1]), Charsets.UTF_8).take(128))
+                    }.getOrNull() }.orEmpty()
             )
         } catch (_: Exception) {
             null

@@ -1172,7 +1172,7 @@ class DicomScuClient(
                     "Разрешение" to "512 × 512 (8-bit MONOCHROME2)",
                     "Размер Pixel Data" to "${preparedObject.pixelDataBytes.size} байт"
                 ),
-                sessionUid = sessionUid
+                sessionUid = sessionUid, patients = listOf(ru.medeng.dicomtool.data.logging.DicomLogPatient.from(preparedObject.dataset))
             )
 
             val countingWriter = object : DataWriter {

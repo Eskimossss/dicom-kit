@@ -212,9 +212,6 @@ fun DicomToolAppRoot(
                         onOpenSettings = { activeSubScreen = ActiveSubScreen.SETTINGS_AND_CLEANUP }
                     )
                 }
-                if (!isViewerFullScreen && (archiveBusy || archiveIndex.isLoading || archiveIndex.warning != null)) {
-                    Text(archiveIndex.warning ?: "Архив обновляется: список и счётчики пока не окончательные…", modifier = Modifier.padding(8.dp), fontSize = 12.sp)
-                }
                 }
             },
             bottomBar = {
@@ -379,6 +376,7 @@ fun DicomToolAppRoot(
                             MainBottomTab.RECEIVED -> {
                                 ReceivedStudiesScreen(
                                     studies = studies,
+                                    indexState = archiveIndex,
                                     selectedModality = selectedModality,
                                     selectedStudyUid = selectedStudyUid,
                                     onSelectModality = viewModel::setModalityFilter,

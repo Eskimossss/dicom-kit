@@ -135,6 +135,7 @@ import kotlin.math.roundToInt
 @Composable
 fun ReceivedStudiesScreen(
     studies: List<DicomStudyItem>,
+    indexState: ru.medeng.dicomtool.data.storage.ArchiveIndexState = ru.medeng.dicomtool.data.storage.ArchiveIndexState(),
     selectedModality: String,
     selectedStudyUid: String?,
     onSelectModality: (String) -> Unit,
@@ -142,6 +143,21 @@ fun ReceivedStudiesScreen(
     onDeleteStudy: (String) -> Unit,
     onRefreshStudies: () -> Unit
 ) {
+    var showReadProblems by rememberSaveable { mutableStateOf(false) }
+    if (showReadProblems) {
+        AlertDialog(onDismissRequest = { showReadProblems = false }, title = { Text("Диагностика чтения DICOM") },
+            text = { LazyColumn(Modifier.heightIn(max = 420.dp)) {
+                items(indexState.readProblems, key = { it.source }) { problem ->
+                    Column(Modifier.padding(vertical = 8.dp)) {
+                        Text(problem.fileName, fontWeight = FontWeight.Bold)
+                        Text("Стадия: ${problem.stage.label}", fontSize = 12.sp)
+                        Text(problem.reason, fontSize = 12.sp)
+                        Text("Файл не изменён. Проверьте доступ или исходник у отправителя.", fontSize = 12.sp)
+                    }
+                }
+            } }, confirmButton = { TextButton(onClick = onRefreshStudies) { Text("Повторить чтение") } },
+            dismissButton = { TextButton(onClick = { showReadProblems = false }) { Text("Закрыть") } })
+    }
     val filteredStudies = remember(studies, selectedModality) {
         if (selectedModality == "ALL") studies
         else studies.filter { it.modality.equals(selectedModality, ignoreCase = true) }
@@ -196,6 +212,13 @@ fun ReceivedStudiesScreen(
             }
         }
 
+        if (indexState.isLoading) Text("Обновление списка исследований…", fontSize = 12.sp)
+        indexState.warning?.let { Text(it, color = ErrorRed, fontSize = 12.sp) }
+        if (indexState.readProblems.isNotEmpty()) {
+            TextButton(onClick = { showReadProblems = true }) {
+                Text("${indexState.readProblems.size} файла с ошибками чтения DICOM", color = ErrorRed)
+            }
+        }
         Spacer(modifier = Modifier.height(12.dp))
 
         if (filteredStudies.isEmpty()) {

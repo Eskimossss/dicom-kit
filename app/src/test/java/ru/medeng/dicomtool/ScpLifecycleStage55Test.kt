@@ -200,7 +200,8 @@ class ScpLifecycleStage55Test {
         assertFalse(logger.logsFlow.value.any { it.category == DicomLogCategory.C_STORE_RSP })
         assertTrue(logger.logsFlow.value.any { it.technicalDetails["Response Write"] == "FAILED" })
         val summary = DicomSessionGrouper.groupEvents(logger.logsFlow.value).first { it.primaryOperation == "C-STORE" }
-        assertEquals(SessionOutcomeStatus.UNKNOWN, summary.status)
+        assertEquals(SessionOutcomeStatus.FAILURE, summary.status)
+        assertEquals("FAILED", summary.filesTransferred.single().storageResult)
         assertEquals("UNCONFIRMED", summary.filesTransferred.single().scuOutcome)
         assertEquals(1, RetainedIncoming.inspect(repo.storageRootDir).filesCount)
         start(); echo(connect())
@@ -234,7 +235,8 @@ class ScpLifecycleStage55Test {
         val summary = DicomSessionGrouper.groupEvents(logs).single { it.sessionUid == uid }
         assertEquals(4, summary.filesTransferred.size)
         assertEquals(SessionOutcomeStatus.SUCCESS, summary.status)
-        assertTrue(summary.statusSubtitle.contains("не подтверждено"))
+        assertTrue(summary.statusSubtitle.contains("Сохранено: 4"))
+        assertFalse(summary.statusSubtitle.contains("не подтверждено"))
     }
     @Test fun stopDuringEchoLoopEndsOperationAndPermitsRetry() {
         start(); val a = connect(); val began = CountDownLatch(1)
@@ -268,7 +270,7 @@ class ScpLifecycleStage55Test {
         }
         assertTrue(logger.logsFlow.value.any { it.technicalDetails["Response Write"] == "FAILED" })
         assertFalse(logger.logsFlow.value.any { it.category == DicomLogCategory.C_STORE_RSP })
-        assertEquals(SessionOutcomeStatus.UNKNOWN, DicomSessionGrouper.groupEvents(logger.logsFlow.value)
+        assertEquals(SessionOutcomeStatus.WARNING, DicomSessionGrouper.groupEvents(logger.logsFlow.value)
             .first { it.primaryOperation == "C-STORE" }.status)
     }
     @Test fun osStopCanCloseListenerWhileStartupIndexingIsBlocked() {

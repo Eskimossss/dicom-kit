@@ -36,6 +36,7 @@ object SafeTechnicalSummary {
                 "Max PDU Length", "Max PDU Length (AC)", "Max PDU Length (RQ)" -> unsigned(value, 4_294_967_295)?.let { "$key: $it" }
                 "Transfer Syntax UID", "Accepted Transfer Syntax" -> value.takeIf { it in syntaxes }?.let { "Transfer Syntax UID: $it" }
                 "SOP Class UID", "Affected SOP Class UID", "Abstract Syntax UID" -> value.takeIf { it in classes }?.let { "SOP Class UID: $it" }
+                "Storage Result" -> value.takeIf { it in setOf("VERIFIED", "FAILED") }?.let { "Хранение: $it" }
                 "Storage Disposition" -> value.takeIf { it in setOf("NEW_COPY", "REPEAT_COPY", "DUPLICATE_CONFIRMED", "CONTENT_COLLISION", "UNKNOWN") }?.let { "Хранение: $it" }
                 "Response Write" -> value.takeIf { it in setOf("ATTEMPTED", "LOCAL_COMPLETED", "FAILED") }?.let { "Локальная запись ответа: $it" }
                 "SCU File Result" -> value.takeIf { it in outcomes }?.let { "Результат файла: $it" }

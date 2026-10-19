@@ -67,6 +67,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -685,11 +686,16 @@ private fun DicomSessionSummaryCard(
                 if (summary.filesCount > 0) {
                     SessionParamRow(label = "Файлов", value = summary.filesCount.toString())
                 }
-                SessionParamRow(
-                    label = "Результат",
-                    value = summary.statusTitle,
-                    valueColor = statusColor
-                )
+                if (summary.primaryOperation == "C-STORE") {
+                    val names = summary.patients.map { it.displayName }
+                    SessionParamRow(label = if (names.size > 1) "Пациенты" else "Пациент",
+                        value = when { names.isEmpty() -> "Не указано"; names.size <= 2 -> names.joinToString(", "); else -> names.size.toString() })
+                    if (names.size >= 3) {
+                        var showPatients by rememberSaveable(summary.sessionKey) { mutableStateOf(false) }
+                        TextButton(onClick = { showPatients = !showPatients }) { Text(if (showPatients) "Скрыть пациентов" else "Показать пациентов") }
+                        if (showPatients) names.forEach { Text(it, fontSize = 12.sp) }
+                    }
+                }
             }
 
             // --- РАСКРЫТАЯ ЧАСТЬ КАРТОЧКИ ---

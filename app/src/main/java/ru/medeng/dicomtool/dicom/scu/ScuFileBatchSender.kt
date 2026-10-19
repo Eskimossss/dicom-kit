@@ -44,12 +44,13 @@ internal class ScuFileBatchSender(private val logger: PersistentDicomTechnicalLo
             return cancellation.isRequested
         }
         fun event(category: DicomLogCategory, title: String, details: Map<String, String> = emptyMap(),
-            direction: DicomTrafficDirection = DicomTrafficDirection.LOCAL, error: Boolean = false) {
+            direction: DicomTrafficDirection = DicomTrafficDirection.LOCAL, error: Boolean = false,
+                  patients: List<ru.medeng.dicomtool.data.logging.DicomLogPatient> = emptyList()) {
             logger.recordTechnicalEvent(category = category, direction = direction,
                 associationId = session.displayLabel, sessionUid = session.sessionUid, title = title,
                 summaryLines = listOf(title), technicalDetails = mapOf("Роль" to "SCU",
                     "Remote Socket" to "$host:$port", "Calling AE Title" to calling,
-                    "Called AE Title" to called) + details, isError = error)
+                    "Called AE Title" to called) + details, isError = error, patients = patients)
         }
         fun finish(index: Int, status: FileSendStatus, message: String, rsp: Attributes? = null,
             messageId: Int? = null, bytes: Long = 0) {
@@ -196,7 +197,8 @@ internal class ScuFileBatchSender(private val logger: PersistentDicomTechnicalLo
                             event(DicomLogCategory.C_STORE_RQ, "[SCU] Попытка C-STORE-RQ", mapOf(
                                 "Message ID" to messageId.toString(), "File ID" to "${file.id}:$index", "Имя файла" to file.fileName,
                                 "Affected SOP Class UID" to file.sopClassUid, "Affected SOP Instance UID" to requireNotNull(file.sopInstanceUid),
-                                "Transfer Syntax UID" to file.transferSyntaxUid!!), DicomTrafficDirection.OUTBOUND)
+                                "Transfer Syntax UID" to file.transferSyntaxUid!!), DicomTrafficDirection.OUTBOUND,
+                                patients = listOf(ru.medeng.dicomtool.data.logging.DicomLogPatient.from(file.patientName, file.patientId)))
                             attempted = true
                             association.cstore(file.sopClassUid, file.sopInstanceUid, Priority.NORMAL, object : DataWriter {
                                 override fun writeTo(out: PDVOutputStream, tsuid: String) {

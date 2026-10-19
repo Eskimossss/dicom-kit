@@ -420,7 +420,8 @@ class DicomStorageScpServer(
                 technicalDetails = mapOf(
                     "Port" to port.toString(),
                     "AE Title" to aeTitle,
-                    "Exception" to "${e.javaClass.name}: ${e.message}"
+                    "Exception" to "${e.javaClass.name}: ${e.message}",
+                        "Storage Result" to "FAILED"
                 ),
                 isError = true
             )
@@ -545,7 +546,8 @@ class DicomStorageScpServer(
                 summaryLines = listOf("Error: ${e.message ?: e.javaClass.simpleName}"),
                 technicalDetails = mapOf(
                     "Remote Address" to "${s.inetAddress?.hostAddress}:${s.port}",
-                    "Exception" to "${e.javaClass.name}: ${e.message}"
+                    "Exception" to "${e.javaClass.name}: ${e.message}",
+                        "Storage Result" to "FAILED"
                 ),
                 isError = true
             )
@@ -574,7 +576,8 @@ class DicomStorageScpServer(
                 summaryLines = listOf("Reason: ${e.message ?: e.javaClass.simpleName}"),
                 technicalDetails = mapOf(
                     "Remote Address" to "${s.inetAddress?.hostAddress}:${s.port}",
-                    "Exception" to "${e.javaClass.name}: ${e.message}"
+                    "Exception" to "${e.javaClass.name}: ${e.message}",
+                        "Storage Result" to "FAILED"
                 ),
                 isError = true
             )
@@ -787,7 +790,8 @@ class DicomStorageScpServer(
                     "Association ID" to assocId,
                     "Calling AE Title" to (asAssoc.callingAET ?: "-"),
                     "Called AE Title" to (asAssoc.calledAET ?: "-"),
-                    "Exception" to "${e.javaClass.name}: ${e.message}"
+                    "Exception" to "${e.javaClass.name}: ${e.message}",
+                        "Storage Result" to "FAILED"
                 ),
                 isError = true,
                 sessionUid = sessionUid
@@ -986,10 +990,13 @@ class DicomStorageScpServer(
                 val studyUid: String
                 val seriesUid: String
                 val datasetSopUid: String
+                val patients: List<ru.medeng.dicomtool.data.logging.DicomLogPatient>
                 DicomInputStream(tempFile).use { dis ->
                     dis.includeBulkData = DicomInputStream.IncludeBulkData.NO
+                    ru.medeng.dicomtool.dicom.tags.BoundedDicomRead.install(dis)
                     dis.readFileMetaInformation()
                     val headerAttrs = dis.readDatasetUntilPixelData()
+                    patients = listOf(ru.medeng.dicomtool.data.logging.DicomLogPatient.from(headerAttrs))
                     studyUid = headerAttrs.getString(Tag.StudyInstanceUID)?.takeIf { it.isNotBlank() } ?: "UNKNOWN_STUDY"
                     seriesUid = headerAttrs.getString(Tag.SeriesInstanceUID)?.takeIf { it.isNotBlank() } ?: "UNKNOWN_SERIES"
                     datasetSopUid = headerAttrs.getString(Tag.SOPInstanceUID)?.takeIf { it.isNotBlank() } ?: iuid
@@ -1033,9 +1040,10 @@ class DicomStorageScpServer(
                                 "Payload Size" to "${saveResult.savedSizeBytes} bytes (${formatByteCount(saveResult.savedSizeBytes)})",
                                 "Duration" to String.format(Locale.US, "%.4f s", elapsedSec),
                                 "Duplicate Policy" to saveResult.duplicateActionNote,
-                                "Storage Disposition" to saveResult.disposition.name
+                                "Storage Disposition" to saveResult.disposition.name,
+                                "Storage Result" to "VERIFIED"
                             ),
-                            sessionUid = sessionUid
+                            sessionUid = sessionUid, patients = patients
                         )
                     }
 
@@ -1055,13 +1063,14 @@ class DicomStorageScpServer(
                                 "Association ID" to assocId,
                                 "Message ID" to msgId.toString(),
                                 "DICOM Status" to statusHex,
+                                "Storage Result" to "FAILED",
                                 "SOP Class UID" to formatUidWithName(cuid),
                                 "SOP Instance UID" to datasetSopUid,
                                 "Duration" to String.format(Locale.US, "%.4f s", elapsedSec),
                                 "Reason" to saveResult.errorReason
                             ),
                             isError = true,
-                            sessionUid = sessionUid
+                            sessionUid = sessionUid, patients = patients
                         )
                         throw DicomServiceException(status, saveResult.errorReason)
                     }
@@ -1087,7 +1096,8 @@ class DicomStorageScpServer(
                         "SOP Class UID" to formatUidWithName(cuid),
                         "SOP Instance UID" to iuid,
                         "Duration" to String.format(Locale.US, "%.4f s", elapsedSec),
-                        "Exception" to "${e.javaClass.name}: ${e.message}"
+                        "Exception" to "${e.javaClass.name}: ${e.message}",
+                        "Storage Result" to "FAILED"
                     ),
                     isError = true,
                     sessionUid = sessionUid
@@ -1106,7 +1116,7 @@ class DicomStorageScpServer(
         val status = String.format("0x%04X", rsp.getInt(Tag.Status, Status.ProcessingFailure))
         logger.recordTechnicalEvent(category = DicomLogCategory.SERVER_LIFECYCLE, direction = DicomTrafficDirection.LOCAL,
             associationId = session.displayLabel, title = "${category.name} local write attempted",
-            summaryLines = emptyList(), technicalDetails = mapOf("DICOM Status" to status, "Response Write" to "ATTEMPTED"),
+            summaryLines = emptyList(), technicalDetails = mapOf("DICOM Status" to status, "Response Write" to "ATTEMPTED", "Message ID Being Responded To" to rsp.getInt(Tag.MessageIDBeingRespondedTo, 0).toString()),
             sessionUid = session.sessionUid)
         try {
             assoc.writeDimseRSP(pc, rsp) // dcm4che encoder writes and flushes before returning.
@@ -1114,12 +1124,12 @@ class DicomStorageScpServer(
                 associationId = session.displayLabel, title = "${category.name} local write completed; peer receipt unconfirmed",
                 summaryLines = listOf("Status: $status"), technicalDetails = mapOf("DICOM Status" to status,
                     "Response Write" to "LOCAL_COMPLETED", "Message ID Being Responded To" to rsp.getInt(Tag.MessageIDBeingRespondedTo, 0).toString()),
-                isError = rsp.getInt(Tag.Status, 0) != Status.Success, sessionUid = session.sessionUid)
+                isError = rsp.getInt(Tag.Status, 0).let { it != Status.Success && it !in 0xB000..0xBFFF }, sessionUid = session.sessionUid)
         } catch (e: IOException) {
             logger.recordTechnicalEvent(category = DicomLogCategory.NETWORK_ERROR, direction = DicomTrafficDirection.LOCAL,
                 associationId = session.displayLabel, title = "${category.name} local write failed; peer result unknown",
                 summaryLines = listOf(e.toString()), technicalDetails = mapOf("DICOM Status" to status,
-                    "Response Write" to "FAILED", "Exception" to e.toString()), isError = true, sessionUid = session.sessionUid)
+                    "Response Write" to "FAILED", "Exception" to e.toString(), "Message ID Being Responded To" to rsp.getInt(Tag.MessageIDBeingRespondedTo, 0).toString()), isError = true, sessionUid = session.sessionUid)
             throw e
         }
     }
