@@ -1,5 +1,10 @@
 package ru.medeng.dicomtool
 
+import androidx.activity.compose.setContent
+import androidx.compose.runtime.*
+import androidx.compose.foundation.layout.*
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.Modifier
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.ui.test.*
@@ -66,6 +71,83 @@ class ViewerSafetyInstrumentedTest {
         return uri to rootId
     }
     private fun ready(model: DicomToolViewModel, uri: Uri) = model.viewerRenderState.value.let { it is DicomViewerRenderState.Ready && it.filePath == uri.toString() }
+    @Test fun multiframeAndInstanceNavigationRemainSeparateInUnifiedWorkspace() {
+        val data = bytes(dataset("SYNTHETIC^NAV"))
+        val decoded = (DicomPixelDataDecoder.decodeFrameFromSource("synthetic-nav", streamOpener = { ByteArrayInputStream(data) }) as DicomPixelDecodeResult.Success).frame
+        val bitmap = DicomPixelDataDecoder.renderFrameToBitmap(decoded, 256.0, 128.0, false)
+        val frame = mutableIntStateOf(1); val instance = mutableIntStateOf(1); val narrow = mutableStateOf(false)
+        compose.runOnUiThread { compose.activity.setContent {
+            Box(Modifier.width(if (narrow.value) 360.dp else 1280.dp).fillMaxHeight()) {
+            ru.medeng.dicomtool.ui.components.DicomViewerWorkspace(
+                sourceKey = "synthetic-nav", metadata = emptyList(), tags = emptyList(), query = "",
+                renderState = DicomViewerRenderState.Ready(bitmap, decoded.descriptor, frame.intValue, 2, instance.intValue, 3, "synthetic-nav"),
+                zoom = 1f, pan = androidx.compose.ui.geometry.Offset.Zero, inverted = false,
+                ww = 256, wl = 128, frame = frame.intValue, frames = 2, instance = instance.intValue, instances = 3, fullScreen = false,
+                onQuery = {}, onZoom = {}, onPan = {}, onFit = {}, onResetView = {}, onResetWindow = {}, onInvert = {},
+                onAdjustWindow = { _, _ -> }, onWindow = { _, _ -> }, onFrame = { frame.intValue += it },
+                onInstance = { instance.intValue += it }, onFullScreen = {})
+            }
+        } }
+        compose.onNodeWithContentDescription("Следующий кадр").performClick()
+        compose.runOnIdle { assertEquals(2, frame.intValue); assertEquals(1, instance.intValue) }
+        compose.onNodeWithContentDescription("Следующий снимок").performScrollTo().performClick()
+        compose.runOnIdle { assertEquals(2, frame.intValue); assertEquals(2, instance.intValue) }
+        compose.onNodeWithText("Авто Мин/Макс", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("Enhance MAM", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("DICOM-теги").performClick()
+        compose.onNodeWithText("Просмотр и WW/WL").performClick()
+        // A narrow phone still exposes both levels inside the viewport.
+        compose.runOnIdle { narrow.value = true }
+        compose.onNodeWithContentDescription("Предыдущий кадр").assertExists()
+        compose.onNodeWithContentDescription("Предыдущий снимок").performScrollTo().assertExists()
+    }
+    @Test fun liveSliderRendersWhileFingerIsDownAndReusesDecodedLargeFrame() {
+        val ds = dataset("SYNTHETIC^LIVE").apply {
+            setInt(Tag.Rows, VR.US, 3000); setInt(Tag.Columns, VR.US, 4000)
+            setInt(Tag.BitsAllocated, VR.US, 16); setInt(Tag.BitsStored, VR.US, 16); setInt(Tag.HighBit, VR.US, 15)
+            setBytes(Tag.PixelData, VR.OW, ByteArray(3000 * 4000 * 2) { index -> if (index % 2 == 0) 0x10 else 0x27 })
+        }
+        val (uri, root) = source(ds); val model = vm()
+        fun hash() = context.contentResolver.openInputStream(uri)!!.use { input ->
+            val digest = java.security.MessageDigest.getInstance("SHA-256"); val buffer = ByteArray(65536)
+            while (true) { val n = input.read(buffer); if (n < 0) break; digest.update(buffer, 0, n) }; digest.digest()
+        }
+        val original = hash()
+        compose.onNodeWithContentDescription("Теги и просмотр", useUnmergedTree = true).performClick()
+        compose.runOnIdle { model.loadExternalDicomFile(uri) }; await { ready(model, uri) }
+        val before = (model.viewerRenderState.value as DicomViewerRenderState.Ready).bitmap
+        val opens = context.contentResolver.call(uri, "stage6-read-count", root, null)!!.getInt("count")
+        val slider = compose.onNodeWithTag("viewer-ww-slider").performScrollTo()
+        slider.performTouchInput { down(center.copy(x = width * 0.2f)) }
+        var changedDuringGesture = false
+        for (i in 1..12) {
+            slider.performTouchInput { moveTo(center.copy(x = width * (0.2f + i * 0.05f))) }
+            Thread.sleep(40)
+            if ((model.viewerRenderState.value as? DicomViewerRenderState.Ready)?.bitmap !== before) changedDuringGesture = true
+        }
+        assertTrue("No intermediate bitmap published while slider is held", changedDuringGesture)
+        slider.performTouchInput { up() }
+        val ww = model.viewerWindowWidth.value; val wl = model.viewerWindowCenter.value
+        val expected = DicomPixelDataDecoder.applyWindowFormula(10000.0, wl.toDouble(), ww.toDouble())
+        await { ready(model, uri) && (model.viewerRenderState.value as DicomViewerRenderState.Ready).bitmap.getPixel(0, 0) and 255 == expected }
+        assertEquals(opens, context.contentResolver.call(uri, "stage6-read-count", root, null)!!.getInt("count"))
+        assertArrayEquals(original, hash())
+        android.util.Log.i("STAGE6", "large_ww_live=true; decoded_frame_reused=true; size=4000x3000")
+    }
+    @Test fun resetWindowPreservesInversionZoomPanAndCurrentFrame() {
+        val ds = dataset("SYNTHETIC^RESET").apply { setInt(Tag.NumberOfFrames, VR.IS, 2)
+            setBytes(Tag.PixelData, VR.OB, byteArrayOf(1,2,3,4,5,6,7,8)) }
+        val uri = source(ds).first; val model = vm()
+        compose.runOnIdle { model.loadExternalDicomFile(uri) }; await { ready(model, uri) }
+        compose.runOnIdle { model.stepViewerFrame(1) }
+        await { ready(model, uri) && (model.viewerRenderState.value as DicomViewerRenderState.Ready).currentFrame == 2 }
+        compose.runOnIdle { model.adjustViewerZoom(2f); model.updateViewerPan(androidx.compose.ui.geometry.Offset(3f,4f)); model.toggleViewerInvert(); model.setWindowWidthLevel(100, 50) }
+        val pan = model.viewerPan.value
+        compose.runOnIdle { model.resetWindowToDicomDefault() }
+        await { ready(model, uri) && model.viewerWindowWidth.value == 256 }
+        assertTrue(model.viewerInverted.value); assertEquals(2f, model.viewerZoom.value, 0f)
+        assertEquals(pan, model.viewerPan.value); assertEquals(2, model.viewerCurrentFrame.value)
+    }
     @Test fun fullScreenWindowButtonsChangeBrightnessAndContrastWithoutEditingSource() {
         val uri = source(dataset("SYNTHETIC^WINDOW").apply {
             setInt(Tag.BitsAllocated, VR.US, 16); setInt(Tag.BitsStored, VR.US, 16); setInt(Tag.HighBit, VR.US, 15)
@@ -76,7 +158,7 @@ class ViewerSafetyInstrumentedTest {
         val model = vm()
         compose.onNodeWithText("Теги и просмотр").performClick()
         compose.runOnIdle { model.loadExternalDicomFile(uri) }; await { ready(model, uri) }
-        compose.onNodeWithText("Изображение").performClick()
+        compose.onNodeWithText("Просмотр и WW/WL").performClick()
         compose.runOnIdle { model.setWindowWidthLevel(20000, 10000); model.setViewerFullScreen(true) }
         await { ready(model, uri) && model.viewerWindowWidth.value == 20000 }
         val before = (model.viewerRenderState.value as DicomViewerRenderState.Ready).bitmap.getPixel(2, 0)
@@ -174,7 +256,7 @@ class ViewerSafetyInstrumentedTest {
         val model = vm(); val uri = source(dataset("SYNTHETIC^FULLSCREEN")).first
         compose.runOnIdle { model.loadExternalDicomFile(uri) }; await { ready(model, uri) }
         compose.onNodeWithContentDescription("Теги и просмотр", useUnmergedTree = true).performClick()
-        compose.onNodeWithText("Изображение", useUnmergedTree = true).performClick()
+        compose.onNodeWithText("Просмотр и WW/WL", useUnmergedTree = true).performClick()
         compose.onNodeWithContentDescription("DICOM изображение").assertExists()
         compose.onNodeWithContentDescription("На весь экран").performClick()
         assertTrue(model.isViewerFullScreen.value); assertTrue(ready(model, uri))
@@ -237,6 +319,7 @@ class ViewerSafetyInstrumentedTest {
         val model = vm(); val uri = source(ds).first
         compose.runOnIdle { model.loadExternalDicomFile(uri) }; await { ready(model, uri) }
         compose.onNodeWithContentDescription("Теги и просмотр", useUnmergedTree = true).performClick()
+        compose.onNodeWithText("DICOM-теги").performClick()
         compose.runOnIdle { model.updateExternalTagSearchQuery("PRIVATE SYNTHETIC") }
         compose.onNodeWithText("PRIVATE SYNTHETIC VALUE", substring = true).performClick()
         compose.onNodeWithText("Значение", useUnmergedTree = true).performClick()
@@ -252,7 +335,7 @@ class ViewerSafetyInstrumentedTest {
         fun pixel() = (model.viewerRenderState.value as? DicomViewerRenderState.Ready)?.bitmap?.getPixel(0,0)?.and(255)
         assertEquals(128, pixel())
         compose.runOnIdle { model.toggleViewerInvert() }; await { pixel() == 127 }
-        compose.runOnIdle { model.resetWindowToDicomDefault() }; await { pixel() == 128 }
+        compose.runOnIdle { model.resetWindowToDicomDefault() }; await { pixel() == 127 }; assertTrue(model.viewerInverted.value)
     }
     @Test fun repeatedBitmapRenderingKeepsBudgetAndCancellationReleasesUnpublishedBitmap() {
         val ds = dataset("SYNTHETIC^MEMORY", 1, 5001, "RGB").apply {

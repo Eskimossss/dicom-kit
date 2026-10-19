@@ -123,6 +123,10 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     // Одноэлементный кэш декодированного кадра (исключает утечки памяти и повторное чтение 18 МБ файла при регулировке WW/WL)
     private val frameCache = SingleFrameDecodeCache()
     private var renderJob: Job? = null
+    // Main-thread conflation: allow the current bitmap to finish, keep only the latest pending controls.
+    private var renderTarget: Pair<String, Int>? = null
+    private var pendingRender = false
+    private var pendingResetWindow = false
     private var lastLoadedFilePath: String? = null
     private var lastLoadedFrameIndex: Int? = null
     private var preferredWindow: Pair<Double, Double>? = null // Preserve fractional DICOM defaults/presets through invert and redraw.
@@ -141,6 +145,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     private fun changeViewerSource(source: ru.medeng.dicomtool.domain.model.ViewerSource) {
         if (_viewerSource.value == source) return
         renderRequests.next(); renderJob?.cancel(); frameCache.clear()
+        renderTarget = null; pendingRender = false
         receivedTagRequests.next(); receivedTagJob?.cancel(); receivedTagPath = null; _receivedTags.value = emptyList()
         _selectedTagForDetail.value = null
         _viewerSource.value = source
@@ -550,7 +555,6 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
      * Сброс только параметров окна яркости/контрастности (WW/WL) к исходным значениям DICOM без сброса зума.
      */
     fun resetWindowToDicomDefault() {
-        _viewerInverted.value = false
         _viewerActiveVoiLutIndex.value = null
         val ready = _viewerRenderState.value as? DicomViewerRenderState.Ready
         if (ready != null) {
@@ -693,6 +697,15 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
             _viewerRenderState.value = DicomViewerRenderState.Error("Экземпляр изображения не найден"); return
         }
         val frameIndex = _viewerCurrentFrame.value - 1
+        val target = filePath to frameIndex
+        if (renderTarget == target && renderJob?.isActive == true && _viewerRenderState.value is DicomViewerRenderState.Ready) {
+            pendingRender = true
+            pendingResetWindow = resetWindowToFileDefault
+            return
+        }
+        val targetChanged = renderTarget != target
+        renderTarget = target
+        pendingRender = false
         val reset = resetWindowToFileDefault || lastLoadedFilePath != filePath || lastLoadedFrameIndex != frameIndex
         val ticket = renderRequests.next()
         val ww = preferredWindow?.first ?: _viewerWindowWidth.value.toDouble()
@@ -702,7 +715,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
         val totalInstances = if (external != null) 1 else getSelectedStudyOrDefault()?.seriesList
             ?.firstOrNull { it.seriesInstanceUid == _selectedSeriesUid.value }?.instances?.size ?: 1
         renderJob?.cancel()
-        if (reset) { frameCache.clear(); _viewerRenderState.value = DicomViewerRenderState.Loading }
+        if (targetChanged) { frameCache.clear(); _viewerRenderState.value = DicomViewerRenderState.Loading }
         renderJob = viewModelScope.launch {
             var unpublished: Bitmap? = null
             try {
@@ -728,7 +741,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
                     is DicomPixelDecodeResult.DecodeError -> _viewerRenderState.value = DicomViewerRenderState.Error(result.reasonRu)
                     is DicomPixelDecodeResult.Success -> {
                         val d = result.frame.descriptor
-                        if (reset) { _viewerWindowWidth.value = d.defaultWindowWidth.roundToInt().coerceAtLeast(1)
+                        if (reset && !pendingRender) { _viewerWindowWidth.value = d.defaultWindowWidth.roundToInt().coerceAtLeast(1)
                             _viewerWindowCenter.value = d.defaultWindowCenter.roundToInt()
                             preferredWindow = d.defaultWindowWidth to d.defaultWindowCenter
                             _viewerActiveVoiLutIndex.value = d.windowPresets.firstOrNull()?.takeIf { it.isVoiLutSequence }?.voiLutIndex }
@@ -744,7 +757,17 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
                 if (renderRequests.isCurrent(ticket)) _viewerRenderState.value = DicomViewerRenderState.Error("Недостаточно памяти для Viewer")
             } catch (e: Exception) {
                 if (renderRequests.isCurrent(ticket)) _viewerRenderState.value = DicomViewerRenderState.Error(e.message ?: "Ошибка Viewer")
-            } finally { unpublished?.recycle() }
+            } finally {
+                unpublished?.recycle()
+                if (renderRequests.isCurrent(ticket)) {
+                    renderJob = null
+                    if (pendingRender) {
+                        val resetPending = pendingResetWindow
+                        pendingRender = false
+                        triggerFrameDecodeAndRender(resetPending)
+                    }
+                }
+            }
         }
         if (external == null) loadReceivedTags(filePath)
     }

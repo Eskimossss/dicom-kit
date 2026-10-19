@@ -107,6 +107,7 @@ fun DicomSharedViewportBox(
     onToggleInvert: () -> Unit,
     onAdjustWindow: (Int, Int) -> Unit,
     onStepFrame: (Int) -> Unit,
+    onStepInstance: (Int) -> Unit = onStepFrame,
     onToggleFullScreen: () -> Unit
 ) {
     var controlsVisible by remember { mutableStateOf(true) }
@@ -325,7 +326,7 @@ fun DicomSharedViewportBox(
                     )
                     Text(
                         text = if (totalFrames > 1) {
-                            "Кадр $currentFrame/$totalFrames" + if (totalInstances > 1) " • Сн. $currentInstance/$totalInstances" else ""
+                            "Кадр $currentFrame/$totalFrames" + if (totalInstances > 1) " • Снимок $currentInstance/$totalInstances" else ""
                         } else {
                             if (totalInstances > 1) "Снимок $currentInstance/$totalInstances" else "1 кадр"
                         },
@@ -355,14 +356,14 @@ fun DicomSharedViewportBox(
                 modifier = Modifier
                     .padding(start = 8.dp)
                     .size(36.dp)
-                    .clickable { onStepFrame(-1) },
+                    .clickable { if (totalFrames > 1) onStepFrame(-1) else onStepInstance(-1) },
                 shape = RoundedCornerShape(6.dp),
                 color = Color.DarkGray.copy(alpha = 0.72f)
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
-                        contentDescription = "Предыдущий кадр/снимок",
+                        contentDescription = if (totalFrames > 1) "Предыдущий кадр" else "Предыдущий снимок",
                         tint = Color.White
                     )
                 }
@@ -379,14 +380,14 @@ fun DicomSharedViewportBox(
                 modifier = Modifier
                     .padding(end = 8.dp)
                     .size(36.dp)
-                    .clickable { onStepFrame(1) },
+                    .clickable { if (totalFrames > 1) onStepFrame(1) else onStepInstance(1) },
                 shape = RoundedCornerShape(6.dp),
                 color = Color.DarkGray.copy(alpha = 0.72f)
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                        contentDescription = "Следующий кадр/снимок",
+                        contentDescription = if (totalFrames > 1) "Следующий кадр" else "Следующий снимок",
                         tint = Color.White
                     )
                 }
@@ -425,6 +426,10 @@ fun DicomSharedViewportBox(
                         ) {
                             onToggleFullScreen()
                         }
+                        if (totalFrames > 1 && totalInstances > 1) {
+                            ViewerToolButton(icon = Icons.AutoMirrored.Filled.KeyboardArrowLeft, label = "Снимок−", description = "Предыдущий снимок") { onStepInstance(-1) }
+                            ViewerToolButton(icon = Icons.AutoMirrored.Filled.KeyboardArrowRight, label = "Снимок+", description = "Следующий снимок") { onStepInstance(1) }
+                        }
                         ViewerToolButton(icon = Icons.Default.Add, label = "Zoom+", description = "Увеличить") {
                             onZoomFactor(1.25f)
                         }
@@ -454,7 +459,7 @@ fun DicomSharedViewportBox(
                         ViewerToolButton(icon = Icons.Default.Brightness6, label = "WL+", description = "Увеличить WL") {
                             onAdjustWindow(0, (windowWidth / 20).coerceAtLeast(1))
                         }
-                        ViewerToolButton(icon = Icons.Default.Refresh, label = "Сброс", description = "Сброс WW/WL и масштаба") {
+                        ViewerToolButton(icon = Icons.Default.Refresh, label = "Сброс вида", description = "Сбросить WW/WL, масштаб, сдвиг и инверсию") {
                             onResetTransform()
                         }
                     }

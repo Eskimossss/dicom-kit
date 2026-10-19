@@ -17,6 +17,7 @@ import java.util.UUID;
 
 /** Java fixture: also runs in the separate test APK process without target APK Kotlin classes. */
 public class Stage51DocumentsProvider extends DocumentsProvider {
+    private static final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger> readOpens = new java.util.concurrent.ConcurrentHashMap<>();
     private static final String[] COLUMNS = {
         DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME,
         DocumentsContract.Document.COLUMN_MIME_TYPE, DocumentsContract.Document.COLUMN_FLAGS,
@@ -93,6 +94,11 @@ public class Stage51DocumentsProvider extends DocumentsProvider {
         return f.delete();
     }
     @Override public android.os.Bundle call(String method, String arg, android.os.Bundle extras) {
+        if (method.equals("stage6-read-count") && arg != null) {
+            android.os.Bundle result = new android.os.Bundle();
+            result.putInt("count", readOpens.getOrDefault(arg, new java.util.concurrent.atomic.AtomicInteger()).get());
+            return result;
+        }
         if (method.startsWith("stage56-") && arg != null && arg.startsWith("stage56query") && !arg.contains("/")) {
             android.os.Bundle result = new android.os.Bundle();
             try {
@@ -125,6 +131,7 @@ public class Stage51DocumentsProvider extends DocumentsProvider {
         } catch (IOException | InterruptedException ex) { throw new IllegalStateException(ex); }
     }
     @Override public ParcelFileDescriptor openDocument(String id, String mode, CancellationSignal signal) throws FileNotFoundException {
+        if (mode.equals("r")) readOpens.computeIfAbsent(id.split("/", 2)[0], key -> new java.util.concurrent.atomic.AtomicInteger()).incrementAndGet();
         if (mode.equals("r") && id.startsWith("stage54delay")) {
             String root = id.substring(0, id.indexOf('/'));
             File started = new File(getContext().getCacheDir(), root + ".started");
