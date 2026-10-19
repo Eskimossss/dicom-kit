@@ -27,6 +27,9 @@ class Stage6NoticesInstrumentedTest {
         assertTrue("Timed out waiting for synthetic notice", condition())
     }
     @Test fun successExpiresButWarningsErrorsAndSameTextNewEventsRemainCorrect() {
+        val bounded = NoticePresentationState()
+        repeat(1000) { bounded.registeredAt("synthetic-$it", it.toLong()); bounded.dismiss("synthetic-$it") }
+        assertEquals(256, bounded.firstShown.size); assertEquals(256, bounded.dismissed.size)
         val event = mutableStateOf(Triple("success-1", "SYNTHETIC SUCCESS", true))
         val redraw = mutableIntStateOf(0)
         compose.mainClock.autoAdvance = false

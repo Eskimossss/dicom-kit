@@ -67,6 +67,11 @@ class JournalSafetyInstrumentedTest {
         compose.onNodeWithText(health.warning).performClick()
         compose.onNodeWithText("Состояние журнала").assertIsDisplayed()
         compose.onNodeWithText("Закрыть").performClick()
+        compose.onNodeWithContentDescription("Закрыть уведомление").performClick()
+        compose.onNodeWithText(health.warning).assertDoesNotExist()
+        compose.onNodeWithText("Состояние записи журнала").performClick()
+        compose.onNodeWithText("Состояние журнала").assertIsDisplayed()
+        compose.onNodeWithText("Закрыть").performClick()
     }
     @Test fun preparedExportAndFileProviderContainExactlyPreviewSnapshot() {
         val snapshot = DicomLogExportUtils.formatFullExport(emptyList(), listOf(entry), false, true)

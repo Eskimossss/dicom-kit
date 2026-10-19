@@ -5,6 +5,8 @@ import androidx.compose.runtime.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.graphics.asAndroidBitmap
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.ui.test.*
@@ -76,8 +78,8 @@ class ViewerSafetyInstrumentedTest {
         val decoded = (DicomPixelDataDecoder.decodeFrameFromSource("synthetic-nav", streamOpener = { ByteArrayInputStream(data) }) as DicomPixelDecodeResult.Success).frame
         val bitmap = DicomPixelDataDecoder.renderFrameToBitmap(decoded, 256.0, 128.0, false)
         val frame = mutableIntStateOf(1); val instance = mutableIntStateOf(1); val narrow = mutableStateOf(false)
-        compose.runOnUiThread { compose.activity.setContent {
-            Box(Modifier.width(if (narrow.value) 360.dp else 1280.dp).fillMaxHeight()) {
+        compose.runOnUiThread { compose.activity.setContent { ru.medeng.dicomtool.ui.theme.DicomToolTheme {
+            Box(Modifier.width(if (narrow.value) 360.dp else 1280.dp).fillMaxHeight().testTag("stage6-workspace-layout")) {
             ru.medeng.dicomtool.ui.components.DicomViewerWorkspace(
                 sourceKey = "synthetic-nav", metadata = emptyList(), tags = emptyList(), query = "",
                 renderState = DicomViewerRenderState.Ready(bitmap, decoded.descriptor, frame.intValue, 2, instance.intValue, 3, "synthetic-nav"),
@@ -87,19 +89,26 @@ class ViewerSafetyInstrumentedTest {
                 onAdjustWindow = { _, _ -> }, onWindow = { _, _ -> }, onFrame = { frame.intValue += it },
                 onInstance = { instance.intValue += it }, onFullScreen = {})
             }
-        } }
+        } } }
         compose.onNodeWithContentDescription("Следующий кадр").performClick()
         compose.runOnIdle { assertEquals(2, frame.intValue); assertEquals(1, instance.intValue) }
-        compose.onNodeWithContentDescription("Следующий снимок").performScrollTo().performClick()
+        compose.onNodeWithContentDescription("Следующий снимок").assertIsDisplayed().performClick()
         compose.runOnIdle { assertEquals(2, frame.intValue); assertEquals(2, instance.intValue) }
         compose.onNodeWithText("Авто Мин/Макс", substring = true).assertDoesNotExist()
         compose.onNodeWithText("Enhance MAM", substring = true).assertDoesNotExist()
         compose.onNodeWithText("DICOM-теги").performClick()
         compose.onNodeWithText("Просмотр и WW/WL").performClick()
+        fun screenshot(name: String) {
+            val bitmap = compose.onNodeWithTag("stage6-workspace-layout").captureToImage().asAndroidBitmap()
+            File(context.cacheDir, "stage6-viewer-$name.png").outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+        }
+        screenshot("wide")
         // A narrow phone still exposes both levels inside the viewport.
         compose.runOnIdle { narrow.value = true }
         compose.onNodeWithContentDescription("Предыдущий кадр").assertExists()
-        compose.onNodeWithContentDescription("Предыдущий снимок").performScrollTo().assertExists()
+        compose.onNodeWithContentDescription("Предыдущий снимок").assertIsDisplayed()
+        compose.onNodeWithText("Сброс вида").assertIsDisplayed()
+        screenshot("narrow")
     }
     @Test fun closingCharsetNoticePreservesDiagnosticsTagsAndOriginalFile() {
         val ds = dataset("SYNTHETIC^CHARSET").apply {
@@ -126,6 +135,7 @@ class ViewerSafetyInstrumentedTest {
     @Test fun liveSliderRendersWhileFingerIsDownAndReusesDecodedLargeFrame() {
         val ds = dataset("SYNTHETIC^LIVE").apply {
             setInt(Tag.Rows, VR.US, 3000); setInt(Tag.Columns, VR.US, 4000)
+            setDouble(Tag.WindowWidth, VR.DS, 20000.0); setDouble(Tag.WindowCenter, VR.DS, 14000.0)
             setInt(Tag.BitsAllocated, VR.US, 16); setInt(Tag.BitsStored, VR.US, 16); setInt(Tag.HighBit, VR.US, 15)
             setBytes(Tag.PixelData, VR.OW, ByteArray(3000 * 4000 * 2) { index -> if (index % 2 == 0) 0x10 else 0x27 })
         }
@@ -138,6 +148,7 @@ class ViewerSafetyInstrumentedTest {
         compose.onNodeWithContentDescription("Теги и просмотр", useUnmergedTree = true).performClick()
         compose.runOnIdle { model.loadExternalDicomFile(uri) }; await { ready(model, uri) }
         val before = (model.viewerRenderState.value as DicomViewerRenderState.Ready).bitmap
+        val beforePixel = before.getPixel(0,0) and 255
         val opens = context.contentResolver.call(uri, "stage6-read-count", root, null)!!.getInt("count")
         val slider = compose.onNodeWithTag("viewer-ww-slider").performScrollTo()
         slider.performTouchInput { down(center.copy(x = width * 0.2f)) }
@@ -152,6 +163,22 @@ class ViewerSafetyInstrumentedTest {
         val ww = model.viewerWindowWidth.value; val wl = model.viewerWindowCenter.value
         val expected = DicomPixelDataDecoder.applyWindowFormula(10000.0, wl.toDouble(), ww.toDouble())
         await { ready(model, uri) && (model.viewerRenderState.value as DicomViewerRenderState.Ready).bitmap.getPixel(0, 0) and 255 == expected }
+        assertTrue("WW range shrank while dragging", ww > 10000)
+        assertNotEquals(beforePixel, expected)
+        val beforeWl = (model.viewerRenderState.value as DicomViewerRenderState.Ready).bitmap
+        val wlSlider = compose.onNodeWithTag("viewer-wl-slider").performScrollTo()
+        wlSlider.performTouchInput { down(center.copy(x = width * 0.2f)) }
+        var wlChangedDuringGesture = false
+        for (i in 1..6) {
+            wlSlider.performTouchInput { moveTo(center.copy(x = width * (0.2f + i * 0.1f))) }
+            Thread.sleep(40)
+            if ((model.viewerRenderState.value as? DicomViewerRenderState.Ready)?.bitmap !== beforeWl) wlChangedDuringGesture = true
+        }
+        assertTrue("WL did not render before release", wlChangedDuringGesture)
+        wlSlider.performTouchInput { up() }
+        val finalPixel = DicomPixelDataDecoder.applyWindowFormula(10000.0, model.viewerWindowCenter.value.toDouble(), model.viewerWindowWidth.value.toDouble())
+        assertNotEquals(expected, finalPixel)
+        await { ready(model, uri) && (model.viewerRenderState.value as DicomViewerRenderState.Ready).bitmap.getPixel(0,0) and 255 == finalPixel }
         assertEquals(opens, context.contentResolver.call(uri, "stage6-read-count", root, null)!!.getInt("count"))
         assertArrayEquals(original, hash())
         android.util.Log.i("STAGE6", "large_ww_live=true; decoded_frame_reused=true; size=4000x3000")
@@ -184,7 +211,7 @@ class ViewerSafetyInstrumentedTest {
         compose.runOnIdle { model.setWindowWidthLevel(20000, 10000); model.setViewerFullScreen(true) }
         await { ready(model, uri) && model.viewerWindowWidth.value == 20000 }
         val before = (model.viewerRenderState.value as DicomViewerRenderState.Ready).bitmap.getPixel(2, 0)
-        compose.onNodeWithText("WL+").performScrollTo().performClick()
+        compose.onNodeWithText("WL+").assertIsDisplayed().performClick()
         val expected = DicomPixelDataDecoder.applyWindowFormula(20000.0, 11000.0, 20000.0)
         try {
             await { ready(model, uri) && model.viewerWindowCenter.value == 11000 &&
@@ -195,9 +222,9 @@ class ViewerSafetyInstrumentedTest {
             throw AssertionError("WW=${model.viewerWindowWidth.value}; WL=${model.viewerWindowCenter.value}; invert=${model.viewerInverted.value}; pixels=$pixels; expected=$expected; state=${state.javaClass.simpleName}", failure)
         }
         assertNotEquals(before, (model.viewerRenderState.value as DicomViewerRenderState.Ready).bitmap.getPixel(2, 0))
-        compose.onNodeWithText("WW-").performScrollTo().performClick()
+        compose.onNodeWithText("WW-").assertIsDisplayed().performClick()
         await { model.viewerWindowWidth.value == 19000 }
-        compose.onNodeWithText("WL-").performScrollTo().performClick()
+        compose.onNodeWithText("WL-").assertIsDisplayed().performClick()
         await { ready(model, uri) && model.viewerWindowCenter.value == 10050 }
         compose.waitForIdle()
         // Dispatch through the Activity's Back handler; the navigation test separately injects real system Back keys.

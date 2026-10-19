@@ -103,6 +103,9 @@ class Stage6SyntheticEncodingTest {
             assertNotNull(problem); assertFalse(problem!!.contains("SYNTHETIC")); assertFalse(problem.contains("\uD83D\uDE00"))
         }
         assertNotNull(SyntheticDicomEncoding.UTF8.validationError(synthetic.copy(patientName = "SYNTHETIC^\uD800")))
+        val control = SyntheticDicomEncoding.ASCII.validationError(synthetic.copy(patientName = "SYNTHETIC^\u007F",
+            studyDescription = "SYNTHETIC STUDY", seriesDescription = "SYNTHETIC SERIES"))
+        assertTrue(control!!.contains("управляющие"))
     }
     @Test fun newOrUnknownPreferencesUseUtf8AndPersonNameGroupsArePreserved() {
         assertEquals(SyntheticDicomEncoding.UTF8, ScuSendConfig().syntheticEncoding)

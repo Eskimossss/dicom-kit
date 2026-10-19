@@ -225,7 +225,7 @@ fun DicomLogScreen(
     ) {
         if (loggerHealth.historyLoading) Text("Загрузка сохранённой истории журнала…", fontSize = 12.sp)
         if (loggerHealth.needsAttention) {
-            ru.medeng.dicomtool.ui.components.AppNotice("logger-health:${loggerHealth.state}:${loggerHealth.droppedNormal}:${loggerHealth.droppedCritical}:${loggerHealth.writeUnconfirmed}:${loggerHealth.readFailures}:${loggerHealth.controlFailures}:${loggerHealth.lastError.hashCode()}", loggerHealth.warning)
+            ru.medeng.dicomtool.ui.components.AppNotice("logger-health:${loggerHealth.state}:${loggerHealth.droppedNormal}:${loggerHealth.droppedCritical}:${loggerHealth.writeUnconfirmed}:${loggerHealth.readFailures}:${loggerHealth.controlFailures}:${loggerHealth.lastError.hashCode()}", loggerHealth.warning, modifier = Modifier.clickable { showLoggerDetails = true })
         }
         TextButton(onClick = { showLoggerDetails = true }) { Text("Состояние записи журнала", fontSize = 11.sp) }
         // --- 1. ВЕРХНЯЯ ПАНЕЛЬ: Переключатель режимов + действия ---

@@ -9,7 +9,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
-import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.aspectRatio
@@ -22,7 +23,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
@@ -81,6 +81,7 @@ import kotlin.math.roundToInt
  * - Панель инструментов с кнопками Zoom+/-, Fit, Инверсия, WW+/-, Сброс и «На весь экран»
  * - Боковые стрелки переключения кадров / снимков
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun DicomSharedViewportBox(
     renderState: DicomViewerRenderState,
@@ -411,12 +412,10 @@ fun DicomSharedViewportBox(
                     shape = RoundedCornerShape(10.dp),
                     color = Color.Black.copy(alpha = 0.65f)
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .horizontalScroll(rememberScrollState())
-                            .padding(horizontal = 6.dp, vertical = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(5.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(5.dp, Alignment.CenterHorizontally),
+                        verticalArrangement = Arrangement.spacedBy(5.dp)
                     ) {
                         ViewerToolButton(
                             icon = if (isFullScreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,

@@ -180,7 +180,7 @@ fun ReceivedStudiesScreen(
             ru.medeng.dicomtool.ui.components.AppNotice("archive-read:${indexState.noticeId}:${indexState.readProblems.hashCode()}",
                 "${indexState.readProblems.size} файла с ошибками чтения DICOM. Подробности — в диагностике ниже.")
             TextButton(onClick = { showReadProblems = true }) {
-                Text("${indexState.readProblems.size} файла с ошибками чтения DICOM", color = ErrorRed)
+                Text("Диагностика чтения DICOM (${indexState.readProblems.size})", color = ErrorRed)
             }
         }
         Spacer(modifier = Modifier.height(12.dp))

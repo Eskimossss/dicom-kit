@@ -405,74 +405,74 @@ private fun LastScuOperationResultBanner(
 
     ru.medeng.dicomtool.ui.components.NoticeVisibility("scu:${config.noticeId}:${if (isBusy) "busy" else "result"}",
         autoHideSuccess = !isBusy && isSuccess == true && !isWarning) { dismiss ->
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(10.dp),
-        color = bgColor,
-        border = BorderStroke(1.dp, borderColor)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(10.dp),
+            color = bgColor,
+            border = BorderStroke(1.dp, borderColor)
         ) {
-            if (isBusy) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(20.dp),
-                    color = PrimaryBlue,
-                    strokeWidth = 2.2.dp
-                )
-            } else {
-                val icon = when {
-                    isWarning -> Icons.Default.WarningAmber
-                    isSuccess == true -> Icons.Default.CheckCircle
-                    else -> Icons.Default.ErrorOutline
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                if (isBusy) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        color = PrimaryBlue,
+                        strokeWidth = 2.2.dp
+                    )
+                } else {
+                    val icon = when {
+                        isWarning -> Icons.Default.WarningAmber
+                        isSuccess == true -> Icons.Default.CheckCircle
+                        else -> Icons.Default.ErrorOutline
+                    }
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = accentColor,
+                        modifier = Modifier.size(20.dp)
+                    )
                 }
-                Icon(
-                    imageVector = icon,
-                    contentDescription = null,
-                    tint = accentColor,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
-            SelectionContainer(modifier = Modifier.weight(1f)) {
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    val title = if (batchProgress.isSending) {
-                        "Отправка DICOM-файлов…"
-                    } else {
-                        config.lastStatusTitle
-                    }
-                    if (!title.isNullOrBlank()) {
-                        Text(
-                            text = title,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = accentColor
-                        )
-                    }
-                    val msg = if (batchProgress.isSending) {
-                        "Передано ${batchProgress.sentSuccessCount} из ${batchProgress.totalFiles}" +
-                            if (batchProgress.currentFileName != null) " (${batchProgress.currentFileName})" else ""
-                    } else {
-                        config.lastStatusMessage
-                    }
-                    if (!msg.isNullOrBlank()) {
-                        Text(
-                            text = msg,
-                            fontSize = 12.sp,
-                            lineHeight = 17.sp,
-                            color = TextPrimaryDark,
-                            softWrap = true
-                        )
+                SelectionContainer(modifier = Modifier.weight(1f)) {
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        val title = if (batchProgress.isSending) {
+                            "Отправка DICOM-файлов…"
+                        } else {
+                            config.lastStatusTitle
+                        }
+                        if (!title.isNullOrBlank()) {
+                            Text(
+                                text = title,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = accentColor
+                            )
+                        }
+                        val msg = if (batchProgress.isSending) {
+                            "Передано ${batchProgress.sentSuccessCount} из ${batchProgress.totalFiles}" +
+                                if (batchProgress.currentFileName != null) " (${batchProgress.currentFileName})" else ""
+                        } else {
+                            config.lastStatusMessage
+                        }
+                        if (!msg.isNullOrBlank()) {
+                            Text(
+                                text = msg,
+                                fontSize = 12.sp,
+                                lineHeight = 17.sp,
+                                color = TextPrimaryDark,
+                                softWrap = true
+                            )
+                        }
                     }
                 }
+                ru.medeng.dicomtool.ui.components.NoticeCloseButton(dismiss, Modifier.align(Alignment.Top))
             }
-            ru.medeng.dicomtool.ui.components.NoticeCloseButton(dismiss)
         }
     }
-}
 }
 
 @Composable

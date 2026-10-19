@@ -64,9 +64,14 @@ fun DicomViewerWorkspace(
                     metadata.forEach { (key, value) -> KeyValueTableRow(key, value) }
                     Text("WW — контраст; WL — центр окна / яркость", fontSize = 12.sp)
                     val span = ((descriptor?.maxModalityValue ?: 65535.0) - (descriptor?.minModalityValue ?: 0.0)).coerceAtLeast(255.0)
-                    val maxWidth = maxOf(ww.toDouble(), span * 1.5).coerceIn(255.0, 131072.0).toFloat()
-                    val minCenter = minOf(wl.toDouble(), (descriptor?.minModalityValue ?: 0.0) - span / 4).coerceAtLeast(-65536.0).toFloat()
-                    val maxCenter = maxOf(wl.toDouble(), (descriptor?.maxModalityValue ?: 65535.0) + span / 4).coerceAtMost(131072.0).toFloat()
+                    // Ranges may expand for external step buttons but never shrink under a moving thumb.
+                    var widthBound by remember(sourceKey, descriptor) { mutableFloatStateOf(maxOf(ww.toDouble(), descriptor?.defaultWindowWidth ?: 255.0, span * 1.5).coerceIn(255.0, 131072.0).toFloat()) }
+                    var lowBound by remember(sourceKey, descriptor) { mutableFloatStateOf(minOf(wl.toDouble(), (descriptor?.minModalityValue ?: 0.0) - span / 4).coerceAtLeast(-65536.0).toFloat()) }
+                    var highBound by remember(sourceKey, descriptor) { mutableFloatStateOf(maxOf(wl.toDouble(), (descriptor?.maxModalityValue ?: 65535.0) + span / 4).coerceAtMost(131072.0).toFloat()) }
+                    val maxWidth = maxOf(widthBound, ww.toFloat())
+                    val minCenter = minOf(lowBound, wl.toFloat())
+                    val maxCenter = maxOf(highBound, wl.toFloat())
+                    SideEffect { widthBound = maxWidth; lowBound = minCenter; highBound = maxCenter }
                     val mono = descriptor?.photometricInterpretation != "RGB"
                     Text("WW: $ww")
                     Slider(value = ww.toFloat().coerceIn(1f, maxWidth), onValueChange = { onWindow(it.roundToInt(), wl) },

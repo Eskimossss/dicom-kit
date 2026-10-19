@@ -17,6 +17,7 @@ enum class SyntheticDicomEncoding(val label: String, val charsetName: String, va
     WINDOWS1251("Windows-1251 — нестандартный", "windows-1251", null);
 
     fun encode(value: String, field: String): ByteArray {
+        require(value.none { it.isISOControl() }) { "$field: управляющие символы недопустимы в текстовых метаданных. Измените текст; автоматическая замена не выполняется." }
         try {
             val buffer = Charset.forName(charsetName).newEncoder()
                 .onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT)

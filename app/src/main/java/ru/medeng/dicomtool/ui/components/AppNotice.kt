@@ -17,7 +17,17 @@ import kotlinx.coroutines.delay
 /** Presentation only. Dismissing never mutates results, diagnostics, files or journal records. */
 class NoticePresentationState {
     val dismissed = mutableStateListOf<String>()
-    val firstShown = mutableMapOf<String, Long>()
+    val firstShown = linkedMapOf<String, Long>()
+    fun registeredAt(id: String, now: Long): Long {
+        firstShown[id]?.let { return it }
+        // Bound saved instance state for long engineering sessions. Old, off-screen events may reappear on revisit.
+        while (firstShown.size >= 256) {
+            val oldest = firstShown.keys.first()
+            firstShown.remove(oldest); dismissed.remove(oldest)
+        }
+        firstShown[id] = now
+        return now
+    }
     fun dismiss(id: String) { if (id !in dismissed) dismissed.add(id) }
     companion object {
         val saver = Saver<NoticePresentationState, List<String>>(
@@ -43,19 +53,22 @@ fun NoticePresentationHost(content: @Composable () -> Unit) {
 fun NoticeVisibility(eventId: String, autoHideSuccess: Boolean = false, content: @Composable (() -> Unit) -> Unit) {
     val fallback = rememberSaveable(saver = NoticePresentationState.saver) { NoticePresentationState() }
     val state = LocalNotices.current ?: fallback
-    val shown = remember(eventId) { state.firstShown.getOrPut(eventId) { android.os.SystemClock.elapsedRealtime() } }
-    LaunchedEffect(eventId, autoHideSuccess) {
-        if (autoHideSuccess && eventId !in state.dismissed) {
+    // Saved UI state contains no source URI, patient text or raw diagnostic message.
+    val token = remember(eventId) { java.security.MessageDigest.getInstance("SHA-256")
+        .digest(eventId.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it.toInt() and 255) } }
+    val shown = remember(token) { state.registeredAt(token, android.os.SystemClock.elapsedRealtime()) }
+    LaunchedEffect(token, autoHideSuccess) {
+        if (autoHideSuccess && token !in state.dismissed) {
             delay((6000 - (android.os.SystemClock.elapsedRealtime() - shown).coerceAtLeast(0)).coerceIn(0, 6000))
-            state.dismiss(eventId)
+            state.dismiss(token)
         }
     }
-    if (eventId !in state.dismissed) content { state.dismiss(eventId) }
+    if (token !in state.dismissed) content { state.dismiss(token) }
 }
 
 @Composable
-fun NoticeCloseButton(onDismiss: () -> Unit) {
-    IconButton(onClick = onDismiss, modifier = Modifier.size(40.dp)) {
+fun NoticeCloseButton(onDismiss: () -> Unit, modifier: Modifier = Modifier) {
+    IconButton(onClick = onDismiss, modifier = modifier.size(40.dp)) {
         Icon(Icons.Default.Close, "Закрыть уведомление", modifier = Modifier.size(18.dp))
     }
 }

@@ -91,11 +91,13 @@ fun DicomTagsScreen(
         if (summary != null && !isLoading && errorMessage == null) {
             ru.medeng.dicomtool.ui.components.DicomViewerWorkspace(
                 sourceKey = summary.sopClassUid + summary.fileName, diagnosticNoticeId = summary.diagnosticNoticeId,
-                metadata = listOf("Пациент" to DicomCharsetDecoder.formatDicomPersonName(summary.patientName),
+                metadata = listOf("Файл" to summary.fileName, "Размер файла, байт" to summary.fileSizeBytes.toString(),
+                    "Пациент" to DicomCharsetDecoder.formatDicomPersonName(summary.patientName),
                     "ID пациента" to summary.patientId, "Дата исследования" to summary.studyDateFormatted,
                     "Описание исследования" to summary.studyDescription, "Серия" to summary.seriesDescription,
                     "Изображение" to "${summary.columns}×${summary.rows} • ${summary.bitsAllocated} bit • ${summary.modality}",
-                    "SOP Class" to summary.sopClassName, "Transfer Syntax" to summary.transferSyntaxName,
+                    "SOP Class" to "${summary.sopClassName} (${summary.sopClassUid})",
+                    "Transfer Syntax" to "${summary.transferSyntaxName} (${summary.transferSyntaxUid})",
                     "Кодировка (0008,0005)" to summary.specificCharacterSet),
                 tags = tags, query = searchQuery, renderState = viewerRenderState, zoom = viewerZoom, pan = viewerPan,
                 inverted = viewerInverted, ww = viewerWindowWidth, wl = viewerWindowCenter,
