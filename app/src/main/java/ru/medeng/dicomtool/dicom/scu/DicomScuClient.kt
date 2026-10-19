@@ -1277,7 +1277,7 @@ class DicomScuClient(
             releaseQuietlyWithLogs(association, assocId, endpoint, sessionUid)
 
             val formattedDuration = String.format(Locale.forLanguageTag("ru"), "%.1f", totalDurationMs / 1000.0)
-            val rawPatient = preparedObject.dataset.getString(Tag.PatientName) ?: ""
+            val rawPatient = DicomCharsetDecoder.decodeStringAttribute(Attributes(preparedObject.dataset), Tag.PatientName, org.dcm4che3.data.VR.PN, "").value
             val formattedPatient = DicomCharsetDecoder.formatDicomPersonName(rawPatient).ifBlank { rawPatient.trim() }
             val patientLine = if (formattedPatient.isNotBlank()) "Пациент: $formattedPatient\n" else ""
 

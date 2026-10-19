@@ -80,6 +80,28 @@ class ScuTransmissionSafetyTest {
         return result
     }
 
+    @Test fun generatedCharsetAndRepeatedStorePreserveExactEncodedDatasetEvenWhenJournalReadsPatient() {
+        for (mode in SyntheticDicomEncoding.entries) {
+            val config = ScuSendConfig(syntheticEncoding = mode,
+                patientName = if (mode == SyntheticDicomEncoding.ASCII) "SYNTHETIC^ASCII" else "ТЕСТ^СИНТЕТИКА",
+                patientId = if (mode == SyntheticDicomEncoding.ASCII) "SYNTHETIC-ID" else "СИНТЕТИКА-ID",
+                studyDescription = "SYNTHETIC STUDY", seriesDescription = "SYNTHETIC SERIES")
+            val prepared = DicomSecondaryCaptureGenerator.prepareSecondaryCaptureObject(config)
+            fun encoded() = ByteArrayOutputStream().also { out -> DicomOutputStream(out, UID.ExplicitVRLittleEndian).use {
+                it.writeDataset(null, prepared.dataset) } }.toByteArray()
+            val original = encoded()
+            Peer().use { peer -> val log = logger(); try {
+                val client = DicomScuClient(log, temp.newFolder())
+                repeat(2) {
+                    val result = client.performCStore("127.0.0.1", peer.port, "TEST_SCU", "TEST_PACS", prepared)
+                    assertTrue("Synthetic encoding ${mode.name}: $result", result is ScuOperationResult.Success)
+                    assertArrayEquals("Prepared object changed after C-STORE: ${mode.name}", original, encoded())
+                }
+                assertEquals(2, peer.received.size)
+                peer.received.forEach { assertArrayEquals("Wire dataset ${mode.name}", original, it.second) }
+            } finally { log.shutdown() } }
+        }
+    }
     @Test fun deflatedWireBytesRemainEncodedAndReceiverCanDecode() {
         val file = fixture(UID.DeflatedExplicitVRLittleEndian)
         val before = java.security.MessageDigest.getInstance("SHA-256").digest(file.original)

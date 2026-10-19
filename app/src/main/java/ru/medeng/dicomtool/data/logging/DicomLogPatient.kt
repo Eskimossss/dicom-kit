@@ -18,7 +18,12 @@ data class DicomLogPatient(val name: String, val identityKey: String) {
                 .joinToString("") { "%02x".format(it.toInt() and 255) }
             return DicomLogPatient(pn, key)
         }
-        fun from(ds: Attributes) = from(DicomCharsetDecoder.decodeStringAttribute(ds, Tag.PatientName, VR.PN, "").value,
-            ds.getString(Tag.PatientID), ds.getString(Tag.IssuerOfPatientID, ""))
+        fun from(ds: Attributes): DicomLogPatient {
+            // dcm4che getters can cache decoded strings. Never mutate the object used by a wire writer.
+            val snapshot = Attributes(ds)
+            return from(DicomCharsetDecoder.decodeStringAttribute(snapshot, Tag.PatientName, VR.PN, "").value,
+                DicomCharsetDecoder.decodeStringAttribute(snapshot, Tag.PatientID, VR.LO, "").value,
+                DicomCharsetDecoder.decodeStringAttribute(snapshot, Tag.IssuerOfPatientID, VR.LO, "").value)
+        }
     }
 }

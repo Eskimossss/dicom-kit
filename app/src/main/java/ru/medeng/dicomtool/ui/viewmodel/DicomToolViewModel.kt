@@ -250,6 +250,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     // Состояние раздела 3: Отправка (SCU — Этап 3 и 4.2)
     private val _scuConfig = MutableStateFlow(
         ScuSendConfig(
+            syntheticEncoding = ru.medeng.dicomtool.dicom.scu.SyntheticDicomEncoding.fromPreference(scuPrefs.getString("synthetic_encoding", null)),
             remoteIp = scuPrefs.getString("scu_remote_ip", "") ?: "",
             remotePort = scuPrefs.getInt("scu_remote_port", 0),
             calledAeTitle = scuPrefs.getString("scu_called_ae", "") ?: "",
@@ -277,13 +278,12 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
 
 
     // Подготовленный DICOM-объект Secondary Capture (1.2.840.10008.5.1.4.1.1.7) с уникальными UID <= 64 символов
-    private val _preparedScuObject = MutableStateFlow(
-        DicomSecondaryCaptureGenerator.prepareSecondaryCaptureObject(
-            config = _scuConfig.value,
-            freehandStrokes = emptyList()
-        )
+    private val _preparedScuObject = MutableStateFlow<PreparedSecondaryCaptureDicomObject?>(
+        if (_scuConfig.value.syntheticEncoding.validationError(_scuConfig.value) == null)
+            DicomSecondaryCaptureGenerator.prepareSecondaryCaptureObject(config = _scuConfig.value, freehandStrokes = emptyList())
+        else null
     )
-    val preparedScuObject: StateFlow<PreparedSecondaryCaptureDicomObject> = _preparedScuObject.asStateFlow()
+    val preparedScuObject: StateFlow<PreparedSecondaryCaptureDicomObject?> = _preparedScuObject.asStateFlow()
 
     // Состояние раздела «Журнал DICOM» (Этап 4.3.2: Краткий и Подробный режимы, фильтрация, поиск)
     val logs: StateFlow<List<DicomLogEntry>> = technicalLogger.logsFlow
@@ -821,6 +821,9 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
                     .putString("scu_calling_ae", updated.callingAeTitle)
                     .apply()
             }
+            if (updated.syntheticEncoding != current.syntheticEncoding) {
+                scuPrefs.edit().putString("synthetic_encoding", updated.syntheticEncoding.name).apply()
+            }
             val syncedBirthDate = DicomSecondaryCaptureGenerator.displayDateToDicomDa(updated.patientBirthDateDisplay)
             // Выбор Modality никогда не меняет SOP Class тестового изображения (1.2.840.10008.5.1.4.1.1.7)
             updated.copy(
@@ -874,8 +877,12 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
      * - если изменилось тестовое изображение/значимые метаданные пациента или `forceNewObject == true`, создаются новые уникальные UID;
      * - если это повторная попытка отправки того же сформированного объекта, его UID сохраняются.
      */
-    fun syncPreparedScuObject(forceNewObject: Boolean = false): PreparedSecondaryCaptureDicomObject {
+    fun syncPreparedScuObject(forceNewObject: Boolean = false): PreparedSecondaryCaptureDicomObject? {
         val currentConfig = _scuConfig.value
+        if (currentConfig.syntheticEncoding.validationError(currentConfig) != null) {
+            _preparedScuObject.value = null
+            return null
+        }
         val currentStrokes = _freehandStrokes.value
         val nextObj = DicomSecondaryCaptureGenerator.prepareSecondaryCaptureObject(
             config = currentConfig,
@@ -961,7 +968,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
                 current.copy(smileySeed = nextSeed)
             }
         }
-        val newObj = syncPreparedScuObject(forceNewObject = true)
+        val newObj = syncPreparedScuObject(forceNewObject = true) ?: return reportSyntheticEncodingError()
         _scuConfig.update {
             it.copy(
                 noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = "Создан новый объект",
@@ -976,11 +983,17 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
      * Повторно отправляет ТОТ ЖЕ САМЫЙ ранее сформированный DICOM-объект без изменения UID, Pixel Data или метаданных.
      * По ТЗ: отдельная операция «Отправить повторно». Не считает повторную отправку успешной без получения C-STORE-RSP (0x0000).
      */
+    private fun reportSyntheticEncodingError() {
+        val reason = _scuConfig.value.syntheticEncoding.validationError(_scuConfig.value) ?: "Синтетический DICOM не подготовлен."
+        _scuConfig.update { it.copy(noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = "Несовместимая кодировка",
+            lastStatusMessage = reason, isLastOperationSuccess = false, isLastOperationWarning = false) }
+    }
+
     fun triggerResendCStoreScu() {
         val snapshot = _scuConfig.value
         if (snapshot.isOperationInProgress) return
 
-        val prepared = _preparedScuObject.value ?: syncPreparedScuObject(forceNewObject = false)
+        val prepared = _preparedScuObject.value ?: syncPreparedScuObject(forceNewObject = false) ?: return reportSyntheticEncodingError()
 
         val lease = ru.medeng.dicomtool.dicom.scu.ScuOperationGate.acquire(scuLeaseOwner, "C-STORE") ?: return
 
@@ -1046,7 +1059,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
             return
         }
 
-        val prepared = syncPreparedScuObject(forceNewObject = false)
+        val prepared = syncPreparedScuObject(forceNewObject = false) ?: return reportSyntheticEncodingError()
 
         val lease = ru.medeng.dicomtool.dicom.scu.ScuOperationGate.acquire(scuLeaseOwner, "C-STORE") ?: return
 

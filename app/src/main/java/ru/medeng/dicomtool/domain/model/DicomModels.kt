@@ -301,6 +301,7 @@ data class ScuBatchProgressState(
  */
 data class ScuSendConfig(
     val sendMode: ScuSendMode = ScuSendMode.TEST_IMAGE,
+    val syntheticEncoding: ru.medeng.dicomtool.dicom.scu.SyntheticDicomEncoding = ru.medeng.dicomtool.dicom.scu.SyntheticDicomEncoding.UTF8,
     val remoteIp: String = "",
     val remotePort: Int = 0,
     val calledAeTitle: String = "",

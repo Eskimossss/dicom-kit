@@ -144,7 +144,7 @@ import kotlin.math.roundToInt
 @Composable
 fun SendScuScreen(
     config: ScuSendConfig,
-    preparedObject: PreparedSecondaryCaptureDicomObject,
+    preparedObject: PreparedSecondaryCaptureDicomObject?,
     freehandStrokes: List<FreehandStroke>,
     isExpandedWidth: Boolean,
     candidateFiles: List<ScuCandidateFile> = emptyList(),
@@ -590,7 +590,7 @@ private fun PacsConnectionCard(
             }
 
             val cStoreEnabled = if (sendMode == ScuSendMode.TEST_IMAGE) {
-                !isBusy
+                !isBusy && config.syntheticEncoding.validationError(config) == null
             } else {
                 !isBusy && validCandidateFilesCount > 0
             }
@@ -689,6 +689,7 @@ fun PatientMetadataFormFields(
     val isDateError = dateValidation is DateValidationResult.Invalid
 
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        SyntheticEncodingSelector(config, onUpdateConfig)
         HorizontalFormFieldRow(
             label = "ФИО пациента",
             value = config.patientName,
@@ -965,7 +966,7 @@ private fun HorizontalFormFieldRow(
 @Composable
 fun TestImageGeneratorCard(
     config: ScuSendConfig,
-    preparedObject: PreparedSecondaryCaptureDicomObject,
+    preparedObject: PreparedSecondaryCaptureDicomObject?,
     freehandStrokes: List<FreehandStroke>,
     onUpdateConfig: ((ScuSendConfig) -> ScuSendConfig) -> Unit,
     onSetImageMode: (TestImageMode) -> Unit,
@@ -1018,7 +1019,7 @@ fun TestImageGeneratorCard(
 @Composable
 fun TestImageGeneratorContent(
     config: ScuSendConfig,
-    preparedObject: PreparedSecondaryCaptureDicomObject,
+    preparedObject: PreparedSecondaryCaptureDicomObject?,
     freehandStrokes: List<FreehandStroke>,
     onUpdateConfig: ((ScuSendConfig) -> ScuSendConfig) -> Unit,
     onSetImageMode: (TestImageMode) -> Unit,
@@ -1028,6 +1029,10 @@ fun TestImageGeneratorContent(
     onClearCanvas: () -> Unit,
     @Suppress("UNUSED_PARAMETER") onRegenerateUids: () -> Unit = {}
 ) {
+    if (preparedObject == null) {
+        Text(config.syntheticEncoding.validationError(config) ?: "Синтетический DICOM ещё не подготовлен.", color = ErrorRed)
+        return
+    }
     val activeStrokePoints = remember { mutableStateListOf<NormalizedPoint>() }
 
     // Создаём реальный Bitmap предпросмотра 512×512 из фактического буфера Pixel Data подготовленного объекта
@@ -1428,7 +1433,7 @@ private fun GeneratorModeTab(
 @Composable
 fun ScuImageGeneratorSubScreen(
     config: ScuSendConfig,
-    preparedObject: PreparedSecondaryCaptureDicomObject,
+    preparedObject: PreparedSecondaryCaptureDicomObject?,
     freehandStrokes: List<FreehandStroke>,
     onUpdateConfig: ((ScuSendConfig) -> ScuSendConfig) -> Unit,
     onSetImageMode: (TestImageMode) -> Unit,
@@ -1461,6 +1466,7 @@ fun ScuImageGeneratorSubScreen(
                 fontWeight = FontWeight.Bold,
                 color = TextPrimaryDark
             )
+            SyntheticEncodingSelector(config, onUpdateConfig)
             TestImageGeneratorContent(
                 config = config,
                 preparedObject = preparedObject,
@@ -2074,3 +2080,32 @@ fun formatFileSize(bytes: Long): String {
     }
 }
 
+
+/** Service setting for the synthetic generator; selected-file forwarding does not use it. */
+@Composable
+private fun SyntheticEncodingSelector(config: ScuSendConfig, onUpdateConfig: ((ScuSendConfig) -> ScuSendConfig) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("Кодировка DICOM", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+        Box {
+            OutlinedButton(onClick = { expanded = true }, enabled = !config.isOperationInProgress, modifier = Modifier.fillMaxWidth()) {
+                Text(config.syntheticEncoding.label, fontSize = 12.sp, softWrap = true)
+            }
+            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, modifier = Modifier.widthIn(max = 400.dp)) {
+                ru.medeng.dicomtool.dicom.scu.SyntheticDicomEncoding.entries.forEach { option ->
+                    DropdownMenuItem(text = { Text(option.label, fontSize = 12.sp) }, onClick = {
+                        expanded = false; onUpdateConfig { it.copy(syntheticEncoding = option) }
+                    })
+                }
+            }
+        }
+        Text("Только для новых тестовых DICOM. Исходные файлы не перекодируются.", fontSize = 11.sp, color = TextSecondarySlate)
+        val identity = listOf(config.patientName, config.patientId, config.studyDescription, config.seriesDescription).hashCode()
+        config.syntheticEncoding.validationError(config)?.let {
+            ru.medeng.dicomtool.ui.components.AppNotice("synthetic-invalid:${config.syntheticEncoding}:$identity", it, error = true)
+        }
+        config.syntheticEncoding.warning(config)?.let {
+            ru.medeng.dicomtool.ui.components.AppNotice("synthetic-warning:${config.syntheticEncoding}:$identity", it)
+        }
+    }
+}
