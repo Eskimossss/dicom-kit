@@ -20,7 +20,7 @@ class MainActivity : ComponentActivity() {
         val error = mutableStateOf<String?>(null)
         setContent {
             DicomToolTheme {
-                if (ready.value) DicomToolAppRoot()
+                if (ready.value) ru.medeng.dicomtool.ui.components.NoticePresentationHost { DicomToolAppRoot() }
                 else Text(error.value ?: "Подготовка настроек и архива…")
             }
         }

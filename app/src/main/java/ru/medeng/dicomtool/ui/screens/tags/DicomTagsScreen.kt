@@ -44,6 +44,7 @@ fun DicomTagsScreen(
     tags: List<DicomTagEntry>,
     isLoading: Boolean,
     errorMessage: String?,
+    readNoticeId: String,
     searchQuery: String,
     encodingOverride: DicomEncodingOverride,
     viewerRenderState: DicomViewerRenderState,
@@ -86,10 +87,10 @@ fun DicomTagsScreen(
             }
         }
         if (isLoading) CircularProgressIndicator(Modifier.padding(12.dp))
-        errorMessage?.let { Text(it, color = ErrorRed, modifier = Modifier.padding(12.dp)) }
+        errorMessage?.let { ru.medeng.dicomtool.ui.components.AppNotice("external-read:$readNoticeId", it, error = true) }
         if (summary != null && !isLoading && errorMessage == null) {
             ru.medeng.dicomtool.ui.components.DicomViewerWorkspace(
-                sourceKey = summary.sopClassUid + summary.fileName,
+                sourceKey = summary.sopClassUid + summary.fileName, diagnosticNoticeId = summary.diagnosticNoticeId,
                 metadata = listOf("Пациент" to DicomCharsetDecoder.formatDicomPersonName(summary.patientName),
                     "ID пациента" to summary.patientId, "Дата исследования" to summary.studyDateFormatted,
                     "Описание исследования" to summary.studyDescription, "Серия" to summary.seriesDescription,

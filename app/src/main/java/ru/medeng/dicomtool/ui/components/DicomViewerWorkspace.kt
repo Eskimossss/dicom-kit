@@ -25,7 +25,7 @@ fun DicomViewerWorkspace(
     sourceKey: String, metadata: List<Pair<String, String>>, tags: List<DicomTagEntry>, query: String,
     renderState: DicomViewerRenderState, zoom: Float, pan: Offset, inverted: Boolean,
     ww: Int, wl: Int, frame: Int, frames: Int, instance: Int = 1, instances: Int = 1,
-    fullScreen: Boolean, initialTab: Int = 0, encodingWarning: String? = null,
+    fullScreen: Boolean, initialTab: Int = 0, diagnosticNoticeId: String = sourceKey, encodingWarning: String? = null,
     encodingOverride: DicomEncodingOverride = DicomEncodingOverride.AUTO,
     onEncodingOverride: ((DicomEncodingOverride) -> Unit)? = null,
     onQuery: (String) -> Unit, onZoom: (Float) -> Unit, onPan: (Offset) -> Unit,
@@ -46,6 +46,7 @@ fun DicomViewerWorkspace(
     }
     val panel: @Composable (Modifier) -> Unit = { target ->
         Column(target) {
+            encodingWarning?.let { AppNotice("charset:$diagnosticNoticeId", it) }
             TabRow(selectedTabIndex = tab) {
                 listOf("Просмотр и WW/WL", "DICOM-теги").forEachIndexed { index, label ->
                     Tab(selected = tab == index, onClick = { tab = index }, text = { Text(label, fontSize = 12.sp) })
@@ -53,7 +54,7 @@ fun DicomViewerWorkspace(
             }
             if (tab == 1) {
                 DicomTagsBrowserComponent(tags, query, modifier = Modifier.fillMaxSize(),
-                    encodingWarning = encodingWarning, currentEncodingOverride = encodingOverride,
+                    encodingWarning = null, currentEncodingOverride = encodingOverride,
                     showEncodingSelector = onEncodingOverride != null, onSearchQueryChange = onQuery,
                     onEncodingOverrideChange = onEncodingOverride)
             } else {
@@ -61,7 +62,6 @@ fun DicomViewerWorkspace(
                     verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     leadingControls()
                     metadata.forEach { (key, value) -> KeyValueTableRow(key, value) }
-                    encodingWarning?.let { Text(it, fontSize = 12.sp) }
                     Text("WW — контраст; WL — центр окна / яркость", fontSize = 12.sp)
                     val span = ((descriptor?.maxModalityValue ?: 65535.0) - (descriptor?.minModalityValue ?: 0.0)).coerceAtLeast(255.0)
                     val maxWidth = maxOf(ww.toDouble(), span * 1.5).coerceIn(255.0, 131072.0).toFloat()

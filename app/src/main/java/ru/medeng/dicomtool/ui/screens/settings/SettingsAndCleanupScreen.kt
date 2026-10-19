@@ -91,6 +91,7 @@ fun SettingsAndCleanupScreen(
     onRecoverIncoming: () -> Unit,
     isMigrating: Boolean,
     migrationStatusMessage: String?,
+    migrationNoticeId: String,
     studiesCount: Int,
     filesCount: Int,
     totalBytes: Long,
@@ -364,8 +365,7 @@ fun SettingsAndCleanupScreen(
                             softWrap = true
                         )
                         storageInfo.retainedIncoming.warningMessage?.let { warning ->
-                            Text(text = warning, color = ErrorRed, fontSize = 12.sp,
-                                modifier = Modifier.padding(top = 8.dp))
+                            ru.medeng.dicomtool.ui.components.AppNotice("settings-retained:${storageInfo.retainedIncoming}", warning)
                         }
                         if (storageInfo.type == StorageType.SAF) {
                             Text(
@@ -492,13 +492,7 @@ fun SettingsAndCleanupScreen(
                 }
 
                 if (!migrationStatusMessage.isNullOrBlank()) {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = migrationStatusMessage,
-                        fontSize = 12.sp,
-                        color = if (migrationStatusMessage.contains("Ошибок")) ErrorRed else PrimaryBlue,
-                        lineHeight = 16.sp
-                    )
+                    ru.medeng.dicomtool.ui.components.AppNotice("archive-operation:$migrationNoticeId:$migrationStatusMessage", migrationStatusMessage)
                 }
             }
 

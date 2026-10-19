@@ -20,4 +20,4 @@ data class DicomReadProblem(val source: String, val fileName: String, val stage:
 }
 /** Charset warnings belong to successfully decoded objects and are not read failures. */
 data class ArchiveIndexState(val isLoading: Boolean = false, val warning: String? = null, val indexedFiles: Int = 0,
-    val readProblems: List<DicomReadProblem> = emptyList())
+    val readProblems: List<DicomReadProblem> = emptyList(), val noticeId: String = java.util.UUID.randomUUID().toString())

@@ -37,7 +37,8 @@ data class ScpReceiverState(
     val storagePath: String = "",
     val connectedNodes: List<String> = emptyList(),
     val validationError: String? = null,
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    val noticeId: String = java.util.UUID.randomUUID().toString()
 )
 
 /**
@@ -115,7 +116,10 @@ data class DicomStudyItem(
     val seriesInstanceUid: String = "",
     val totalBytes: Long = 0L,
     val seriesList: List<DicomSeriesGroup> = emptyList()
-)
+) {
+    // Presentation identity must not change structural archive equality / incremental-index semantics.
+    val diagnosticNoticeId: String = java.util.UUID.randomUUID().toString()
+}
 
 /**
  * Элемент вложенной последовательности DICOM (Item of SQ).
@@ -159,7 +163,8 @@ data class DicomFileSummary(
     val sopClassUid: String,
     val sopClassName: String,
     val specificCharacterSet: String,
-    val encodingWarning: String? = null
+    val encodingWarning: String? = null,
+    val diagnosticNoticeId: String = java.util.UUID.randomUUID().toString()
 )
 
 /**
@@ -322,7 +327,8 @@ data class ScuSendConfig(
     val lastStatusTitle: String? = null,
     val lastStatusMessage: String? = null,
     val isLastOperationSuccess: Boolean? = null,
-    val isLastOperationWarning: Boolean = false
+    val isLastOperationWarning: Boolean = false,
+    val noticeId: String = java.util.UUID.randomUUID().toString()
 )
 
 

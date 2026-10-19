@@ -16,6 +16,8 @@ class ArchiveOperations(private val repository: LocalDicomStudyRepository, priva
     val busy = _busy.asStateFlow()
     private val _message = MutableStateFlow<String?>(null)
     val message = _message.asStateFlow()
+    private val _messageId = MutableStateFlow(java.util.UUID.randomUUID().toString())
+    val messageId = _messageId.asStateFlow()
     private val _info = MutableStateFlow(StorageLocationInfo(StorageType.INTERNAL,
         repository.storageRootDir.absolutePath, warningMessage = "Проверка хранилища…"))
     val info = _info.asStateFlow()
@@ -52,6 +54,7 @@ class ArchiveOperations(private val repository: LocalDicomStudyRepository, priva
             else _message.value = "Операция с архивом уже выполняется; дождитесь завершения."
             return
         }
+        _messageId.value = java.util.UUID.randomUUID().toString()
         val ticket = synchronized(infoGate) { generation.incrementAndGet() }
         _busy.value = true
         scope.launch {

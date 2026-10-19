@@ -175,8 +175,10 @@ fun ReceivedStudiesScreen(
         }
 
         if (indexState.isLoading) Text("Обновление списка исследований…", fontSize = 12.sp)
-        indexState.warning?.let { Text(it, color = ErrorRed, fontSize = 12.sp) }
+        indexState.warning?.let { ru.medeng.dicomtool.ui.components.AppNotice("archive:${indexState.noticeId}", it) }
         if (indexState.readProblems.isNotEmpty()) {
+            ru.medeng.dicomtool.ui.components.AppNotice("archive-read:${indexState.noticeId}:${indexState.readProblems.hashCode()}",
+                "${indexState.readProblems.size} файла с ошибками чтения DICOM. Подробности — в диагностике ниже.")
             TextButton(onClick = { showReadProblems = true }) {
                 Text("${indexState.readProblems.size} файла с ошибками чтения DICOM", color = ErrorRed)
             }
@@ -362,33 +364,7 @@ private fun StudyListItemCard(
             }
 
             if (!study.encodingWarning.isNullOrBlank()) {
-                Spacer(modifier = Modifier.height(6.dp))
-                Surface(
-                    shape = RoundedCornerShape(6.dp),
-                    color = WarningAmberLight,
-                    border = BorderStroke(1.dp, WarningAmber),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.WarningAmber,
-                            contentDescription = null,
-                            tint = WarningAmber,
-                            modifier = Modifier.size(15.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = study.encodingWarning,
-                            fontSize = 11.sp,
-                            lineHeight = 15.sp,
-                            color = TextPrimaryDark,
-                            softWrap = true
-                        )
-                    }
-                }
+                ru.medeng.dicomtool.ui.components.AppNotice("charset-study:${study.diagnosticNoticeId}", study.encodingWarning)
             }
         }
     }
@@ -533,7 +509,7 @@ fun DicomViewerAndTagsScreen(
                 } })
         }
         ru.medeng.dicomtool.ui.components.DicomViewerWorkspace(
-            sourceKey = study.studyInstanceUid, metadata = listOf("Пациент" to study.patientName,
+            sourceKey = study.studyInstanceUid, diagnosticNoticeId = study.diagnosticNoticeId, metadata = listOf("Пациент" to study.patientName,
                 "ID пациента" to study.patientId, "Дата исследования" to study.studyDateFormatted,
                 "Описание исследования" to study.studyDescription), tags = tags, query = tagSearchQuery,
             renderState = renderState, zoom = zoom, pan = pan, inverted = inverted, ww = windowWidth, wl = windowCenter,

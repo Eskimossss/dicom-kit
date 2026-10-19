@@ -224,10 +224,10 @@ fun DicomLogScreen(
             .background(CardSurfaceWhite)
     ) {
         if (loggerHealth.historyLoading) Text("Загрузка сохранённой истории журнала…", fontSize = 12.sp)
-        if (loggerHealth.needsAttention) Surface(color = WarningAmber.copy(alpha = 0.12f), modifier = Modifier.fillMaxWidth()
-            .clickable { showLoggerDetails = true }) {
-            Text(loggerHealth.warning, color = TextPrimaryDark, fontSize = 12.sp, modifier = Modifier.padding(10.dp))
+        if (loggerHealth.needsAttention) {
+            ru.medeng.dicomtool.ui.components.AppNotice("logger-health:${loggerHealth.state}:${loggerHealth.droppedNormal}:${loggerHealth.droppedCritical}:${loggerHealth.writeUnconfirmed}:${loggerHealth.readFailures}:${loggerHealth.controlFailures}:${loggerHealth.lastError.hashCode()}", loggerHealth.warning)
         }
+        TextButton(onClick = { showLoggerDetails = true }) { Text("Состояние записи журнала", fontSize = 11.sp) }
         // --- 1. ВЕРХНЯЯ ПАНЕЛЬ: Переключатель режимов + действия ---
         Surface(
             modifier = Modifier.fillMaxWidth(),

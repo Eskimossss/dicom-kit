@@ -378,13 +378,8 @@ private fun LastScuOperationResultBanner(
     batchProgress: ScuBatchProgressState = ScuBatchProgressState()
 ) {
     val isBusy = config.isOperationInProgress || batchProgress.isSending
-    val isWarning = config.isLastOperationWarning || (batchProgress.failedCount > 0 && batchProgress.sentSuccessCount > 0)
-    val isSuccess = if (batchProgress.totalFiles > 0 && !batchProgress.isSending) {
-        !batchProgress.isCancelled && batchProgress.unconfirmedCount == 0 &&
-            batchProgress.sentSuccessCount + batchProgress.sentWarningCount == batchProgress.totalFiles
-    } else {
-        config.isLastOperationSuccess
-    }
+    val isWarning = config.isLastOperationWarning
+    val isSuccess = config.isLastOperationSuccess
 
     val bgColor = when {
         isBusy -> PrimaryBlueLight
@@ -408,6 +403,8 @@ private fun LastScuOperationResultBanner(
         else -> TextPrimaryDark
     }
 
+    ru.medeng.dicomtool.ui.components.NoticeVisibility("scu:${config.noticeId}:${if (isBusy) "busy" else "result"}",
+        autoHideSuccess = !isBusy && isSuccess == true && !isWarning) { dismiss ->
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(10.dp),
@@ -472,8 +469,10 @@ private fun LastScuOperationResultBanner(
                     }
                 }
             }
+            ru.medeng.dicomtool.ui.components.NoticeCloseButton(dismiss)
         }
     }
+}
 }
 
 @Composable

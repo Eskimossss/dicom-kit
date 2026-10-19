@@ -190,6 +190,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     val storageLocationInfo = archive.info
     val isMigrating = archive.busy
     val migrationStatusMessage = archive.message
+    val migrationNoticeId = archive.messageId
     val receptionStorageOptions = requireNotNull(storageManager).receptionOptions
     fun updateReceptionStorageOptions(options: ru.medeng.dicomtool.data.storage.ReceptionStorageOptions) = archive.setReceptionOptions(options)
     fun recoverRetainedIncoming() = archive.recoverIncoming()
@@ -350,6 +351,8 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     private val _isExternalFileLoading = MutableStateFlow(false)
     val isExternalFileLoading: StateFlow<Boolean> = _isExternalFileLoading.asStateFlow()
 
+    private val _externalReadId = MutableStateFlow(java.util.UUID.randomUUID().toString())
+    val externalReadId = _externalReadId.asStateFlow()
     private val _externalFileError = MutableStateFlow<String?>(null)
     val externalFileError: StateFlow<String?> = _externalFileError.asStateFlow()
 
@@ -898,7 +901,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
             it.copy(
                 isOperationInProgress = true,
                 activeOperationName = "C-ECHO",
-                lastStatusTitle = "Выполняется C-ECHO...",
+                noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = "Выполняется C-ECHO...",
                 lastStatusMessage = "Установка TCP-соединения и согласование ассоциации с ${snapshot.remoteIp}:${snapshot.remotePort} [${snapshot.callingAeTitle} → ${snapshot.calledAeTitle}]...",
                 isLastOperationSuccess = null,
                 isLastOperationWarning = false
@@ -961,7 +964,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
         val newObj = syncPreparedScuObject(forceNewObject = true)
         _scuConfig.update {
             it.copy(
-                lastStatusTitle = "Создан новый объект",
+                noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = "Создан новый объект",
                 lastStatusMessage = "Сформирован новый Secondary Capture объект (SOP Instance UID: ${newObj.uids.sopInstanceUid}). Готов к отправке.",
                 isLastOperationSuccess = null,
                 isLastOperationWarning = false
@@ -985,7 +988,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
             it.copy(
                 isOperationInProgress = true,
                 activeOperationName = "C-STORE (Повтор)",
-                lastStatusTitle = "Повторная отправка C-STORE...",
+                noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = "Повторная отправка C-STORE...",
                 lastStatusMessage = "Повторная отправка того же объекта (SOPInstanceUID=${prepared.uids.sopInstanceUid}) на ${snapshot.remoteIp}:${snapshot.remotePort}...",
                 isLastOperationSuccess = null,
                 isLastOperationWarning = false
@@ -1023,7 +1026,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
         if (dateValidation is DateValidationResult.Incomplete) {
             _scuConfig.update {
                 it.copy(
-                    lastStatusTitle = "Некорректная дата рождения",
+                    noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = "Некорректная дата рождения",
                     lastStatusMessage = "Дата рождения заполнена не полностью (введено ${dateValidation.digitsCount} из 8 цифр). Заполните все 8 цифр ДД.ММ.ГГГГ или очистите поле.",
                     isLastOperationSuccess = false,
                     isLastOperationWarning = false
@@ -1034,7 +1037,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
         if (dateValidation is DateValidationResult.Invalid) {
             _scuConfig.update {
                 it.copy(
-                    lastStatusTitle = "Некорректная дата рождения",
+                    noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = "Некорректная дата рождения",
                     lastStatusMessage = dateValidation.messageRu,
                     isLastOperationSuccess = false,
                     isLastOperationWarning = false
@@ -1051,7 +1054,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
             it.copy(
                 isOperationInProgress = true,
                 activeOperationName = "C-STORE",
-                lastStatusTitle = "Выполняется C-STORE...",
+                noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = "Выполняется C-STORE...",
                 lastStatusMessage = "Отправка Secondary Capture (512×512, Modality=${prepared.modality}, SOPInstanceUID=${prepared.uids.sopInstanceUid}) на ${snapshot.remoteIp}:${snapshot.remotePort}...",
                 isLastOperationSuccess = null,
                 isLastOperationWarning = false
@@ -1167,7 +1170,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
         _batchProgress.value = ScuBatchProgressState(isSending = true, totalFiles = files.size,
             summaryMessageRu = "Подготовка отправки ${files.size} файлов...")
         _scuConfig.update { it.copy(isOperationInProgress = true, activeOperationName = "C-STORE",
-            lastStatusTitle = "Передача файлов", isLastOperationSuccess = null, isLastOperationWarning = false) }
+            noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = "Передача файлов", isLastOperationSuccess = null, isLastOperationWarning = false) }
         _candidateFiles.update { list -> list.map { file ->
             if (files.any { it.id == file.id }) file.copy(sendStatus = FileSendStatus.PENDING, sendErrorMessage = null) else file
         } }
@@ -1197,7 +1200,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
                         isCancelled = result.isCancelled) }
                     val confirmed = !result.isCancelled && result.totalFiles > 0 &&
                         result.successCount + result.warningCount == result.totalFiles
-                    _scuConfig.update { it.copy(lastStatusTitle = when {
+                    _scuConfig.update { it.copy(noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = when {
                         result.isCancelled -> "Передача отменена"
                         result.unconfirmedCount > 0 -> "Есть неизвестные результаты"
                         confirmed && result.warningCount == 0 -> "Все файлы успешно отправлены"
@@ -1210,7 +1213,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
             } catch (e: Exception) {
                 withContext(kotlinx.coroutines.NonCancellable + Dispatchers.Main) {
                     _batchProgress.update { it.copy(summaryMessageRu = "Передача завершена без полного результата: ${e.message}") }
-                    _scuConfig.update { it.copy(isLastOperationSuccess = false, lastStatusTitle = "Передача не подтверждена",
+                    _scuConfig.update { it.copy(isLastOperationSuccess = false, noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = "Передача не подтверждена",
                         lastStatusMessage = "Результаты на PACS могут быть неизвестны: ${e.message}") }
                 }
             } finally {
@@ -1270,7 +1273,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
                     it.copy(
                         isOperationInProgress = false,
                         activeOperationName = null,
-                        lastStatusTitle = result.shortTitleRu,
+                        noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = result.shortTitleRu,
                         lastStatusMessage = result.userMessageRu,
                         isLastOperationSuccess = true,
                         isLastOperationWarning = false
@@ -1283,7 +1286,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
                     it.copy(
                         isOperationInProgress = false,
                         activeOperationName = null,
-                        lastStatusTitle = result.shortTitleRu,
+                        noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = result.shortTitleRu,
                         lastStatusMessage = result.userMessageRu,
                         isLastOperationSuccess = true,
                         isLastOperationWarning = true
@@ -1296,7 +1299,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
                     it.copy(
                         isOperationInProgress = false,
                         activeOperationName = null,
-                        lastStatusTitle = result.shortTitleRu,
+                        noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = result.shortTitleRu,
                         lastStatusMessage = result.userMessageRu,
                         isLastOperationSuccess = false,
                         isLastOperationWarning = false
@@ -1352,6 +1355,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun loadExternalDicomFile(uri: Uri) {
         val ticket = metadataRequests.next()
+        _externalReadId.value = java.util.UUID.randomUUID().toString()
         externalLoadJob?.cancel()
         renderRequests.next(); renderJob?.cancel(); frameCache.clear()
         _selectedExternalFileUri.value = uri
@@ -1426,11 +1430,11 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
                 if (lease != null && lease.owner != scuLeaseOwner) {
                     observingOtherOwner = true
                     _scuConfig.update { it.copy(isOperationInProgress = true, activeOperationName = lease.operation,
-                        lastStatusTitle = "Операция ещё выполняется", lastStatusMessage = "Ожидается завершение сетевой операции предыдущего экрана и освобождение ресурсов.", isLastOperationSuccess = null) }
+                        noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = "Операция ещё выполняется", lastStatusMessage = "Ожидается завершение сетевой операции предыдущего экрана и освобождение ресурсов.", isLastOperationSuccess = null) }
                 } else if (lease == null && observingOtherOwner) {
                     observingOtherOwner = false
                     _scuConfig.update { it.copy(isOperationInProgress = false, activeOperationName = null,
-                        lastStatusTitle = "Операция завершена", lastStatusMessage = "Проверьте результаты файлов, ответы узла и состояние записи технического журнала.", isLastOperationSuccess = null) }
+                        noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = "Операция завершена", lastStatusMessage = "Проверьте результаты файлов, ответы узла и состояние записи технического журнала.", isLastOperationSuccess = null) }
                 }
             }
         }

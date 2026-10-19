@@ -153,6 +153,7 @@ fun ReceiverScpScreen(
                         busy = state.serviceStopping || state.status in listOf(ScpServerStatus.STARTING, ScpServerStatus.STOPPING),
                         validationError = state.validationError,
                         errorMessage = state.errorMessage,
+                        noticeId = state.noticeId,
                         onAeTitleChange = onAeTitleChange,
                         onPortChange = onPortChange,
                         onIncrementPort = onIncrementPort,
@@ -183,6 +184,7 @@ fun ReceiverScpScreen(
                         busy = state.serviceStopping || state.status in listOf(ScpServerStatus.STARTING, ScpServerStatus.STOPPING),
                 validationError = state.validationError,
                 errorMessage = state.errorMessage,
+                        noticeId = state.noticeId,
                 onAeTitleChange = onAeTitleChange,
                 onPortChange = onPortChange,
                 onIncrementPort = onIncrementPort,
@@ -264,6 +266,7 @@ private fun AeAndPortControls(
     busy: Boolean,
     validationError: String?,
     errorMessage: String?,
+    noticeId: String,
     onAeTitleChange: (String) -> Unit,
     onPortChange: (String) -> Unit,
     onIncrementPort: (Int) -> Unit,
@@ -313,21 +316,7 @@ private fun AeAndPortControls(
 
     val displayError = validationError ?: errorMessage
     if (!displayError.isNullOrBlank()) {
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(8.dp),
-            color = DangerActionSoftBg,
-            border = BorderStroke(1.dp, DangerActionSoftBorder)
-        ) {
-            Text(
-                text = displayError,
-                fontSize = 13.sp,
-                lineHeight = 18.sp,
-                color = ErrorRed,
-                softWrap = true,
-                modifier = Modifier.padding(12.dp)
-            )
-        }
+        ru.medeng.dicomtool.ui.components.AppNotice("scp-error:$noticeId:$aeTitle:$portText:$displayError", displayError, error = true)
     }
 
     Button(
@@ -511,21 +500,8 @@ private fun ScpStatusCard(
         val storageWarning = listOfNotNull(storageInfo?.warningMessage, storageInfo?.retainedIncoming?.warningMessage)
             .joinToString("\n").ifBlank { null }
         if ((isSaf && !isAccessible) || storageWarning != null) {
-            Spacer(modifier = Modifier.height(8.dp))
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(6.dp),
-                color = DangerActionSoftBg,
-                border = BorderStroke(1.dp, DangerActionSoftBorder)
-            ) {
-                Text(
-                    text = storageWarning ?: "Внимание: Выбранная папка или SD-карта недоступна (отключена или отозвано разрешение). Новые файлы не могут быть сохранены.",
-                    fontSize = 12.sp,
-                    lineHeight = 16.sp,
-                    color = ErrorRed,
-                    modifier = Modifier.padding(8.dp)
-                )
-            }
+            ru.medeng.dicomtool.ui.components.AppNotice("scp-storage:${storageInfo?.displayPath}:$storageWarning:$isAccessible",
+                storageWarning ?: "Выбранная папка недоступна. Новые файлы не могут быть сохранены. Подробности и восстановление — в настройках хранилища.")
         }
 
         if (state.connectedNodes.isNotEmpty()) {

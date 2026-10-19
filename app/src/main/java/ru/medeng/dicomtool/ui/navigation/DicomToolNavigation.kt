@@ -95,6 +95,7 @@ fun DicomToolAppRoot(
     viewModel: DicomToolViewModel = viewModel()
 ) {
     val receptionOptions by viewModel.receptionStorageOptions.collectAsStateWithLifecycle()
+    val externalReadId by viewModel.externalReadId.collectAsStateWithLifecycle()
     val archiveIndex by viewModel.archiveIndexState.collectAsStateWithLifecycle()
     val archiveBusy by viewModel.isMigrating.collectAsStateWithLifecycle()
     val scpState by viewModel.scpState.collectAsStateWithLifecycle()
@@ -135,6 +136,7 @@ fun DicomToolAppRoot(
     val autoScrollLogs by viewModel.autoScrollLogs.collectAsStateWithLifecycle()
     val storageLocationInfo by viewModel.storageLocationInfo.collectAsStateWithLifecycle()
     val isMigrating by viewModel.isMigrating.collectAsStateWithLifecycle()
+    val migrationNoticeId by viewModel.migrationNoticeId.collectAsStateWithLifecycle()
     val migrationStatusMessage by viewModel.migrationStatusMessage.collectAsStateWithLifecycle()
     val externalSummary by viewModel.externalFileSummary.collectAsStateWithLifecycle()
     val externalTags by viewModel.externalFileTags.collectAsStateWithLifecycle()
@@ -278,6 +280,7 @@ fun DicomToolAppRoot(
                             onRecoverIncoming = viewModel::recoverRetainedIncoming,
                             isMigrating = isMigrating,
                             migrationStatusMessage = migrationStatusMessage,
+                            migrationNoticeId = migrationNoticeId,
                             studiesCount = studies.size,
                             filesCount = viewModel.getTotalSavedFilesCount(),
                             totalBytes = viewModel.getTotalStorageBytes(),
@@ -426,6 +429,7 @@ fun DicomToolAppRoot(
                                     tags = externalTags,
                                     isLoading = isExternalLoading,
                                     errorMessage = externalError,
+                                    readNoticeId = externalReadId,
                                     searchQuery = externalSearchQuery,
                                     encodingOverride = externalEncodingOverride,
                                     viewerRenderState = viewerRenderState,

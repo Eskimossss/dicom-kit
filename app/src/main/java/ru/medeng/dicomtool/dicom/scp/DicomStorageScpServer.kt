@@ -204,7 +204,7 @@ class DicomStorageScpServer(
                 callingAeTitle = aeTitle,
                 tcpPort = port,
                 validationError = validationError,
-                errorMessage = null
+                noticeId = java.util.UUID.randomUUID().toString(), errorMessage = null
             )
         }
     }
@@ -248,7 +248,7 @@ class DicomStorageScpServer(
             _state.update {
                 it.copy(
                     validationError = aeValidation.messageRu,
-                    errorMessage = aeValidation.messageRu
+                    noticeId = java.util.UUID.randomUUID().toString(), errorMessage = aeValidation.messageRu
                 )
             }
             return Result.failure(IllegalArgumentException(aeValidation.messageRu))
@@ -259,7 +259,7 @@ class DicomStorageScpServer(
             _state.update {
                 it.copy(
                     validationError = portValidation.messageRu,
-                    errorMessage = portValidation.messageRu
+                    noticeId = java.util.UUID.randomUUID().toString(), errorMessage = portValidation.messageRu
                 )
             }
             return Result.failure(IllegalArgumentException(portValidation.messageRu))
@@ -274,7 +274,7 @@ class DicomStorageScpServer(
                 tcpPort = port,
                 networkInfo = detectLocalIpv4Interface(),
                 validationError = null,
-                errorMessage = null
+                noticeId = java.util.UUID.randomUUID().toString(), errorMessage = null
             )
         }
 
@@ -376,7 +376,7 @@ class DicomStorageScpServer(
                     tcpPort = port,
                     networkInfo = netInfo,
                     uptimeFormatted = "00:00:00",
-                    errorMessage = null
+                    noticeId = java.util.UUID.randomUUID().toString(), errorMessage = null
                 )
                 }
             }
@@ -408,7 +408,7 @@ class DicomStorageScpServer(
             _state.update {
                 it.copy(
                     status = if (it.status == ScpServerStatus.STOPPING) it.status else ScpServerStatus.ERROR,
-                    errorMessage = errMsg
+                    noticeId = java.util.UUID.randomUUID().toString(), errorMessage = errMsg
                 )
             }
             logger.recordTechnicalEvent(
@@ -505,7 +505,7 @@ class DicomStorageScpServer(
         logger.recordTechnicalEvent(category = DicomLogCategory.SERVER_LIFECYCLE,
             direction = DicomTrafficDirection.LOCAL, associationId = "SCP", title = "SCP service warning",
             summaryLines = listOf(message), technicalDetails = mapOf("Reason" to message), isError = true)
-        _state.update { it.copy(errorMessage = message,
+        _state.update { it.copy(noticeId = java.util.UUID.randomUUID().toString(), errorMessage = message,
             status = if (it.status == ScpServerStatus.STOPPED) ScpServerStatus.ERROR else it.status) }
     }
 

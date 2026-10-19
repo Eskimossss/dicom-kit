@@ -101,6 +101,28 @@ class ViewerSafetyInstrumentedTest {
         compose.onNodeWithContentDescription("Предыдущий кадр").assertExists()
         compose.onNodeWithContentDescription("Предыдущий снимок").performScrollTo().assertExists()
     }
+    @Test fun closingCharsetNoticePreservesDiagnosticsTagsAndOriginalFile() {
+        val ds = dataset("SYNTHETIC^CHARSET").apply {
+            remove(Tag.SpecificCharacterSet)
+            setBytes(Tag.PatientName, VR.PN, "ТЕСТ^СИНТЕТИКА".toByteArray(Charsets.UTF_8))
+        }
+        val uri = source(ds).first; val model = vm()
+        val original = context.contentResolver.openInputStream(uri)!!.use { it.readBytes() }
+        compose.onNodeWithContentDescription("Теги и просмотр", useUnmergedTree = true).performClick()
+        compose.runOnIdle { model.loadExternalDicomFile(uri) }; await { ready(model, uri) }
+        val warning = model.externalFileSummary.value!!.encodingWarning
+        assertFalse(warning.isNullOrEmpty())
+        compose.onNodeWithText(warning!!).assertExists()
+        compose.onNodeWithContentDescription("Закрыть уведомление").performClick()
+        compose.onNodeWithText(warning).assertDoesNotExist()
+        compose.onNodeWithText("DICOM-теги").performClick()
+        compose.onNodeWithText(warning).assertDoesNotExist()
+        compose.onNodeWithText("Просмотр и WW/WL").performClick()
+        compose.onNodeWithText(warning).assertDoesNotExist()
+        assertEquals(warning, model.externalFileSummary.value!!.encodingWarning)
+        assertTrue(model.externalFileTags.value.isNotEmpty())
+        assertArrayEquals(original, context.contentResolver.openInputStream(uri)!!.use { it.readBytes() })
+    }
     @Test fun liveSliderRendersWhileFingerIsDownAndReusesDecodedLargeFrame() {
         val ds = dataset("SYNTHETIC^LIVE").apply {
             setInt(Tag.Rows, VR.US, 3000); setInt(Tag.Columns, VR.US, 4000)

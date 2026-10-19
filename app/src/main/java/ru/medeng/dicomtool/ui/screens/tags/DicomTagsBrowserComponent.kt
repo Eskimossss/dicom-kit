@@ -160,34 +160,7 @@ fun DicomTagsBrowserComponent(
     ) {
         // 1. Предупреждение о кодировке (если обнаружено несоответствие 0008,0005)
         if (!encodingWarning.isNullOrBlank()) {
-            Surface(
-                color = WarningAmberLight,
-                border = BorderStroke(0.8.dp, WarningAmber),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 14.dp, vertical = 4.dp),
-                shape = RoundedCornerShape(8.dp)
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.WarningAmber,
-                        contentDescription = null,
-                        tint = WarningAmber,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = encodingWarning,
-                        fontSize = 11.sp,
-                        lineHeight = 15.sp,
-                        color = TextPrimaryDark,
-                        softWrap = true
-                    )
-                }
-            }
+            ru.medeng.dicomtool.ui.components.AppNotice("charset-tags:${tags.hashCode()}:${currentEncodingOverride.name}", encodingWarning)
         }
 
         // 2. Раскрытая строка поиска (если развернута)
