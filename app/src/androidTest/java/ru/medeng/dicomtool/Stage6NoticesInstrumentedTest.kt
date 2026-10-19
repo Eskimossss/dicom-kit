@@ -35,7 +35,7 @@ class Stage6NoticesInstrumentedTest {
         compose.mainClock.autoAdvance = false
         compose.runOnUiThread { compose.activity.setContent { NoticePresentationHost {
             Text("Recomposition ${redraw.intValue}")
-            AppNotice(event.value.first, event.value.second, event.value.third)
+            AppNotice(event.value.first, event.value.second, success = event.value.third)
         } } }
         compose.mainClock.advanceTimeBy(100)
         compose.onNodeWithText("SYNTHETIC SUCCESS").assertExists()

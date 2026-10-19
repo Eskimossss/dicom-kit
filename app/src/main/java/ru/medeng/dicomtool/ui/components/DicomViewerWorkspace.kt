@@ -24,7 +24,7 @@ import kotlin.math.roundToInt
 fun DicomViewerWorkspace(
     sourceKey: String, metadata: List<Pair<String, String>>, tags: List<DicomTagEntry>, query: String,
     renderState: DicomViewerRenderState, zoom: Float, pan: Offset, inverted: Boolean,
-    ww: Int, wl: Int, frame: Int, frames: Int, instance: Int = 1, instances: Int = 1,
+    ww: Int, wl: Int, frame: Int, frames: Int, modifier: Modifier = Modifier, instance: Int = 1, instances: Int = 1,
     fullScreen: Boolean, initialTab: Int = 0, diagnosticNoticeId: String = sourceKey, encodingWarning: String? = null,
     encodingOverride: DicomEncodingOverride = DicomEncodingOverride.AUTO,
     onEncodingOverride: ((DicomEncodingOverride) -> Unit)? = null,
@@ -32,7 +32,7 @@ fun DicomViewerWorkspace(
     onFit: () -> Unit, onResetView: () -> Unit, onResetWindow: () -> Unit,
     onInvert: () -> Unit, onAdjustWindow: (Int, Int) -> Unit, onWindow: (Int, Int) -> Unit,
     onFrame: (Int) -> Unit, onInstance: (Int) -> Unit = {}, onFullScreen: () -> Unit,
-    modifier: Modifier = Modifier, leadingControls: @Composable () -> Unit = {}
+    leadingControls: @Composable () -> Unit = {}
 ) {
     var tab by rememberSaveable(sourceKey) { mutableIntStateOf(initialTab.coerceIn(0, 1)) }
     val descriptor = (renderState as? DicomViewerRenderState.Ready)?.descriptor

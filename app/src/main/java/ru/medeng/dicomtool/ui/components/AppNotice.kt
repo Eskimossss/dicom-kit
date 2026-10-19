@@ -74,7 +74,7 @@ fun NoticeCloseButton(onDismiss: () -> Unit, modifier: Modifier = Modifier) {
 }
 
 @Composable
-fun AppNotice(eventId: String, text: String, success: Boolean = false, error: Boolean = false, modifier: Modifier = Modifier) {
+fun AppNotice(eventId: String, text: String, modifier: Modifier = Modifier, success: Boolean = false, error: Boolean = false) {
     NoticeVisibility(eventId, success) { dismiss ->
         Surface(modifier.fillMaxWidth(), color = when { success -> Color(0xFFECFDF5); error -> MaterialTheme.colorScheme.errorContainer; else -> Color(0xFFFFF4CE) },
             shape = MaterialTheme.shapes.small) {
