@@ -103,7 +103,8 @@ fun SettingsAndCleanupScreen(
     onResetToInternalStorage: () -> Unit,
     onMigrateStudies: (Boolean) -> Unit,
     onClearAllStudiesConfirmed: () -> Unit,
-    onClearAllLogsConfirmed: () -> Unit
+    onClearAllLogsConfirmed: () -> Unit,
+    onOpenAboutApp: () -> Unit = {}
 ) {
     var confirmClearStudies by remember { mutableStateOf(false) }
     var confirmClearLogs by remember { mutableStateOf(false) }
@@ -630,7 +631,7 @@ fun SettingsAndCleanupScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { showAboutDialog = true }
+                            .clickable { onOpenAboutApp() }
                             .padding(vertical = 6.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically

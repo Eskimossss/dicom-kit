@@ -50,6 +50,7 @@ import ru.medeng.dicomtool.ui.screens.received.ReceivedStudiesScreen
 import ru.medeng.dicomtool.ui.screens.receiver.ReceiverScpScreen
 import ru.medeng.dicomtool.ui.screens.send.ScuImageGeneratorSubScreen
 import ru.medeng.dicomtool.ui.screens.send.SendScuScreen
+import ru.medeng.dicomtool.ui.screens.about.AboutAppScreen
 import ru.medeng.dicomtool.ui.screens.settings.SettingsAndCleanupScreen
 import ru.medeng.dicomtool.ui.screens.tags.DicomTagsScreen
 import ru.medeng.dicomtool.ui.theme.AppBackgroundGray
@@ -89,7 +90,8 @@ enum class ActiveSubScreen {
     DICOM_VIEWER_INFO,
     DICOM_TAGS,
     SCU_IMAGE_GENERATOR,
-    SETTINGS_AND_CLEANUP
+    SETTINGS_AND_CLEANUP,
+    ABOUT_APP
 }
 
 @Composable
@@ -182,6 +184,10 @@ fun DicomToolAppRoot(
     BackHandler {
         when {
             isViewerFullScreen -> viewModel.setViewerFullScreen(false)
+            activeSubScreen == ActiveSubScreen.ABOUT_APP -> {
+                activeSubScreen = ActiveSubScreen.SETTINGS_AND_CLEANUP
+                lastExitBack = 0L
+            }
             activeSubScreen != ActiveSubScreen.NONE -> {
                 viewModel.selectTagForDetail(null)
                 activeSubScreen = ActiveSubScreen.NONE
@@ -293,7 +299,8 @@ fun DicomToolAppRoot(
                             onResetToInternalStorage = { viewModel.resetToInternalStorage() },
                             onMigrateStudies = { toSaf -> viewModel.migrateStudies(toSaf) },
                             onClearAllStudiesConfirmed = { viewModel.clearAllStudies() },
-                            onClearAllLogsConfirmed = { viewModel.clearAllLogs() }
+                            onClearAllLogsConfirmed = { viewModel.clearAllLogs() },
+                            onOpenAboutApp = { activeSubScreen = ActiveSubScreen.ABOUT_APP }
                         )
                     }
 
@@ -357,6 +364,12 @@ fun DicomToolAppRoot(
                             onClearCanvas = viewModel::clearFreehandCanvas,
                             onRegenerateUids = { viewModel.syncPreparedScuObject(forceNewObject = true) },
                             onBack = { activeSubScreen = ActiveSubScreen.NONE }
+                        )
+                    }
+
+                    ActiveSubScreen.ABOUT_APP -> {
+                        AboutAppScreen(
+                            onBack = { activeSubScreen = ActiveSubScreen.SETTINGS_AND_CLEANUP }
                         )
                     }
 

@@ -16,6 +16,7 @@ captures/
 .cxx/
 
 # Built application files
+builds/
 *.apk
 *.aab
 *.ap_

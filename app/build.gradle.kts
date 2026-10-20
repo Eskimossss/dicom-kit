@@ -1,9 +1,42 @@
 import java.util.Properties
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
+import java.text.SimpleDateFormat
+import java.util.concurrent.TimeUnit
 
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.jetbrains.kotlin.android)
 }
+
+fun getGitCommandOutput(vararg args: String): String {
+    return try {
+        val process = ProcessBuilder("git", *args)
+            .directory(rootDir)
+            .redirectError(ProcessBuilder.Redirect.DISCARD)
+            .start()
+        val text = process.inputStream.bufferedReader().readText().trim()
+        val finished = process.waitFor(5, TimeUnit.SECONDS)
+        if (finished && process.exitValue() == 0 && text.isNotEmpty()) text else "unknown"
+    } catch (_: Exception) {
+        "unknown"
+    }
+}
+
+val gitBranch = getGitCommandOutput("rev-parse", "--abbrev-ref", "HEAD")
+val rawGitCommit = getGitCommandOutput("rev-parse", "--short", "HEAD")
+val gitDirtyStatus = getGitCommandOutput("status", "--porcelain")
+val isGitDirty = gitDirtyStatus.isNotEmpty() && gitDirtyStatus != "unknown"
+val gitCommitSha = when {
+    rawGitCommit == "unknown" -> "unknown"
+    isGitDirty -> "$rawGitCommit-dirty"
+    else -> rawGitCommit
+}
+
+val buildTimestamp: String = SimpleDateFormat("yyyy-MM-dd HH:mm:ss 'UTC'", Locale.US).apply {
+    timeZone = TimeZone.getTimeZone("UTC")
+}.format(Date())
 
 android {
     namespace = "ru.medeng.dicomtool"
@@ -14,9 +47,14 @@ android {
         applicationId = "ru.medeng.dicomtool"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10301
-        versionName = "1.3.1"
+        versionCode = 10501
+        versionName = "1.5.0-alpha.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        buildConfigField("String", "GIT_BRANCH", "\"$gitBranch\"")
+        buildConfigField("String", "GIT_COMMIT_SHA", "\"$gitCommitSha\"")
+        buildConfigField("String", "BUILD_TIME", "\"$buildTimestamp\"")
+        buildConfigField("Boolean", "IS_GIT_DIRTY", "$isGitDirty")
 
         vectorDrawables {
             useSupportLibrary = true
