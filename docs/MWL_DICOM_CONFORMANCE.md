@@ -1,119 +1,64 @@
-# DICOM Conformance Statement: Modality Worklist SOP Class
+# DICOM Kit — MWL conformance notes, 1.5.0-alpha.2
 
-**Application Name:** DICOM Kit  
-**Release:** Stage 7 (v1.4.0-dev)  
-**Standard:** DICOM PS3.2, PS3.4 Annex K, PS3.7, PS3.8  
+This describes the implemented subset and measured behavior; it is not a claim of certification on all modalities. See [audit fixes and evidence](STAGE_7_AUDIT_FIXES.md).
 
----
+## Network and association
 
-## 1. SOP Classes Supported
+- MWL FIND SCU/SCP: `1.2.840.10008.5.1.4.31`. Verification: `1.2.840.10008.1.1`.
+- Implicit VR Little Endian (`1.2.840.10008.1.2`) and Explicit VR Little Endian (`1.2.840.10008.1.2.1`).
+- Default SCP AE `MWL_SCP`, port `11112`, bind `0.0.0.0`. Use different ports for simultaneous Storage/MWL SCP.
+- Wrong Called AE: A-ASSOCIATE-RJ, service-user, reason 7. Optional Calling AE whitelist: exact case-sensitive comparison, RJ reason 3. IP rejection: RJ no-reason-given. No TLS/authentication is claimed.
+- Per-association query tasks and C-CANCEL handlers scoped to Message ID. Concurrent associations have independent cancellation. A-RELEASE/A-ABORT use dcm4che transport handling; server stop closes listeners and active transport resources.
 
-DICOM Kit provides Standard Conformance to the following DICOM V3.0 SOP Classes:
+## Identifier, matching and returned attributes
 
-| SOP Class Name | SOP Class UID | SCU Role | SCP Role |
-|---|---|---|---|
-| Modality Worklist Information Model - FIND | `1.2.840.10008.5.1.4.31` | Yes | Yes |
-| Verification SOP Class | `1.2.840.10008.1.1` | Yes | Yes |
+SPS `(0040,0100)` is SQ with one Item when matching its attributes. A zero-length SQ/empty Item supports universal return-key requests. Multiple Items or a non-SQ SPS are rejected with A900.
 
----
-
-## 2. Transfer Syntaxes Supported
-
-The application supports negotiation of the following transfer syntaxes for MWL FIND and Verification:
-
-| Transfer Syntax Name | UID |
+| Key | Implemented matching |
 |---|---|
-| Explicit VR Little Endian | `1.2.840.10008.1.2.1` |
-| Implicit VR Little Endian | `1.2.840.10008.1.2` |
+| Patient Name | Case-insensitive PN components; `^` positions and `=` groups retained; wildcard `*`/`?`; no fuzzy/phonetic negotiation |
+| Patient ID | Case-sensitive Single Value |
+| Accession Number, Requested Procedure ID, SPS ID, Station Name | Case-sensitive single/wildcard matching |
+| Study Instance UID | Single Value |
+| SPS Modality, Scheduled Station AE | Case-sensitive Single Value |
+| SPS Date/Time | Single/range; when both are ranges they form one continuous date-time interval; open boundaries supported |
+| Scheduled Performing Physician Name | PN single/wildcard matching |
 
----
+Unspecified PN components do not constrain those positions; supplied components cannot shift into other positions. Values are matched using the current patient record and a consistent repository snapshot. Root Modality is accepted as an explicitly documented legacy compatibility extension. DA/TM are local values; timezone adjustment is not negotiated.
 
-## 3. MWL SCP Specification (Server)
+Unsupported optional matching keys are ignored as Annex K permits. Unsupported optional return keys are returned empty with Pending Warning FF01. The SCP supports the patient fields, accession, Study UID, requested procedure identifiers/descriptions, referring/requesting physician, admission ID and SPS fields represented in `MwlEntities.kt`. Requested unknown keys retain their VR; no clinical values are invented. It does not provide a code-based procedure database.
 
-### 3.1. Association Policies
-- **Application Entity Title:** Default `DICOMKIT_MWL` (configurable, 1-16 characters).
-- **Default TCP Port:** `11112` (configurable).
-- **Concurrent Associations:** Multi-threaded cached pool handler.
-- **Calling AE Whitelist:** Optional validation of incoming Calling AE Titles. Rejection reason: `2 (calling-AE-title-not-recognized)`.
+Patient Name/ID, Study UID, Requested Procedure ID, SPS ID, station AE, modality, date/time and the supported procedure description alternatives must be valid before an entity is sent. Stored nonconforming legacy entities are retained for correction and fail transmission rather than being silently truncated. Generated test locations respect SH length.
 
-### 3.2. C-FIND DIMSE-C Service Operation
-The MWL SCP supports incoming C-FIND requests matching on the following key attributes:
+| Status | Meaning |
+|---|---|
+| FF00 | Pending, known keys supported |
+| FF01 | Pending warning, optional return key unsupported |
+| 0000 | Matching complete |
+| FE00 | C-CANCEL processed |
+| A900 | Identifier inconsistent with MWL structure/range syntax |
+| C000 | Unable to process, including invalid stored entity or lossless charset failure |
 
-#### Matching Key Attributes Supported
+Final responses carry no Identifier. Existing in-flight Pending responses may arrive at an SCU before FE00; no new Pending is written after cancellation has been processed by the task gate.
 
-| DICOM Tag | Description | VR | Matching Type Supported |
-|---|---|---|---|
-| `(0010,0010)` | Patient's Name | PN | Single Value, Wildcard (`*`, `?`), Universal |
-| `(0010,0020)` | Patient ID | LO | Single Value, Universal |
-| `(0008,0050)` | Accession Number | SH | Single Value, Wildcard, Universal |
-| `(0040,0100)` | Scheduled Procedure Step Sequence | SQ | Sequence Matching |
-| ` > (0008,0060)` | Modality | CS | Single Value, Universal |
-| ` > (0040,0001)` | Scheduled Station AE Title | AE | Single Value, Universal |
-| ` > (0040,0002)` | Scheduled Procedure Step Start Date | DA | Single Value, Range Matching (`date1-date2`, `-date2`, `date1-`), Universal |
-| ` > (0040,0003)` | Scheduled Procedure Step Start Time | TM | Single Value, Range Matching, Universal |
-| ` > (0040,0009)` | Scheduled Procedure Step ID | SH | Single Value, Universal |
-| `(0008,0060)` | Modality (root level tolerance) | CS | Handled identically to SPS Modality for compatibility |
+## Character sets
 
-#### Return Key Attributes Supported
-The SCP populates all requested return keys if known. If an unknown return key is requested by the SCU, the attribute is returned with zero length as per PS3.4 Annex K.
+Response choices: default ASCII (UI `ISO_IR 6`, omitted `(0008,0005)`), ISO_IR 100, ISO_IR 144, ISO_IR 192, ISO 2022 IR 100, ISO 2022 IR 144 and GB18030. UTF-8 is the default. The dataset and nested strings are serialized and decoded before sending to detect replacement characters/encoding loss. Nonrepresentable text produces Failure; automatic transliteration/fallback is not performed. Specific Character Set is inherited by nested Items.
 
-Key attributes returned in Dataset:
-- `(0008,0005)` Specific Character Set
-- `(0008,0050)` Accession Number
-- `(0008,0090)` Referring Physician's Name
-- `(0010,0010)` Patient's Name
-- `(0010,0020)` Patient ID
-- `(0010,0030)` Patient's Birth Date
-- `(0010,0040)` Patient's Sex
-- `(0010,1030)` Patient's Weight
-- `(0010,2000)` Medical Alerts
-- `(0020,000D)` Study Instance UID
-- `(0032,1060)` Requested Procedure Description
-- `(0038,0010)` Admission ID
-- `(0040,1001)` Requested Procedure ID
-- `(0040,0100)` Scheduled Procedure Step Sequence:
-  - `(0008,0060)` Modality
-  - `(0040,0001)` Scheduled Station AE Title
-  - `(0040,0002)` Scheduled Procedure Step Start Date
-  - `(0040,0003)` Scheduled Procedure Step Start Time
-  - `(0040,0006)` Scheduled Performing Physician's Name
-  - `(0040,0007)` Scheduled Procedure Step Description
-  - `(0040,0009)` Scheduled Procedure Step ID
-  - `(0040,0010)` Scheduled Station Name
-  - `(0040,0011)` Scheduled Procedure Step Location
-  - `(0040,0020)` Scheduled Procedure Step Status (`SCHEDULED`)
+SCU identifiers use UTF-8 with SPS filters nested correctly. Incoming character sets are decoded by dcm4che; an absent `(0008,0005)` means the default repertoire. Tests demonstrate representative Cyrillic, Latin-1 and ASCII cases, not every character/ISO 2022 combination.
 
-### 3.3. Status Codes Returned
+## SCU outcomes and transport
 
-| Service Status | Meaning | Status Code |
-|---|---|---|
-| Success | Matching is complete - No further matches will be sent | `0x0000` |
-| Pending | Matches are continuing - Current match supplied | `0xFF00` |
-| Cancel | Matching terminated due to C-CANCEL-FIND request | `0xFE00` |
-| Failure | Out of Resources or Internal Error | `0xA700` |
+Success, remote FE00 and local interruption without FE00 remain distinct. DICOM Failure returns an error containing its final status and any partial records. Missing Status/final response or an interrupted transport cannot confirm success. Unknown attributes and sequences are retained in raw Attributes and displayed recursively with their VR/Items; binary values show size. Display depth is limited to 32.
 
----
+The profile configures local TCP connect, association accept, initial response, subsequent response/retrieve and release timeouts (1–120000 ms). Cancellation during negotiation closes the established TCP socket; cancellation of an active query sends actual C-CANCEL outside the UI thread, with a bounded wait for acknowledgement. OS DNS resolution has no separate application deadline. Executors, socket and association references are released in finally.
 
-## 4. MWL SCU Specification (Client)
+## Persistence, diagnostics and Android
 
-### 4.1. Association Policies
-- **Calling AE Title:** Default `DICOMKIT_SCU` (configurable).
-- **Association Negotiation:** SCU proposes Presentation Context #1 (`ModalityWorklistInformationModelFind`) and #3 (`Verification`) with Explicit VR Little Endian and Implicit VR Little Endian.
-- **Cancellation:** Supports issuing `C-CANCEL-FIND-RQ` during an active query stream.
+Patients and appointments are committed as one fsynced atomic JSON snapshot. Previous two-file data is read and migrates at the next successful save. Profiles use atomic replacement too. Failed writes leave committed state and memory unchanged. Export/import version 1 preserves all supported fields, timestamps and patients without appointments; import is transactional and limited to 8 MiB/depth 64.
 
-### 4.2. C-FIND Request Generation
-- Generates standard C-FIND-RQ Identifiers with nested `(0040,0100)` Scheduled Procedure Step Sequence.
-- Populates query filters (Modality, Patient ID, Patient Name with wildcards, Accession Number, Date ranges).
-- Includes all standard MWL return keys to ensure receiving rich clinical and technical attributes.
+Full local diagnostic logs may contain PHI and stay in app-private storage. The anonymized report excludes free text and clinical identifiers; PHI inclusion requires the explicit export option. A single background writer has a 256-entry queue, 2 MiB active file plus one backup; queue drops/write errors are visible in the report. The journal is diagnostic, not a lossless medical archive.
 
----
+MWL uses an unexported `connectedDevice` FGS for external devices over a network, with its required permissions; Storage retains its existing service configuration. CPU Wake Lock is renewed every minute with a two-minute expiry and released on shutdown. Wi-Fi HIGH_PERF is best effort on API 26–33; API 34+ remaps it to LOW_LATENCY and cannot guarantee background physical Wi-Fi. Network callbacks refresh IP information; the all-interface listener remains bound, but interrupted associations are not resumed/replayed automatically.
 
-## 5. Support for Extended Character Sets
-
-Supported Specific Character Sets (`0008,0005`):
-- `ISO_IR 100` (Latin Alphabet No. 1)
-- `ISO_IR 144` (Cyrillic Alphabet ISO 8859-5)
-- `ISO_IR 192` (Unicode in UTF-8)
-- `ISO 2022 IR 100`, `ISO 2022 IR 144`
-- `GB18030` (Chinese)
-- Default repertoire (ASCII)
+Android 15 emulator tests cover FGS startup, screen-off loopback, notification stop, Wake Lock release, port release and concurrent Storage independence. Physical Wi-Fi/Doze/OEM behavior, power loss, real modalities and the full character repertoire remain acceptance tests.

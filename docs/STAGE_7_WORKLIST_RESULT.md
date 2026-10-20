@@ -1,5 +1,6 @@
 # DICOM Kit — Результат этапа 7: Modality Worklist (MWL SCP + SCU)
 
+> Обновление alpha.2: исходные заявления и результаты этого документа относятся к первоначальному этапу. Фактические исправления, регрессии и ограничения описаны в [STAGE_7_AUDIT_FIXES.md](STAGE_7_AUDIT_FIXES.md); актуальное поведение — в [MWL_DICOM_CONFORMANCE.md](MWL_DICOM_CONFORMANCE.md).
 **Дата:** 20.10.2026  
 **Ветка:** `feature/stage-7-worklist-mwl`  
 **Базовый коммит:** `61dc8ee5a1f8b1bf2c1d28f88ddadb8030ce2648` (merge PR #1 в `origin/main`)  
