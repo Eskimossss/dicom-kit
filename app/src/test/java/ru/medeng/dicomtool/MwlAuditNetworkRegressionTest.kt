@@ -223,4 +223,3 @@ class MwlAuditNetworkRegressionTest {
         ServerSocket(port).close()
     }
 }
-

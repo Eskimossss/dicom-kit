@@ -9,6 +9,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.wifi.WifiManager
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.LinkProperties
+import android.net.NetworkRequest
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -62,6 +66,23 @@ class MwlScpForegroundService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
+    private var lease: MwlLockLease? = null
+    private var networkManager: ConnectivityManager? = null
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) = updateNetwork()
+        override fun onLost(network: Network) = updateNetwork()
+        override fun onLinkPropertiesChanged(network: Network, properties: LinkProperties) = updateNetwork()
+    }
+    private fun updateNetwork() {
+        main.post { if (!destroyed && !stopping) server.refreshNetworkInfo() }
+    }
+    private val renewLocks = object : Runnable {
+        override fun run() {
+            if (destroyed || stopping) return
+            try { lease?.renew() } catch (_: RuntimeException) { requestStop(); return }
+            main.postDelayed(this, MwlLockLease.RENEW_MS)
+        }
+    }
     private val worker = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -75,6 +96,8 @@ class MwlScpForegroundService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        val connectivity = getSystemService(ConnectivityManager::class.java)
+        runCatching { connectivity.registerNetworkCallback(NetworkRequest.Builder().build(), networkCallback); networkManager = connectivity }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -87,7 +110,7 @@ class MwlScpForegroundService : Service() {
                 try {
                     val notification = buildForegroundNotification(ae, port, "Запуск сервера MWL SCP…")
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+                        startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
                     } else {
                         startForeground(NOTIFICATION_ID, notification)
                     }
@@ -154,6 +177,8 @@ class MwlScpForegroundService : Service() {
     override fun onDestroy() {
         destroyed = true
         requestStop()
+        networkManager?.let { runCatching { it.unregisterNetworkCallback(networkCallback) } }
+        networkManager = null
         scope.cancel()
         releaseLocks()
         foreground = false
@@ -164,44 +189,27 @@ class MwlScpForegroundService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    @Suppress("DEPRECATION")
     private fun acquireLocks() {
+        if (lease != null) return
         try {
-            if (wakeLock == null) {
-                val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
-                wakeLock = pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DICOMTool:MwlScpWakeLock")?.apply {
-                    setReferenceCounted(false)
-                    acquire(4 * 60 * 60 * 1000L)
-                }
-            }
-        } catch (_: Exception) {}
-
-        try {
-            if (wifiLock == null) {
-                val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-                val lockMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    WifiManager.WIFI_MODE_FULL_LOW_LATENCY
-                } else {
-                    @Suppress("DEPRECATION")
-                    WifiManager.WIFI_MODE_FULL_HIGH_PERF
-                }
-                wifiLock = wm?.createWifiLock(lockMode, "DICOMTool:MwlScpWifiLock")?.apply {
-                    setReferenceCounted(false)
-                    acquire()
-                }
-            }
-        } catch (_: Exception) {}
+            val pm = getSystemService(PowerManager::class.java)
+            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            val wake = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DICOMTool:MwlScpWakeLock").apply { setReferenceCounted(false) }
+            // API 26-33: HIGH_PERF supports screen-off. API 34+ remaps it to LOW_LATENCY;
+            // Android provides no equivalent background Wi-Fi guarantee. See acceptance limits.
+            val wifi = wm?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "DICOMTool:MwlScpWifiLock")?.apply { setReferenceCounted(false) }
+            wakeLock = wake; wifiLock = wifi
+            val owned = MwlLockLease({ wake.acquire(it) }, { if (wake.isHeld) wake.release() }, { wifi?.acquire(); Unit }, { if (wifi?.isHeld == true) wifi.release() })
+            lease = owned
+            owned.start()
+            main.postDelayed(renewLocks, MwlLockLease.RENEW_MS)
+        } catch (_: RuntimeException) { releaseLocks(); requestStop() }
     }
-
     private fun releaseLocks() {
-        try {
-            wakeLock?.let { if (it.isHeld) it.release() }
-            wakeLock = null
-        } catch (_: Exception) {}
-
-        try {
-            wifiLock?.let { if (it.isHeld) it.release() }
-            wifiLock = null
-        } catch (_: Exception) {}
+        main.removeCallbacks(renewLocks)
+        runCatching { lease?.close() }
+        lease = null; wakeLock = null; wifiLock = null
     }
 
     private fun createNotificationChannel() {
