@@ -4,6 +4,9 @@ import java.util.Locale
 import java.util.TimeZone
 import java.text.SimpleDateFormat
 import java.util.concurrent.TimeUnit
+import java.security.KeyStore
+import java.security.MessageDigest
+import groovy.json.JsonOutput
 
 plugins {
     alias(libs.plugins.android.application)
@@ -96,6 +99,7 @@ android {
         }
         release {
             isMinifyEnabled = false
+            isShrinkResources = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -129,6 +133,63 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1,DEPENDENCIES,LICENSE*,NOTICE*}"
         }
+    }
+}
+
+// Public fingerprint verified against the preserved Dicom-Kit-v1.3.1.apk.
+// A different key requires an explicit signing/migration decision, never an automatic fallback.
+val releaseCertificateSha256 = "4690b671b00bdda65c9740a27dbd2250dc8ccbdd95797e112c3c4763aa6c1a8d"
+listOf("debug", "release").forEach { variant ->
+    val capitalized = variant.replaceFirstChar { it.uppercaseChar() }
+    val assetDirectory = layout.buildDirectory.dir("generated/apkMetadata/$variant/assets")
+    android.sourceSets.getByName(variant).assets.srcDir(assetDirectory)
+    val metadataTask = tasks.register("generate${capitalized}ApkMetadata") {
+        outputs.dir(assetDirectory)
+        outputs.upToDateWhen { false }
+        doLast {
+            val signing = android.signingConfigs.getByName(variant)
+            val certificate = try {
+                val store = signing.storeFile ?: error("missing store")
+                require(store.isFile && !signing.storePassword.isNullOrBlank() &&
+                    !signing.keyAlias.isNullOrBlank() && !signing.keyPassword.isNullOrBlank())
+                val keyStore = KeyStore.getInstance(store, signing.storePassword!!.toCharArray())
+                require(keyStore.getKey(signing.keyAlias, signing.keyPassword!!.toCharArray()) != null)
+                val cert = keyStore.getCertificate(signing.keyAlias) ?: error("missing certificate")
+                val digest = MessageDigest.getInstance("SHA-256").digest(cert.encoded)
+                    .joinToString("") { "%02x".format(it) }
+                if (variant == "release") {
+                    require(digest == releaseCertificateSha256)
+                } else {
+                    require(digest != releaseCertificateSha256)
+                }
+                digest
+            } catch (_: Exception) {
+                throw GradleException("$capitalized signing unavailable or certificate mismatch. Check ignored keystore.properties / signing environment and existing key. No key is created or replaced; expected release certificate: $releaseCertificateSha256")
+            }
+            val metadata = linkedMapOf(
+                "applicationId" to android.defaultConfig.applicationId,
+                "versionName" to android.defaultConfig.versionName,
+                "versionCode" to android.defaultConfig.versionCode,
+                "buildType" to variant,
+                "gitBranch" to gitBranch,
+                "gitHead" to getGitCommandOutput("rev-parse", "HEAD"),
+                "gitCommit" to gitCommitSha,
+                "gitDirty" to isGitDirty,
+                "buildTime" to buildTimestamp,
+                "certificateSha256" to certificate
+            )
+            val json = JsonOutput.prettyPrint(JsonOutput.toJson(metadata))
+            val directory = assetDirectory.get().asFile.apply { mkdirs() }
+            directory.resolve("dicom-kit-build.json").writeText(json)
+        }
+    }
+    // AGP creates the standard debug keystore in validateSigningDebug on a fresh machine.
+    // That task already depends on preDebugBuild, so avoid a dependency cycle here.
+    if (variant == "debug") {
+        metadataTask.configure { dependsOn("validateSigningDebug") }
+    }
+    tasks.matching { it.name == if (variant == "debug") "mergeDebugAssets" else "preReleaseBuild" }.configureEach {
+        dependsOn(metadataTask)
     }
 }
 
