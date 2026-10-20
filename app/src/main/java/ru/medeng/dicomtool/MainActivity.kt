@@ -30,11 +30,12 @@ class MainActivity : ComponentActivity() {
                 withContext(Dispatchers.IO) {
                     // SharedPreferences getters may wait for XML disk reads on a cold process.
                     // Warm them before creating the UI's ViewModel; no SAF query runs on main.
-                    listOf("dicom_storage_settings", "scp_configuration", "dicom_scu_settings").forEach {
+                    listOf("dicom_storage_settings", "scp_configuration", "dicom_scu_settings", "mwl_scp_config").forEach {
                         app.getSharedPreferences(it, MODE_PRIVATE).all
                     }
                     DicomRuntimeRegistry.getArchiveOperations(app)
                     DicomRuntimeRegistry.getScuClient(app)
+                    ru.medeng.dicomtool.mwl.MwlRuntimeRegistry.getMwlRepository(app)
                 }
                 ready.value = true
             } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }

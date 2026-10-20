@@ -22,6 +22,8 @@ object DicomSessionManager {
 
     private val scuCounter = AtomicInteger(0)
     private val scpCounter = AtomicInteger(0)
+    private val mwlScuCounter = AtomicInteger(0)
+    private val mwlScpCounter = AtomicInteger(0)
 
     private fun generateAppRunId(): String {
         val timePart = java.lang.Long.toString(System.currentTimeMillis(), 36)
@@ -63,6 +65,22 @@ object DicomSessionManager {
         )
     }
 
+    fun nextMwlScuSession(): SessionIdentity {
+        val num = mwlScuCounter.incrementAndGet()
+        return SessionIdentity(
+            displayLabel = "MWL SCU-$num",
+            sessionUid = "MWL-SCU-$appRunId-$num"
+        )
+    }
+
+    fun nextMwlScpSession(): SessionIdentity {
+        val num = mwlScpCounter.incrementAndGet()
+        return SessionIdentity(
+            displayLabel = "MWL SCP-$num",
+            sessionUid = "MWL-SCP-$appRunId-$num"
+        )
+    }
+
     /**
      * Генерирует идентификатор сеанса для TCP-события входящего подключения (до согласования ассоциации).
      */
@@ -77,5 +95,7 @@ object DicomSessionManager {
     internal fun resetForTesting() {
         scuCounter.set(0)
         scpCounter.set(0)
+        mwlScuCounter.set(0)
+        mwlScpCounter.set(0)
     }
 }

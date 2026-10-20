@@ -15,6 +15,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.FormatListBulleted
 import androidx.compose.material.icons.automirrored.outlined.ListAlt
 import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.Home
@@ -74,7 +75,8 @@ enum class MainBottomTab(
     RECEIVER("Приёмник", Icons.Outlined.Home),
     RECEIVED("Принятые", Icons.Outlined.Inventory2),
     SEND("Отправка", Icons.AutoMirrored.Outlined.Send),
-    TAGS("Теги и просмотр", Icons.Outlined.Sell),
+    WORKLIST("Worklist", Icons.AutoMirrored.Outlined.FormatListBulleted),
+    TAGS("Теги", Icons.Outlined.Sell),
     LOG("Журнал", Icons.AutoMirrored.Outlined.ListAlt)
 }
 
@@ -206,6 +208,7 @@ fun DicomToolAppRoot(
                         MainBottomTab.RECEIVER -> "DICOM Приёмник (SCP)"
                         MainBottomTab.RECEIVED -> "Принятые исследования"
                         MainBottomTab.SEND -> "Отправка DICOM (SCU)"
+                        MainBottomTab.WORKLIST -> "Modality Worklist (MWL)"
                         MainBottomTab.TAGS -> "Теги и просмотр"
                         MainBottomTab.LOG -> "Журнал DICOM"
                     }
@@ -243,10 +246,10 @@ fun DicomToolAppRoot(
                                     label = {
                                         Text(
                                             text = tab.titleRu,
-                                            fontSize = if (isExpandedWidth) 12.sp else if (tab == MainBottomTab.TAGS) 9.sp else 10.sp,
+                                            fontSize = if (isExpandedWidth) 12.sp else 9.5.sp,
                                             lineHeight = 11.sp,
                                             textAlign = TextAlign.Center,
-                                            maxLines = if (isExpandedWidth) 1 else 2,
+                                            maxLines = 1,
                                             softWrap = true,
                                             overflow = TextOverflow.Ellipsis,
                                             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
@@ -420,6 +423,12 @@ fun DicomToolAppRoot(
                                     onOpenGeneratorSubScreen = {
                                         activeSubScreen = ActiveSubScreen.SCU_IMAGE_GENERATOR
                                     }
+                                )
+                            }
+
+                            MainBottomTab.WORKLIST -> {
+                                ru.medeng.dicomtool.mwl.ui.WorklistMainScreen(
+                                    isExpandedWidth = isExpandedWidth
                                 )
                             }
 
