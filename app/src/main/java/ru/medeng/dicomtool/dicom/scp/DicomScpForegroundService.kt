@@ -12,6 +12,11 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.Handler
+import android.os.Looper
+import kotlinx.coroutines.*
+import java.util.concurrent.Executors
+import ru.medeng.dicomtool.domain.model.ScpServerStatus
 import androidx.core.app.NotificationCompat
 import ru.medeng.dicomtool.MainActivity
 import ru.medeng.dicomtool.dicom.DicomRuntimeRegistry
@@ -40,10 +45,11 @@ class DicomScpForegroundService : Service() {
                 putExtra(EXTRA_AE_TITLE, aeTitle)
                 putExtra(EXTRA_TCP_PORT, port)
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
                 context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            } catch (e: RuntimeException) {
+                DicomRuntimeRegistry.getScpServer(context).reportServiceError(
+                    "Android запретил запуск SCP: ${e.message}. Откройте приложение и повторите запуск вручную.")
             }
         }
 
@@ -51,7 +57,9 @@ class DicomScpForegroundService : Service() {
             val intent = Intent(context, DicomScpForegroundService::class.java).apply {
                 action = ACTION_STOP_SCP
             }
-            context.startService(intent)
+            try { context.startService(intent) } catch (e: RuntimeException) {
+                DicomRuntimeRegistry.getScpServer(context).reportServiceError("Не удалось запросить остановку SCP: ${e.message}")
+            }
         }
     }
 
@@ -63,48 +71,109 @@ class DicomScpForegroundService : Service() {
         createNotificationChannel()
     }
 
+    private val worker = Executors.newSingleThreadExecutor()
+    private val main = Handler(Looper.getMainLooper())
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    @Volatile private var stopping = false
+    @Volatile private var destroyed = false
+    private var foreground = false
+    private val sessionLimit = Runnable { requestStop("Истёк 4-часовой сеанс SCP. Запустите приём вручную при необходимости.") }
+    private val server by lazy { DicomRuntimeRegistry.getScpServer(applicationContext) }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START_SCP -> {
-                val aeTitle = intent.getStringExtra(EXTRA_AE_TITLE) ?: "ANDROID_PACS"
+                if (stopping || server.state.value.status == ScpServerStatus.RUNNING) return START_NOT_STICKY
+                val ae = intent.getStringExtra(EXTRA_AE_TITLE) ?: "ANDROID_PACS"
                 val port = intent.getIntExtra(EXTRA_TCP_PORT, 11112)
-                val notification = buildForegroundNotification(aeTitle, port)
-
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    startForeground(
-                        NOTIFICATION_ID,
-                        notification,
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-                    )
-                } else {
-                    startForeground(NOTIFICATION_ID, notification)
+                try {
+                    val notification = buildForegroundNotification(ae, port, "Запуск SCP…")
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+                        startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+                    else startForeground(NOTIFICATION_ID, notification)
+                    foreground = true
+                } catch (e: RuntimeException) {
+                    server.reportServiceError("Android запретил Foreground Service: ${e.message}. Вернитесь в приложение.")
+                    requestStop(null)
+                    return START_NOT_STICKY
                 }
-
-                acquireLocks()
-                val scpServer = DicomRuntimeRegistry.getScpServer(applicationContext)
-                val result = scpServer.startServer(aeTitle, port)
-                if (result.isFailure) {
-                    releaseLocks()
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    stopSelf()
+                if (observer == null) observer = scope.launch {
+                    server.state.collect { state ->
+                        if (!stopping && state.status == ScpServerStatus.RUNNING) {
+                            (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).notify(NOTIFICATION_ID,
+                                buildForegroundNotification(state.callingAeTitle, state.tcpPort, "SCP слушает порт; сеанс до 4 ч"))
+                        }
+                    }
+                }
+                worker.execute {
+                    if (stopping || destroyed) return@execute
+                    val result = server.startServer(ae, port)
+                    main.post {
+                        if (result.isFailure) requestStop(null)
+                        else if (!stopping && !destroyed) {
+                            try {
+                                acquireLocks()
+                                main.removeCallbacks(sessionLimit)
+                                main.postDelayed(sessionLimit, 4 * 60 * 60 * 1000L)
+                            } catch (e: RuntimeException) {
+                                requestStop("Не удалось удержать блокировки SCP: ${e.message}")
+                            }
+                        }
+                    }
                 }
             }
-
-            ACTION_STOP_SCP -> {
-                val scpServer = DicomRuntimeRegistry.getScpServer(applicationContext)
-                scpServer.stopServer()
-                releaseLocks()
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
-            }
+            ACTION_STOP_SCP -> requestStop(null)
+            else -> requestStop(null) // No automatic resurrection after process death.
         }
         return START_NOT_STICKY
     }
 
-    override fun onDestroy() {
-        val scpServer = DicomRuntimeRegistry.getScpServer(applicationContext)
-        scpServer.stopServer()
+    private var observer: Job? = null
+
+    private fun requestStop(reason: String?) {
+        if (reason != null) server.reportServiceError(reason)
+        if (stopping) return
+        stopping = true
+        server.setServiceStopping(true)
+        main.removeCallbacks(sessionLimit)
+        worker.execute {
+            server.stopServer()
+            main.post {
+                releaseLocks()
+                if (!destroyed && foreground && server.state.value.status == ScpServerStatus.STOPPING) (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).notify(NOTIFICATION_ID,
+                    buildForegroundNotification(server.state.value.callingAeTitle, server.state.value.tcpPort, "SCP остановлен; ожидание завершения записи"))
+            }
+            // A SAF operation may ignore interruption. Keep STOPPING until it actually returns.
+            while (server.state.value.status == ScpServerStatus.STOPPING) Thread.sleep(100)
+            main.post {
+                releaseLocks()
+                foreground = false
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
+        }
+    }
+
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        server.requestNetworkStop()
+        requestStop("Android остановил dataSync SCP по лимиту времени. Проверьте результаты незавершённых передач; откройте приложение для ручного запуска.")
         releaseLocks()
+        foreground = false
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf() // Android requires this promptly; network cleanup continues in the process registry.
+    }
+
+    override fun onDestroy() {
+        destroyed = true
+        server.requestNetworkStop()
+        requestStop(null)
+        main.removeCallbacks(sessionLimit)
+        scope.cancel()
+        releaseLocks()
+        foreground = false
+        (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).cancel(NOTIFICATION_ID)
+        worker.shutdown() // queued cleanup is retained
+        server.setServiceStopping(false)
         super.onDestroy()
     }
 
@@ -116,11 +185,10 @@ class DicomScpForegroundService : Service() {
                 val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
                 wakeLock = pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DICOMTool:ScpWakeLock")?.apply {
                     setReferenceCounted(false)
-                    acquire(4 * 60 * 60 * 1000L) // до 4 часов непрерывного приёма
+                    acquire(4 * 60 * 60 * 1000L + 30_000L) // до 4 часов непрерывного приёма
                 }
             }
-        } catch (_: Exception) {
-        }
+        } catch (e: RuntimeException) { throw e }
 
         try {
             if (wifiLock == null) {
@@ -136,8 +204,7 @@ class DicomScpForegroundService : Service() {
                     acquire()
                 }
             }
-        } catch (_: Exception) {
-        }
+        } catch (e: RuntimeException) { throw e }
     }
 
     private fun releaseLocks() {
@@ -159,7 +226,7 @@ class DicomScpForegroundService : Service() {
     }
 
     private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        run {
             val channel = NotificationChannel(
                 NOTIFICATION_CHANNEL_ID,
                 "DICOM Storage SCP Сервер",
@@ -172,7 +239,7 @@ class DicomScpForegroundService : Service() {
         }
     }
 
-    private fun buildForegroundNotification(aeTitle: String, port: Int): Notification {
+    private fun buildForegroundNotification(aeTitle: String, port: Int, text: String): Notification {
         val openIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
@@ -195,8 +262,8 @@ class DicomScpForegroundService : Service() {
 
         return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_upload_done)
-            .setContentTitle("DICOM SCP запущен ($aeTitle:$port)")
-            .setContentText("Ожидание входящих соединений C-ECHO и C-STORE")
+            .setContentTitle("DICOM SCP ($aeTitle:$port)")
+            .setContentText(text)
             .setOngoing(true)
             .setContentIntent(pendingOpen)
             .addAction(android.R.drawable.ic_media_pause, "Остановить", pendingStop)

@@ -60,7 +60,8 @@ object DicomFileReader {
     fun readFromUri(
         context: Context,
         uri: Uri,
-        forcedCharset: String? = null
+        forcedCharset: String? = null,
+        checkCancelled: () -> Unit = {}
     ): DicomFileParseResult {
         val (displayName, sizeBytes) = queryUriMetadata(context.contentResolver, uri)
         val stream = context.contentResolver.openInputStream(uri)
@@ -71,7 +72,7 @@ object DicomFileReader {
                 inputStream = rawIn,
                 fileName = displayName,
                 fileSizeBytes = sizeBytes,
-                forcedCharset = forcedCharset
+                forcedCharset = forcedCharset, checkCancelled = checkCancelled
             )
         }
     }
@@ -102,9 +103,14 @@ object DicomFileReader {
         inputStream: InputStream,
         fileName: String = "image.dcm",
         fileSizeBytes: Long = 0L,
-        forcedCharset: String? = null
+        forcedCharset: String? = null,
+        checkCancelled: () -> Unit = {}
     ): DicomFileParseResult {
-        val bufferedIn = if (inputStream is BufferedInputStream) inputStream else BufferedInputStream(inputStream, BUFFER_SIZE)
+        val bufferedIn = BufferedInputStream(object : java.io.FilterInputStream(inputStream) {
+            override fun read(): Int { checkCancelled(); return super.read() }
+            override fun read(b: ByteArray, off: Int, len: Int): Int { checkCancelled(); return `in`.read(b, off, len) }
+            override fun skip(n: Long): Long { checkCancelled(); return super.skip(n) }
+        }, BUFFER_SIZE)
         bufferedIn.mark(BUFFER_SIZE)
 
         // 1. Проверяем наличие маркера DICM на смещении 128
@@ -131,7 +137,7 @@ object DicomFileReader {
                 fileName = fileName,
                 fileSizeBytes = fileSizeBytes,
                 hasDicm = true,
-                forcedCharset = forcedCharset
+                forcedCharset = forcedCharset, checkCancelled = checkCancelled
             )
         } else {
             // Файл без маркера DICM (ACR-NEMA или raw stream без 128-байтного preamble)
@@ -140,7 +146,7 @@ object DicomFileReader {
                 headerSample = preambleBuffer.copyOf(readHeaderBytes),
                 fileName = fileName,
                 fileSizeBytes = fileSizeBytes,
-                forcedCharset = forcedCharset
+                forcedCharset = forcedCharset, checkCancelled = checkCancelled
             )
         }
     }
@@ -150,15 +156,22 @@ object DicomFileReader {
         fileName: String,
         fileSizeBytes: Long,
         hasDicm: Boolean,
-        forcedCharset: String?
+        forcedCharset: String?,
+        checkCancelled: () -> Unit
     ): DicomFileParseResult {
         DicomInputStream(bufferedIn).use { dis ->
             dis.includeBulkData = DicomInputStream.IncludeBulkData.NO
+            BoundedDicomRead.install(dis, checkCancelled)
             val fmi: Attributes? = dis.readFileMetaInformation()
             val dataset: Attributes = dis.readDatasetUntilPixelData()
             val pixelDataPresent = dis.tag() == Tag.PixelData
             val pixelDataVr = if (pixelDataPresent) dis.vr()?.name ?: "OW" else null
-            val pixelDataLength = if (pixelDataPresent) dis.unsignedLength() else -1L
+            val pixelDataLength = if (pixelDataPresent && dis.length() != -1) dis.unsignedLength() else -1L
+            if (pixelDataPresent) {
+                dis.readValue(dis, dataset) // Skip Pixel Data, retain tags following it.
+                dis.readAttributes(dataset, -1L, -1) // Keep the same charset scope for post-Pixel attributes.
+                dataset.remove(Tag.PixelData) // A single explicit descriptor is added below, not a null placeholder.
+            }
 
             return buildParseResult(
                 fmi = fmi,
@@ -180,7 +193,8 @@ object DicomFileReader {
         headerSample: ByteArray,
         fileName: String,
         fileSizeBytes: Long,
-        forcedCharset: String?
+        forcedCharset: String?,
+        checkCancelled: () -> Unit
     ): DicomFileParseResult {
         // Определяем синтаксис (Explicit VR Little Endian vs Implicit VR Little Endian)
         val isExplicitVR = isExplicitVRSample(headerSample)
@@ -189,11 +203,13 @@ object DicomFileReader {
         return try {
             DicomInputStream(bufferedIn, guessedSyntax).use { dis ->
                 dis.includeBulkData = DicomInputStream.IncludeBulkData.NO
+                BoundedDicomRead.install(dis, checkCancelled)
                 val fmi: Attributes? = dis.readFileMetaInformation()
                 val dataset: Attributes = dis.readDatasetUntilPixelData()
                 val pixelDataPresent = dis.tag() == Tag.PixelData
                 val pixelDataVr = if (pixelDataPresent) dis.vr()?.name ?: "OW" else null
-                val pixelDataLength = if (pixelDataPresent) dis.unsignedLength() else -1L
+                val pixelDataLength = if (pixelDataPresent && dis.length() != -1) dis.unsignedLength() else -1L
+                if (pixelDataPresent) { dis.readValue(dis, dataset); dis.readAttributes(dataset, -1L, -1); dataset.remove(Tag.PixelData) }
 
                 buildParseResult(
                     fmi = fmi,
@@ -209,33 +225,8 @@ object DicomFileReader {
                 )
             }
         } catch (e: Exception) {
-            // Попробуем альтернативный ImplicitVRLittleEndian
-            if (isExplicitVR) {
-                bufferedIn.reset()
-                DicomInputStream(bufferedIn, UID.ImplicitVRLittleEndian).use { dis ->
-                    dis.includeBulkData = DicomInputStream.IncludeBulkData.NO
-                    val fmi: Attributes? = dis.readFileMetaInformation()
-                    val dataset: Attributes = dis.readDatasetUntilPixelData()
-                    val pixelDataPresent = dis.tag() == Tag.PixelData
-                    val pixelDataVr = if (pixelDataPresent) dis.vr()?.name ?: "OW" else null
-                    val pixelDataLength = if (pixelDataPresent) dis.unsignedLength() else -1L
-
-                    buildParseResult(
-                        fmi = fmi,
-                        dataset = dataset,
-                        dis = dis,
-                        fileName = fileName,
-                        fileSizeBytes = fileSizeBytes,
-                        hasDicm = false,
-                        pixelDataPresent = pixelDataPresent,
-                        pixelDataVr = pixelDataVr,
-                        pixelDataLength = pixelDataLength,
-                        forcedCharset = forcedCharset
-                    )
-                }
-            } else {
-                throw e
-            }
+            // Do not retry a consumed/closed stream or reinterpret malformed explicit VR as implicit.
+            throw e
         }
     }
 
@@ -426,9 +417,8 @@ object DicomFileReader {
                             )
                         )
                         sbValue.append("\n$indent[Элемент #${itemIdx + 1}]")
-                        for (subEntry in itemTags) {
-                            sbValue.append("\n$indent  ${subEntry.tagHex} [${subEntry.vr}] ${subEntry.name} = ${subEntry.value}")
-                        }
+                        // The full values live in the tree; do not duplicate nested strings at every level.
+                        if (sbValue.length < 512) sbValue.append(": ${itemTags.size} тегов (раскройте Item)")
                     }
                 }
 
@@ -485,6 +475,11 @@ object DicomFileReader {
         charsetTerms: List<String>,
         forcedCharset: String?
     ): Triple<String, Boolean, Long> {
+        if (vr in setOf(VR.OB, VR.OW, VR.UN, VR.OF, VR.OD, VR.OL, VR.OV)) {
+            val bytes = runCatching { attrs.getBytes(tag) }.getOrNull() ?: return Triple("Бинарные данные не загружены", true, 0)
+            val hex = bytes.take(32).joinToString(" ") { "%02X".format(it) }
+            return Triple("$hex${if (bytes.size > 32) " ..." else ""} (${bytes.size} байт)", true, bytes.size.toLong())
+        }
         // 1. Текстовые поля с учётом кодировок
         if (DicomCharsetDecoder.isCharsetAffectedVr(vr)) {
             val rawBytes = runCatching { attrs.getBytes(tag) }.getOrNull()

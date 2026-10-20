@@ -116,12 +116,12 @@ import java.util.Locale
 fun DicomTagsBrowserComponent(
     tags: List<DicomTagEntry>,
     searchQuery: String,
+    modifier: Modifier = Modifier,
     encodingWarning: String? = null,
     currentEncodingOverride: DicomEncodingOverride = DicomEncodingOverride.AUTO,
     showEncodingSelector: Boolean = false,
     onSearchQueryChange: (String) -> Unit,
-    onEncodingOverrideChange: ((DicomEncodingOverride) -> Unit)? = null,
-    modifier: Modifier = Modifier
+    onEncodingOverrideChange: ((DicomEncodingOverride) -> Unit)? = null
 ) {
     var onlyFilled by rememberSaveable { mutableStateOf(false) }
     var selectedTagForDetail by remember { mutableStateOf<DicomTagEntry?>(null) }
@@ -137,6 +137,7 @@ fun DicomTagsBrowserComponent(
 
     // Состояние раскрытых элементов SQ: ключ = "${tagHex}_item_${itemIndex}"
     val expandedSqItems = remember { mutableStateMapOf<String, Boolean>() }
+    LaunchedEffect(tags) { selectedTagForDetail = null; expandedSqItems.clear() }
 
     // Фильтрация тегов с поддержкой поиска по вложенным SQ
     val filteredTags by remember(tags, searchQuery, onlyFilled) {
@@ -159,34 +160,7 @@ fun DicomTagsBrowserComponent(
     ) {
         // 1. Предупреждение о кодировке (если обнаружено несоответствие 0008,0005)
         if (!encodingWarning.isNullOrBlank()) {
-            Surface(
-                color = WarningAmberLight,
-                border = BorderStroke(0.8.dp, WarningAmber),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 14.dp, vertical = 4.dp),
-                shape = RoundedCornerShape(8.dp)
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.WarningAmber,
-                        contentDescription = null,
-                        tint = WarningAmber,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = encodingWarning,
-                        fontSize = 11.sp,
-                        lineHeight = 15.sp,
-                        color = TextPrimaryDark,
-                        softWrap = true
-                    )
-                }
-            }
+            ru.medeng.dicomtool.ui.components.AppNotice("charset-tags:${tags.hashCode()}:${currentEncodingOverride.name}", encodingWarning)
         }
 
         // 2. Раскрытая строка поиска (если развернута)
@@ -916,7 +890,7 @@ private fun copyToClipboard(context: Context, label: String, text: String) {
 /**
  * Фильтрует плоские и вложенные теги по поисковой строке и признаку заполненности.
  */
-private fun filterTagsHierarchy(
+internal fun filterTagsHierarchy(
     tags: List<DicomTagEntry>,
     query: String,
     onlyFilled: Boolean
@@ -933,7 +907,7 @@ private fun filterTagsHierarchy(
             val filteredItems = tag.sequenceItems.mapNotNull { item ->
                 val matchingSubTags = filterTagsHierarchy(item.tags, query, onlyFilled)
                 if (matchesSelf || matchingSubTags.isNotEmpty()) {
-                    item.copy(tags = if (cleanQuery.isBlank() && !onlyFilled) item.tags else matchingSubTags)
+                    item.copy(tags = if (matchesSelf && !onlyFilled) item.tags else matchingSubTags)
                 } else null
             }
 
@@ -955,9 +929,9 @@ private fun matchesSearch(tag: DicomTagEntry, cleanQuery: String): Boolean {
 
     if (cleanHex.contains(cleanQuery) || cleanHexWithComma.contains(cleanQuery)) return true
     if (tag.vr.uppercase(Locale.ROOT).contains(cleanQuery)) return true
-    if (tag.name.uppercase(Locale.ROOT).contains(cleanQuery)) return true
-    if (tag.nameRu?.uppercase(Locale.ROOT)?.contains(cleanQuery) == true) return true
-    if (tag.value.uppercase(Locale.ROOT).contains(cleanQuery)) return true
+    if (tag.name.uppercase(Locale.ROOT).replace(" ", "").contains(cleanQuery)) return true
+    if (tag.nameRu?.uppercase(Locale.ROOT)?.replace(" ", "")?.contains(cleanQuery) == true) return true
+    if (tag.value.uppercase(Locale.ROOT).replace(" ", "").contains(cleanQuery)) return true
 
     return false
 }

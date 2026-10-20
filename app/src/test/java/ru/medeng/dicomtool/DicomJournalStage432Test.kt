@@ -156,7 +156,7 @@ class DicomJournalStage432Test {
         assertEquals(1, summaries.size)
         val s = summaries.first()
 
-        assertEquals(SessionOutcomeStatus.FAILURE, s.status)
+        assertEquals(SessionOutcomeStatus.UNKNOWN, s.status)
         assertEquals("Не получено подтверждение отправки", s.statusTitle)
         assertEquals("C-STORE-RSP не получен от PACS", s.statusSubtitle)
         assertFalse("Не должно утверждаться, что PACS отклонил файл", s.statusTitle.contains("отклонил"))
@@ -365,7 +365,7 @@ class DicomJournalStage432Test {
         val sanitizedText = DicomLogExportUtils.formatSingleEvent(entry, sanitizePhi = true)
         assertFalse("Обезличенный экспорт НЕ должен содержать ФИО", sanitizedText.contains("Иванов И.И."))
         assertFalse("Обезличенный экспорт НЕ должен содержать 19800512", sanitizedText.contains("19800512"))
-        assertTrue("Должна присутствовать маска анонимизации", sanitizedText.contains("ANONYMIZED") || sanitizedText.contains("********"))
+        assertTrue("Безопасная сводка использует закрытую схему", sanitizedText.contains("только разрешённые поля"))
     }
 
     @Test

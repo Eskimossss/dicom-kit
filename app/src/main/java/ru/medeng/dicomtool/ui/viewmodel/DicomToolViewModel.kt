@@ -7,7 +7,11 @@ import androidx.compose.ui.geometry.Offset
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -109,6 +113,7 @@ sealed class DicomViewerRenderState {
 class DicomToolViewModel(application: Application) : AndroidViewModel(application) {
 
     private val appContext = application.applicationContext
+    private val scuLeaseOwner = java.util.UUID.randomUUID().toString()
     private val engineVerifier = Dcm4cheEngineVerifier()
     private val studyRepository = DicomRuntimeRegistry.getStudyRepository(appContext)
     private val technicalLogger = DicomRuntimeRegistry.getTechnicalLogger(appContext)
@@ -118,7 +123,48 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     // Одноэлементный кэш декодированного кадра (исключает утечки памяти и повторное чтение 18 МБ файла при регулировке WW/WL)
     private val frameCache = SingleFrameDecodeCache()
     private var renderJob: Job? = null
+    // Main-thread conflation: allow the current bitmap to finish, keep only the latest pending controls.
+    private var renderTarget: Pair<String, Int>? = null
+    private var pendingRender = false
+    private var pendingResetWindow = false
     private var lastLoadedFilePath: String? = null
+    private var lastLoadedFrameIndex: Int? = null
+    private var preferredWindow: Pair<Double, Double>? = null // Preserve fractional DICOM defaults/presets through invert and redraw.
+    private val renderRequests = ru.medeng.dicomtool.domain.model.LatestViewerRequest()
+    private val metadataRequests = ru.medeng.dicomtool.domain.model.LatestViewerRequest()
+    private val viewerWorkMutex = kotlinx.coroutines.sync.Mutex()
+    private var externalLoadJob: Job? = null
+    private var receivedTagJob: Job? = null
+    private val receivedTagRequests = ru.medeng.dicomtool.domain.model.LatestViewerRequest()
+    private var receivedTagPath: String? = null
+    private val _receivedTags = MutableStateFlow<List<DicomTagEntry>>(emptyList())
+    val receivedTags = _receivedTags.asStateFlow()
+    private val _viewerSource = MutableStateFlow<ru.medeng.dicomtool.domain.model.ViewerSource>(ru.medeng.dicomtool.domain.model.ViewerSource.None)
+    val viewerSource = _viewerSource.asStateFlow()
+
+    private fun changeViewerSource(source: ru.medeng.dicomtool.domain.model.ViewerSource) {
+        if (_viewerSource.value == source) return
+        renderRequests.next(); renderJob?.cancel(); frameCache.clear()
+        renderTarget = null; pendingRender = false
+        receivedTagRequests.next(); receivedTagJob?.cancel(); receivedTagPath = null; _receivedTags.value = emptyList()
+        _selectedTagForDetail.value = null
+        _viewerSource.value = source
+        _viewerRenderState.value = DicomViewerRenderState.Idle
+        _viewerCurrentFrame.value = 1; lastLoadedFilePath = null; lastLoadedFrameIndex = null
+        preferredWindow = null
+        _viewerZoom.value = 1f; _viewerPan.value = Offset.Zero; _viewerInverted.value = false
+        _viewerActiveVoiLutIndex.value = null
+    }
+    fun ensureReceivedViewer() {
+        val study = getSelectedStudyOrDefault() ?: return
+        changeViewerSource(ru.medeng.dicomtool.domain.model.ViewerSource.Received(study.studyInstanceUid))
+        triggerFrameDecodeAndRender()
+    }
+    fun ensureExternalViewer() {
+        changeViewerSource(_selectedExternalFileUri.value?.let { ru.medeng.dicomtool.domain.model.ViewerSource.External(it.toString()) }
+            ?: ru.medeng.dicomtool.domain.model.ViewerSource.None)
+        triggerFrameDecodeAndRender()
+    }
 
     // Результат проверки инициализации стека dcm4che3
     private val _dcm4cheReport = MutableStateFlow(engineVerifier.verifyDcm4cheStackCompatibility())
@@ -136,30 +182,18 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
 
     // Состояние раздела 2: Принятые исследования из реального внутреннего хранилища
     val studies: StateFlow<List<DicomStudyItem>> = studyRepository.studiesFlow
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), studyRepository.studiesFlow.value)
 
     val storageManager: DicomStorageManager? = (studyRepository as? ru.medeng.dicomtool.data.storage.LocalDicomStudyRepository)?.storageManager
 
-    private val _storageLocationInfo = MutableStateFlow(
-        storageManager?.getStorageLocationInfo(
-            totalBytes = studyRepository.getTotalStorageBytes(),
-            filesCount = studyRepository.getTotalSavedFilesCount(),
-            studiesCount = studyRepository.studiesFlow.value.size
-        ) ?: StorageLocationInfo(
-            type = StorageType.INTERNAL,
-            displayPath = studyRepository.storageRootDir.absolutePath,
-            totalBytes = studyRepository.getTotalStorageBytes(),
-            filesCount = studyRepository.getTotalSavedFilesCount(),
-            studiesCount = studyRepository.studiesFlow.value.size
-        )
-    )
-    val storageLocationInfo: StateFlow<StorageLocationInfo> = _storageLocationInfo.asStateFlow()
-
-    private val _migrationStatusMessage = MutableStateFlow<String?>(null)
-    val migrationStatusMessage: StateFlow<String?> = _migrationStatusMessage.asStateFlow()
-
-    private val _isMigrating = MutableStateFlow(false)
-    val isMigrating: StateFlow<Boolean> = _isMigrating.asStateFlow()
+    private val archive = DicomRuntimeRegistry.getArchiveOperations(appContext)
+    val archiveIndexState = studyRepository.indexState
+    val storageLocationInfo = archive.info
+    val isMigrating = archive.busy
+    val migrationStatusMessage = archive.message
+    val migrationNoticeId = archive.messageId
+    val receptionStorageOptions = requireNotNull(storageManager).receptionOptions
+    fun updateReceptionStorageOptions(options: ru.medeng.dicomtool.data.storage.ReceptionStorageOptions) = archive.setReceptionOptions(options)
+    fun recoverRetainedIncoming() = archive.recoverIncoming()
 
     private val _selectedModalityFilter = MutableStateFlow("ALL")
     val selectedModalityFilter: StateFlow<String> = _selectedModalityFilter.asStateFlow()
@@ -216,6 +250,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     // Состояние раздела 3: Отправка (SCU — Этап 3 и 4.2)
     private val _scuConfig = MutableStateFlow(
         ScuSendConfig(
+            syntheticEncoding = ru.medeng.dicomtool.dicom.scu.SyntheticDicomEncoding.fromPreference(scuPrefs.getString("synthetic_encoding", null)),
             remoteIp = scuPrefs.getString("scu_remote_ip", "") ?: "",
             remotePort = scuPrefs.getInt("scu_remote_port", 0),
             calledAeTitle = scuPrefs.getString("scu_called_ae", "") ?: "",
@@ -235,23 +270,24 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
 
     private var scanJob: Job? = null
     private var sendJob: Job? = null
+    private var sendCancellation: ru.medeng.dicomtool.dicom.scu.ScuCancellation? = null
+    @Volatile private var scanGeneration = 0L
 
     private val _freehandStrokes = MutableStateFlow<List<FreehandStroke>>(emptyList())
     val freehandStrokes: StateFlow<List<FreehandStroke>> = _freehandStrokes.asStateFlow()
 
 
     // Подготовленный DICOM-объект Secondary Capture (1.2.840.10008.5.1.4.1.1.7) с уникальными UID <= 64 символов
-    private val _preparedScuObject = MutableStateFlow(
-        DicomSecondaryCaptureGenerator.prepareSecondaryCaptureObject(
-            config = _scuConfig.value,
-            freehandStrokes = emptyList()
-        )
+    private val _preparedScuObject = MutableStateFlow<PreparedSecondaryCaptureDicomObject?>(
+        if (_scuConfig.value.syntheticEncoding.validationError(_scuConfig.value) == null)
+            DicomSecondaryCaptureGenerator.prepareSecondaryCaptureObject(config = _scuConfig.value, freehandStrokes = emptyList())
+        else null
     )
-    val preparedScuObject: StateFlow<PreparedSecondaryCaptureDicomObject> = _preparedScuObject.asStateFlow()
+    val preparedScuObject: StateFlow<PreparedSecondaryCaptureDicomObject?> = _preparedScuObject.asStateFlow()
 
     // Состояние раздела «Журнал DICOM» (Этап 4.3.2: Краткий и Подробный режимы, фильтрация, поиск)
     val logs: StateFlow<List<DicomLogEntry>> = technicalLogger.logsFlow
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val loggerHealth = technicalLogger.healthFlow
 
     private val _logDisplayMode = MutableStateFlow(DicomLogDisplayMode.BRIEF)
     val logDisplayMode: StateFlow<DicomLogDisplayMode> = _logDisplayMode.asStateFlow()
@@ -279,6 +315,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
         .combine(_logSearchQuery) { rawLogs, _ ->
             DicomSessionGrouper.groupEvents(rawLogs)
         }
+        .flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // Отфильтрованные сеансы для Краткого режима
@@ -314,6 +351,8 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     private val _isExternalFileLoading = MutableStateFlow(false)
     val isExternalFileLoading: StateFlow<Boolean> = _isExternalFileLoading.asStateFlow()
 
+    private val _externalReadId = MutableStateFlow(java.util.UUID.randomUUID().toString())
+    val externalReadId = _externalReadId.asStateFlow()
     private val _externalFileError = MutableStateFlow<String?>(null)
     val externalFileError: StateFlow<String?> = _externalFileError.asStateFlow()
 
@@ -325,10 +364,21 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
 
     // --- Действия раздела «Приёмник (SCP)» ---
 
+    private fun persistScpConfiguration() {
+        val ae = _aeTitleInput.value.trim()
+        val port = _portInput.value.toIntOrNull() ?: return
+        if (DicomValidationUtils.validateAeTitle(ae) is DicomValidationUtils.ValidationResult.Valid &&
+            DicomValidationUtils.validateScpPort(port) is DicomValidationUtils.ValidationResult.Valid) {
+            appContext.getSharedPreferences("scp_configuration", android.content.Context.MODE_PRIVATE)
+                .edit().putString("ae", ae).putInt("port", port).apply()
+        }
+    }
+
     fun updateScpAeTitleInput(raw: String) {
         _aeTitleInput.value = raw
         val portNum = _portInput.value.toIntOrNull() ?: -1
         scpServer.updateConfiguration(raw, portNum)
+        persistScpConfiguration()
     }
 
     fun updateScpPortInput(raw: String) {
@@ -336,6 +386,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
         _portInput.value = digitsOnly
         val portNum = digitsOnly.toIntOrNull() ?: -1
         scpServer.updateConfiguration(_aeTitleInput.value, portNum)
+        persistScpConfiguration()
     }
 
     fun incrementScpPort(delta: Int) {
@@ -343,6 +394,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
         val next = (current + delta).coerceIn(1024, 65535)
         _portInput.value = next.toString()
         scpServer.updateConfiguration(_aeTitleInput.value, next)
+        persistScpConfiguration()
     }
 
     fun refreshNetworkInterface() {
@@ -350,6 +402,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun toggleScpServer() {
+        if (scpState.value.serviceStopping || scpState.value.status in listOf(ScpServerStatus.STARTING, ScpServerStatus.STOPPING)) return
         if (scpState.value.status == ScpServerStatus.RUNNING) {
             DicomScpForegroundService.stopScpService(appContext)
         } else {
@@ -363,6 +416,8 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
                 scpServer.updateConfiguration(ae, port)
                 return
             }
+            appContext.getSharedPreferences("scp_configuration", android.content.Context.MODE_PRIVATE)
+                .edit().putString("ae", ae).putInt("port", port).apply()
             DicomScpForegroundService.startScpService(appContext, ae, port)
         }
     }
@@ -370,7 +425,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     // --- Действия раздела «Принятые исследования», DICOM Viewer и экрана тегов ---
 
     fun refreshReceivedStudies() {
-        scpServer.refreshCountersFromRepository()
+        archive.refresh()
     }
 
     fun setModalityFilter(modality: String) {
@@ -378,9 +433,10 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun selectStudy(studyInstanceUid: String) {
+        changeViewerSource(ru.medeng.dicomtool.domain.model.ViewerSource.Received(studyInstanceUid))
         val changed = _selectedStudyUid.value != studyInstanceUid
         _selectedStudyUid.value = studyInstanceUid
-        val study = studies.value.firstOrNull { it.studyInstanceUid == studyInstanceUid }
+        val study = studyRepository.studiesFlow.value.firstOrNull { it.studyInstanceUid == studyInstanceUid }
         if (study != null && (changed || _viewerRenderState.value is DicomViewerRenderState.Idle)) {
             _selectedSeriesUid.value = study.seriesList.firstOrNull()?.seriesInstanceUid
             _selectedInstanceIndex.value = 1
@@ -415,7 +471,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun getSelectedStudyOrDefault(): DicomStudyItem? {
-        val currentList = studies.value
+        val currentList = studyRepository.studiesFlow.value
         if (currentList.isEmpty()) return null
         val uid = _selectedStudyUid.value
         return currentList.firstOrNull { it.studyInstanceUid == uid } ?: currentList.first()
@@ -431,17 +487,28 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun getFilteredTagsForCurrentStudy(): List<DicomTagEntry> {
-        val study = getSelectedStudyOrDefault() ?: return emptyList()
-        val seriesUid = _selectedSeriesUid.value ?: study.seriesList.firstOrNull()?.seriesInstanceUid
-        val instIdx0 = (_selectedInstanceIndex.value - 1).coerceAtLeast(0)
-        val allTags = studyRepository.getTagsForStudy(study.studyInstanceUid, seriesUid, instIdx0)
-        val q = _tagSearchQuery.value.trim().lowercase()
-        if (q.isEmpty()) return allTags
-        return allTags.filter {
-            it.tagHex.lowercase().contains(q) ||
-                it.name.lowercase().contains(q) ||
-                it.vr.lowercase().contains(q) ||
-                it.value.lowercase().contains(q)
+        return _receivedTags.value // The common browser performs recursive filtering, including nested SQ.
+    }
+    private fun loadReceivedTags(filePath: String) {
+        if (receivedTagPath == filePath) return
+        receivedTagPath = filePath; _receivedTags.value = emptyList()
+        val ticket = receivedTagRequests.next(); receivedTagJob?.cancel()
+        receivedTagJob = viewModelScope.launch {
+            try {
+                val job = coroutineContext[Job]!!
+                val check = { job.ensureActive(); receivedTagRequests.check(ticket) }
+                val parsed = withContext(Dispatchers.IO) { viewerWorkMutex.withLock {
+                    check()
+                    val stream = if (filePath.startsWith("content://")) appContext.contentResolver.openInputStream(Uri.parse(filePath)) else File(filePath).inputStream()
+                    requireNotNull(stream).use { DicomFileReader.readFromStream(it, checkCancelled = check).tags }
+                } }
+                check(); _receivedTags.value = parsed
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled
+            } catch (oom: OutOfMemoryError) {
+                if (receivedTagRequests.isCurrent(ticket)) _receivedTags.value = listOf(DicomTagEntry("(0000,0000)", "LT", "ReadError", "Недостаточно памяти для тегов; исходный файл не изменён"))
+            } catch (e: Exception) {
+                if (receivedTagRequests.isCurrent(ticket)) _receivedTags.value = listOf(DicomTagEntry("(0000,0000)", "LT", "ReadError", "Ошибка чтения тегов: ${e.message}"))
+            }
         }
     }
 
@@ -477,7 +544,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
         if (ready != null) {
             _viewerWindowWidth.value = ready.descriptor.defaultWindowWidth.roundToInt().coerceAtLeast(1)
             _viewerWindowCenter.value = ready.descriptor.defaultWindowCenter.roundToInt()
-            triggerFrameDecodeAndRender(resetWindowToFileDefault = false)
+            triggerFrameDecodeAndRender(resetWindowToFileDefault = true)
         } else {
             val inst = getActiveInstanceFileItem()
             val study = getSelectedStudyOrDefault()
@@ -491,14 +558,13 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
      * Сброс только параметров окна яркости/контрастности (WW/WL) к исходным значениям DICOM без сброса зума.
      */
     fun resetWindowToDicomDefault() {
-        _viewerInverted.value = false
         _viewerActiveVoiLutIndex.value = null
         val ready = _viewerRenderState.value as? DicomViewerRenderState.Ready
         if (ready != null) {
             _viewerWindowWidth.value = ready.descriptor.defaultWindowWidth.roundToInt().coerceAtLeast(1)
             _viewerWindowCenter.value = ready.descriptor.defaultWindowCenter.roundToInt()
         }
-        triggerFrameDecodeAndRender(resetWindowToFileDefault = false)
+        triggerFrameDecodeAndRender(resetWindowToFileDefault = true)
     }
 
     fun toggleViewerInvert() {
@@ -507,10 +573,12 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun applyWindowPreset(preset: DicomWindowPreset) {
+        if ((_viewerRenderState.value as? DicomViewerRenderState.Ready)?.descriptor?.photometricInterpretation == "RGB") return
         if (preset.isVoiLutSequence) {
             _viewerActiveVoiLutIndex.value = preset.voiLutIndex
         } else {
             _viewerActiveVoiLutIndex.value = null
+            preferredWindow = preset.windowWidth to preset.windowCenter
             _viewerWindowWidth.value = preset.windowWidth.roundToInt().coerceAtLeast(1)
             _viewerWindowCenter.value = preset.windowCenter.roundToInt()
         }
@@ -518,28 +586,24 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun setWindowWidthLevel(newWindowWidth: Int, newWindowCenter: Int) {
+        if ((_viewerRenderState.value as? DicomViewerRenderState.Ready)?.descriptor?.photometricInterpretation == "RGB") return
         _viewerActiveVoiLutIndex.value = null
+        preferredWindow = null
         _viewerWindowWidth.value = newWindowWidth.coerceIn(1, 131072)
         _viewerWindowCenter.value = newWindowCenter.coerceIn(-65536, 131072)
         triggerFrameDecodeAndRender(resetWindowToFileDefault = false)
     }
 
     /**
-     * Изменение WW/WL на заданную дельту (или адаптивный шаг для 8-bit / 16-bit изображений).
+     * Изменение WW/WL на заданную дельту в единицах Modality Value.
      */
     fun adjustWindowWidthLevel(deltaW: Int, deltaL: Int) {
+        if ((_viewerRenderState.value as? DicomViewerRenderState.Ready)?.descriptor?.photometricInterpretation == "RGB") return
         _viewerActiveVoiLutIndex.value = null
-        val ready = _viewerRenderState.value as? DicomViewerRenderState.Ready
-        val adaptiveScale = if (ready != null) {
-            val range = (ready.descriptor.maxModalityValue - ready.descriptor.minModalityValue).coerceAtLeast(255.0)
-            max(1, (range / 250.0).roundToInt())
-        } else {
-            1
-        }
-        val scaledDeltaW = deltaW * adaptiveScale
-        val scaledDeltaL = deltaL * adaptiveScale
-        _viewerWindowWidth.update { (it + scaledDeltaW).coerceIn(1, 131072) }
-        _viewerWindowCenter.update { (it + scaledDeltaL).coerceIn(-65536, 131072) }
+        preferredWindow = null
+        // Controls choose a proportional step; do not apply a second range-dependent multiplier.
+        _viewerWindowWidth.update { (it + deltaW).coerceIn(1, 131072) }
+        _viewerWindowCenter.update { (it + deltaL).coerceIn(-65536, 131072) }
         triggerFrameDecodeAndRender(resetWindowToFileDefault = false)
     }
 
@@ -557,7 +621,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
      */
     fun stepViewerFrame(delta: Int) {
         // Если открыт внешний файл из вкладки «Теги»
-        val externalUri = _selectedExternalFileUri.value
+        val externalUri = (_viewerSource.value as? ru.medeng.dicomtool.domain.model.ViewerSource.External)?.let { Uri.parse(it.uri) }
         val externalSummary = _externalFileSummary.value
         if (externalUri != null && externalSummary != null) {
             val totalFrames = externalSummary.numberOfFrames.coerceAtLeast(1)
@@ -572,7 +636,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
                         next
                     }
                 }
-                triggerFrameDecodeAndRender(resetWindowToFileDefault = false)
+                triggerFrameDecodeAndRender(resetWindowToFileDefault = true)
             }
             return
         }
@@ -588,7 +652,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
                     else -> next
                 }
             }
-            triggerFrameDecodeAndRender(resetWindowToFileDefault = false)
+            triggerFrameDecodeAndRender(resetWindowToFileDefault = true)
         } else {
             stepSeriesInstance(delta)
         }
@@ -623,138 +687,114 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
      * Поддерживает как принятые исследования из хранилища SCP, так и внешние файлы из раздела «Теги».
      */
     fun triggerFrameDecodeAndRender(resetWindowToFileDefault: Boolean = false) {
-        val externalUri = _selectedExternalFileUri.value
-        val externalSummary = _externalFileSummary.value
-
-        val (filePath: String, safeInstIdx: Int, totalInstances: Int) = if (externalUri != null && externalSummary != null) {
-            Triple(externalUri.toString(), 1, 1)
-        } else {
-            val study = getSelectedStudyOrDefault() ?: run {
-                _viewerRenderState.value = DicomViewerRenderState.Idle
-                return
-            }
-            val series = study.seriesList.firstOrNull { it.seriesInstanceUid == _selectedSeriesUid.value }
-                ?: study.seriesList.firstOrNull()
-                ?: run {
-                    _viewerRenderState.value = DicomViewerRenderState.Error("В исследовании нет доступных серий.")
-                    return
-                }
-            val instancesCount = series.instances.size.coerceAtLeast(1)
-            val instIdx = _selectedInstanceIndex.value.coerceIn(1, instancesCount)
-            val instance = series.instances.getOrNull(instIdx - 1) ?: run {
-                _viewerRenderState.value = DicomViewerRenderState.Error("Экземпляр изображения не найден.")
-                return
-            }
-            Triple(instance.filePath, instIdx, instancesCount)
+        val source = _viewerSource.value
+        val external = source as? ru.medeng.dicomtool.domain.model.ViewerSource.External
+        if (source == ru.medeng.dicomtool.domain.model.ViewerSource.None || (external != null && _externalFileSummary.value == null)) {
+            renderRequests.next(); renderJob?.cancel(); _viewerRenderState.value = DicomViewerRenderState.Idle; return
         }
-
-        val frameIdx0 = (_viewerCurrentFrame.value - 1).coerceAtLeast(0)
-        val isNewFile = lastLoadedFilePath != filePath
-
+        val instance = if (external == null) getActiveInstanceFileItem() else null
+        if (source is ru.medeng.dicomtool.domain.model.ViewerSource.Received && getSelectedStudyOrDefault()?.studyInstanceUid != source.studyInstanceUid) {
+            renderRequests.next(); renderJob?.cancel(); _viewerRenderState.value = DicomViewerRenderState.Error("Выбранное исследование больше недоступно"); return
+        }
+        val filePath = external?.uri ?: instance?.filePath ?: run {
+            _viewerRenderState.value = DicomViewerRenderState.Error("Экземпляр изображения не найден"); return
+        }
+        val frameIndex = _viewerCurrentFrame.value - 1
+        val target = filePath to frameIndex
+        if (renderTarget == target && renderJob?.isActive == true && _viewerRenderState.value is DicomViewerRenderState.Ready) {
+            pendingRender = true
+            pendingResetWindow = resetWindowToFileDefault
+            return
+        }
+        val targetChanged = renderTarget != target
+        renderTarget = target
+        pendingRender = false
+        val reset = resetWindowToFileDefault || lastLoadedFilePath != filePath || lastLoadedFrameIndex != frameIndex
+        val ticket = renderRequests.next()
+        val ww = preferredWindow?.first ?: _viewerWindowWidth.value.toDouble()
+        val wc = preferredWindow?.second ?: _viewerWindowCenter.value.toDouble()
+        val inverted = _viewerInverted.value; val voi = _viewerActiveVoiLutIndex.value
+        val instanceIndex = if (external != null) 1 else _selectedInstanceIndex.value
+        val totalInstances = if (external != null) 1 else getSelectedStudyOrDefault()?.seriesList
+            ?.firstOrNull { it.seriesInstanceUid == _selectedSeriesUid.value }?.instances?.size ?: 1
         renderJob?.cancel()
+        if (targetChanged) { frameCache.clear(); _viewerRenderState.value = DicomViewerRenderState.Loading }
         renderJob = viewModelScope.launch {
-            if (frameCache.get(filePath, frameIdx0) == null) {
-                _viewerRenderState.value = DicomViewerRenderState.Loading
-            }
-
-            val decodeRes = withContext(Dispatchers.IO) {
-                if (filePath.startsWith("content://")) {
-                    DicomPixelDataDecoder.decodeFrameFromSource(
-                        sourcePathOrUri = filePath,
-                        streamOpener = { appContext.contentResolver.openInputStream(android.net.Uri.parse(filePath)) },
-                        frameIndex = frameIdx0,
-                        cache = frameCache
-                    )
-                } else {
-                    DicomPixelDataDecoder.decodeFrameFromFile(
-                        file = File(filePath),
-                        frameIndex = frameIdx0,
-                        cache = frameCache
-                    )
-                }
-            }
-
-            when (decodeRes) {
-                is DicomPixelDecodeResult.UnsupportedFormat -> {
-                    _viewerRenderState.value = DicomViewerRenderState.UnsupportedFormat(
-                        transferSyntaxUid = decodeRes.transferSyntaxUid,
-                        transferSyntaxName = decodeRes.transferSyntaxName,
-                        photometricInterpretation = decodeRes.photometricInterpretation,
-                        bitsAllocated = decodeRes.bitsAllocated,
-                        reasonRu = decodeRes.reasonRu
-                    )
-                }
-
-                is DicomPixelDecodeResult.DecodeError -> {
-                    _viewerRenderState.value = DicomViewerRenderState.Error(
-                        reasonRu = decodeRes.reasonRu
-                    )
-                }
-
-                is DicomPixelDecodeResult.Success -> {
-                    val decodedFrame = decodeRes.frame
-                    val desc = decodedFrame.descriptor
-
-                    if (resetWindowToFileDefault || isNewFile) {
-                        lastLoadedFilePath = filePath
-                        _viewerWindowWidth.value = desc.defaultWindowWidth.roundToInt().coerceAtLeast(1)
-                        _viewerWindowCenter.value = desc.defaultWindowCenter.roundToInt()
-                        _viewerActiveVoiLutIndex.value = null
+            var unpublished: Bitmap? = null
+            try {
+                val job = coroutineContext[Job]!!
+                val check = { job.ensureActive(); renderRequests.check(ticket) }
+                val result = withContext(Dispatchers.IO) { viewerWorkMutex.withLock {
+                    check()
+                    val decoded = DicomPixelDataDecoder.decodeFrameFromSource(filePath,
+                        streamOpener = { if (external != null || filePath.startsWith("content://")) appContext.contentResolver.openInputStream(Uri.parse(filePath)) else File(filePath).inputStream() },
+                        frameIndex = frameIndex, cache = frameCache, checkCancelled = check)
+                    if (decoded is DicomPixelDecodeResult.Success) {
+                        val d = decoded.frame.descriptor
+                        unpublished = DicomPixelDataDecoder.renderFrameToBitmap(decoded.frame,
+                            if (reset) d.defaultWindowWidth else ww, if (reset) d.defaultWindowCenter else wc,
+                            inverted, if (reset) d.windowPresets.firstOrNull()?.takeIf { it.isVoiLutSequence }?.voiLutIndex else voi, checkCancelled = check)
                     }
-
-                    val targetWw = _viewerWindowWidth.value.toDouble()
-                    val targetWc = _viewerWindowCenter.value.toDouble()
-                    val targetInverted = _viewerInverted.value
-                    val voiLutIdx = _viewerActiveVoiLutIndex.value
-
-                    val renderedBitmap = withContext(Dispatchers.Default) {
-                        DicomPixelDataDecoder.renderFrameToBitmap(
-                            frame = decodedFrame,
-                            windowWidth = targetWw,
-                            windowCenter = targetWc,
-                            userInverted = targetInverted,
-                            useVoiLutIndex = voiLutIdx
-                        )
+                    check(); decoded
+                } }
+                check()
+                when (result) {
+                    is DicomPixelDecodeResult.UnsupportedFormat -> _viewerRenderState.value = DicomViewerRenderState.UnsupportedFormat(
+                        result.transferSyntaxUid, result.transferSyntaxName, result.photometricInterpretation, result.bitsAllocated, result.reasonRu)
+                    is DicomPixelDecodeResult.DecodeError -> _viewerRenderState.value = DicomViewerRenderState.Error(result.reasonRu)
+                    is DicomPixelDecodeResult.Success -> {
+                        val d = result.frame.descriptor
+                        if (reset && !pendingRender) { _viewerWindowWidth.value = d.defaultWindowWidth.roundToInt().coerceAtLeast(1)
+                            _viewerWindowCenter.value = d.defaultWindowCenter.roundToInt()
+                            preferredWindow = d.defaultWindowWidth to d.defaultWindowCenter
+                            _viewerActiveVoiLutIndex.value = d.windowPresets.firstOrNull()?.takeIf { it.isVoiLutSequence }?.voiLutIndex }
+                        lastLoadedFilePath = filePath; lastLoadedFrameIndex = frameIndex
+                        _viewerRenderState.value = DicomViewerRenderState.Ready(requireNotNull(unpublished), d,
+                            frameIndex + 1, d.numberOfFrames, instanceIndex, totalInstances, filePath)
+                        unpublished = null // Ownership is now the UI's; recycling a bitmap still drawn by Compose is unsafe.
                     }
-
-                    _viewerRenderState.value = DicomViewerRenderState.Ready(
-                        bitmap = renderedBitmap,
-                        descriptor = desc,
-                        currentFrame = decodedFrame.frameIndex + 1,
-                        totalFrames = desc.numberOfFrames,
-                        currentInstance = safeInstIdx,
-                        totalInstances = totalInstances,
-                        filePath = filePath
-                    )
+                }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled
+            } catch (oom: OutOfMemoryError) {
+                frameCache.clear()
+                if (renderRequests.isCurrent(ticket)) _viewerRenderState.value = DicomViewerRenderState.Error("Недостаточно памяти для Viewer")
+            } catch (e: Exception) {
+                if (renderRequests.isCurrent(ticket)) _viewerRenderState.value = DicomViewerRenderState.Error(e.message ?: "Ошибка Viewer")
+            } finally {
+                unpublished?.recycle()
+                if (renderRequests.isCurrent(ticket)) {
+                    renderJob = null
+                    if (pendingRender) {
+                        val resetPending = pendingResetWindow
+                        pendingRender = false
+                        triggerFrameDecodeAndRender(resetPending)
+                    }
                 }
             }
         }
+        if (external == null) loadReceivedTags(filePath)
     }
 
     fun deleteStudy(studyInstanceUid: String) {
+        renderRequests.next()
         renderJob?.cancel()
         frameCache.clear()
         lastLoadedFilePath = null
-        studyRepository.deleteStudy(studyInstanceUid)
-        scpServer.refreshCountersFromRepository()
+        archive.deleteStudy(studyInstanceUid)
         if (_selectedStudyUid.value == studyInstanceUid) {
-            val nextUid = studies.value.firstOrNull()?.studyInstanceUid
-            _selectedStudyUid.value = nextUid
+            _selectedStudyUid.value = null
+            _selectedSeriesUid.value = null
             _selectedTagForDetail.value = null
-            if (nextUid != null) {
-                selectStudy(nextUid)
-            } else {
-                _viewerRenderState.value = DicomViewerRenderState.Idle
-            }
+            changeViewerSource(ru.medeng.dicomtool.domain.model.ViewerSource.None)
         }
     }
 
     fun clearAllStudies() {
+        renderRequests.next(); changeViewerSource(ru.medeng.dicomtool.domain.model.ViewerSource.None)
         renderJob?.cancel()
         frameCache.clear()
         lastLoadedFilePath = null
-        studyRepository.clearAllStudies()
-        scpServer.refreshCountersFromRepository()
+        archive.clearStudies()
         _selectedStudyUid.value = null
         _selectedSeriesUid.value = null
         _selectedTagForDetail.value = null
@@ -780,6 +820,9 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
                     .putString("scu_called_ae", updated.calledAeTitle)
                     .putString("scu_calling_ae", updated.callingAeTitle)
                     .apply()
+            }
+            if (updated.syntheticEncoding != current.syntheticEncoding) {
+                scuPrefs.edit().putString("synthetic_encoding", updated.syntheticEncoding.name).apply()
             }
             val syncedBirthDate = DicomSecondaryCaptureGenerator.displayDateToDicomDa(updated.patientBirthDateDisplay)
             // Выбор Modality никогда не меняет SOP Class тестового изображения (1.2.840.10008.5.1.4.1.1.7)
@@ -834,8 +877,12 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
      * - если изменилось тестовое изображение/значимые метаданные пациента или `forceNewObject == true`, создаются новые уникальные UID;
      * - если это повторная попытка отправки того же сформированного объекта, его UID сохраняются.
      */
-    fun syncPreparedScuObject(forceNewObject: Boolean = false): PreparedSecondaryCaptureDicomObject {
+    fun syncPreparedScuObject(forceNewObject: Boolean = false): PreparedSecondaryCaptureDicomObject? {
         val currentConfig = _scuConfig.value
+        if (currentConfig.syntheticEncoding.validationError(currentConfig) != null) {
+            _preparedScuObject.value = null
+            return null
+        }
         val currentStrokes = _freehandStrokes.value
         val nextObj = DicomSecondaryCaptureGenerator.prepareSecondaryCaptureObject(
             config = currentConfig,
@@ -855,18 +902,20 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
         val snapshot = _scuConfig.value
         if (snapshot.isOperationInProgress) return
 
+        val lease = ru.medeng.dicomtool.dicom.scu.ScuOperationGate.acquire(scuLeaseOwner, "C-ECHO") ?: return
+
         _scuConfig.update {
             it.copy(
                 isOperationInProgress = true,
                 activeOperationName = "C-ECHO",
-                lastStatusTitle = "Выполняется C-ECHO...",
+                noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = "Выполняется C-ECHO...",
                 lastStatusMessage = "Установка TCP-соединения и согласование ассоциации с ${snapshot.remoteIp}:${snapshot.remotePort} [${snapshot.callingAeTitle} → ${snapshot.calledAeTitle}]...",
                 isLastOperationSuccess = null,
                 isLastOperationWarning = false
             )
         }
 
-        viewModelScope.launch {
+        val operationJob = viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
                 scuClient.performCEcho(
                     remoteHost = snapshot.remoteIp,
@@ -877,6 +926,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
             }
             applyScuOperationResult(result)
         }
+        operationJob.invokeOnCompletion { ru.medeng.dicomtool.dicom.scu.ScuOperationGate.release(lease) }
     }
 
     /**
@@ -918,10 +968,10 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
                 current.copy(smileySeed = nextSeed)
             }
         }
-        val newObj = syncPreparedScuObject(forceNewObject = true)
+        val newObj = syncPreparedScuObject(forceNewObject = true) ?: return reportSyntheticEncodingError()
         _scuConfig.update {
             it.copy(
-                lastStatusTitle = "Создан новый объект",
+                noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = "Создан новый объект",
                 lastStatusMessage = "Сформирован новый Secondary Capture объект (SOP Instance UID: ${newObj.uids.sopInstanceUid}). Готов к отправке.",
                 isLastOperationSuccess = null,
                 isLastOperationWarning = false
@@ -933,24 +983,32 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
      * Повторно отправляет ТОТ ЖЕ САМЫЙ ранее сформированный DICOM-объект без изменения UID, Pixel Data или метаданных.
      * По ТЗ: отдельная операция «Отправить повторно». Не считает повторную отправку успешной без получения C-STORE-RSP (0x0000).
      */
+    private fun reportSyntheticEncodingError() {
+        val reason = _scuConfig.value.syntheticEncoding.validationError(_scuConfig.value) ?: "Синтетический DICOM не подготовлен."
+        _scuConfig.update { it.copy(noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = "Несовместимая кодировка",
+            lastStatusMessage = reason, isLastOperationSuccess = false, isLastOperationWarning = false) }
+    }
+
     fun triggerResendCStoreScu() {
         val snapshot = _scuConfig.value
         if (snapshot.isOperationInProgress) return
 
-        val prepared = _preparedScuObject.value ?: syncPreparedScuObject(forceNewObject = false)
+        val prepared = _preparedScuObject.value ?: syncPreparedScuObject(forceNewObject = false) ?: return reportSyntheticEncodingError()
+
+        val lease = ru.medeng.dicomtool.dicom.scu.ScuOperationGate.acquire(scuLeaseOwner, "C-STORE") ?: return
 
         _scuConfig.update {
             it.copy(
                 isOperationInProgress = true,
                 activeOperationName = "C-STORE (Повтор)",
-                lastStatusTitle = "Повторная отправка C-STORE...",
+                noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = "Повторная отправка C-STORE...",
                 lastStatusMessage = "Повторная отправка того же объекта (SOPInstanceUID=${prepared.uids.sopInstanceUid}) на ${snapshot.remoteIp}:${snapshot.remotePort}...",
                 isLastOperationSuccess = null,
                 isLastOperationWarning = false
             )
         }
 
-        viewModelScope.launch {
+        val operationJob = viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
                 scuClient.performCStore(
                     remoteHost = snapshot.remoteIp,
@@ -965,6 +1023,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
             }
             applyScuOperationResult(result)
         }
+        operationJob.invokeOnCompletion { ru.medeng.dicomtool.dicom.scu.ScuOperationGate.release(lease) }
     }
 
     /**
@@ -980,7 +1039,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
         if (dateValidation is DateValidationResult.Incomplete) {
             _scuConfig.update {
                 it.copy(
-                    lastStatusTitle = "Некорректная дата рождения",
+                    noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = "Некорректная дата рождения",
                     lastStatusMessage = "Дата рождения заполнена не полностью (введено ${dateValidation.digitsCount} из 8 цифр). Заполните все 8 цифр ДД.ММ.ГГГГ или очистите поле.",
                     isLastOperationSuccess = false,
                     isLastOperationWarning = false
@@ -991,7 +1050,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
         if (dateValidation is DateValidationResult.Invalid) {
             _scuConfig.update {
                 it.copy(
-                    lastStatusTitle = "Некорректная дата рождения",
+                    noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = "Некорректная дата рождения",
                     lastStatusMessage = dateValidation.messageRu,
                     isLastOperationSuccess = false,
                     isLastOperationWarning = false
@@ -1000,20 +1059,22 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
             return
         }
 
-        val prepared = syncPreparedScuObject(forceNewObject = false)
+        val prepared = syncPreparedScuObject(forceNewObject = false) ?: return reportSyntheticEncodingError()
+
+        val lease = ru.medeng.dicomtool.dicom.scu.ScuOperationGate.acquire(scuLeaseOwner, "C-STORE") ?: return
 
         _scuConfig.update {
             it.copy(
                 isOperationInProgress = true,
                 activeOperationName = "C-STORE",
-                lastStatusTitle = "Выполняется C-STORE...",
+                noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = "Выполняется C-STORE...",
                 lastStatusMessage = "Отправка Secondary Capture (512×512, Modality=${prepared.modality}, SOPInstanceUID=${prepared.uids.sopInstanceUid}) на ${snapshot.remoteIp}:${snapshot.remotePort}...",
                 isLastOperationSuccess = null,
                 isLastOperationWarning = false
             )
         }
 
-        viewModelScope.launch {
+        val operationJob = viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
                 scuClient.performCStore(
                     remoteHost = snapshot.remoteIp,
@@ -1028,6 +1089,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
             }
             applyScuOperationResult(result)
         }
+        operationJob.invokeOnCompletion { ru.medeng.dicomtool.dicom.scu.ScuOperationGate.release(lease) }
     }
 
     // --- Действия пакетной отправки DICOM-файлов (Этап 4.2) ---
@@ -1038,6 +1100,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun addCandidateFilesFromUris(uris: List<Uri>) {
+        if (_batchProgress.value.isSending) return
         if (uris.isEmpty()) return
         viewModelScope.launch(Dispatchers.IO) {
             val inspected = uris.map { uri ->
@@ -1053,34 +1116,35 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun scanCandidateFolder(treeUri: Uri) {
+        if (_batchProgress.value.isSending) return
         scanJob?.cancel()
+        val generation = ++scanGeneration
         _batchProgress.value = ScuBatchProgressState(isScanning = true, summaryMessageRu = "Сканирование каталога...")
         scanJob = viewModelScope.launch(Dispatchers.IO) {
-            val found = DicomFileScanner.scanTreeFolder(
-                context = appContext,
-                treeUri = treeUri,
-                onProgress = { scanned, foundCount, currentFolder ->
-                    _batchProgress.update {
-                        it.copy(
-                            isScanning = true,
-                            scannedCount = scanned,
-                            totalFiles = foundCount,
-                            summaryMessageRu = "Сканирование: проверено $scanned файлов (найдено DICOM: $foundCount)..."
-                        )
+            val ownJob = coroutineContext[Job]!!
+            try {
+                val found = DicomFileScanner.scanTreeFolder(appContext, treeUri,
+                    onProgress = { scanned, foundCount, _ ->
+                        if (generation == scanGeneration && ownJob.isActive) _batchProgress.update {
+                            it.copy(scannedCount = scanned, totalFiles = foundCount,
+                                summaryMessageRu = "Сканирование: проверено $scanned файлов (найдено DICOM: $foundCount)...")
+                        }
+                    }, isCancelled = { !ownJob.isActive })
+                withContext(Dispatchers.Main) {
+                    if (generation == scanGeneration && ownJob.isActive) {
+                        _candidateFiles.update { current ->
+                            val existing = current.map { it.uri }.toSet()
+                            current + found.filter { it.uri !in existing }
+                        }
+                        _batchProgress.update { it.copy(summaryMessageRu = "Сканирование завершено: найдено ${found.size} DICOM-файлов.") }
                     }
-                },
-                isCancelled = { scanJob?.isCancelled == true }
-            )
-            withContext(Dispatchers.Main) {
-                _candidateFiles.update { current ->
-                    val existingUris = current.map { it.uri }.toSet()
-                    current + found.filter { it.uri !in existingUris }
                 }
-                _batchProgress.update {
-                    it.copy(
-                        isScanning = false,
-                        summaryMessageRu = "Сканирование завершено: найдено ${found.size} DICOM-файлов."
-                    )
+            } finally {
+                withContext(kotlinx.coroutines.NonCancellable + Dispatchers.Main) {
+                    if (generation == scanGeneration) {
+                        _batchProgress.update { it.copy(isScanning = false,
+                            summaryMessageRu = if (!ownJob.isActive) "Сканирование отменено; чтение завершено." else it.summaryMessageRu) }; scanJob = null
+                    }
                 }
             }
         }
@@ -1088,11 +1152,10 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun cancelFolderScan() {
         scanJob?.cancel()
-        scanJob = null
-        _batchProgress.update { it.copy(isScanning = false, summaryMessageRu = "Сканирование отменено.") }
+        _batchProgress.update { it.copy(summaryMessageRu = "Запрошена отмена сканирования; ожидается завершение чтения.") }
     }
-
     fun removeCandidateFile(fileId: String) {
+        if (_batchProgress.value.isSending) return
         _candidateFiles.update { current -> current.filter { it.id != fileId } }
     }
 
@@ -1103,135 +1166,92 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun cancelBatchSend() {
-        _batchProgress.update { it.copy(isCancelled = true) }
-        sendJob?.cancel()
+        if (!_batchProgress.value.isSending) return
+        _batchProgress.update { it.copy(summaryMessageRu = "Запрошена отмена; ожидается освобождение сетевых ресурсов.") }
+        sendCancellation?.request()
     }
 
     fun triggerCStoreFileBatch() {
-        val filesToSend = _candidateFiles.value
-        val validFiles = filesToSend.filter { it.isValidDicom }
-        if (validFiles.isEmpty()) return
-        if (_batchProgress.value.isSending) return
-
+        if (_scuConfig.value.isOperationInProgress || _batchProgress.value.isSending ||
+            _batchProgress.value.isScanning || sendJob?.isActive == true) return
+        val files = _candidateFiles.value.filter { it.isValidDicom }.toList()
+        if (files.isEmpty()) return
+        val lease = ru.medeng.dicomtool.dicom.scu.ScuOperationGate.acquire(scuLeaseOwner, "C-STORE batch") ?: return
         val snapshot = _scuConfig.value
-        _batchProgress.value = ScuBatchProgressState(
-            isSending = true,
-            totalFiles = validFiles.size,
-            currentIndex = 0,
-            currentFileName = validFiles.firstOrNull()?.fileName,
-            summaryMessageRu = "Отправка ${validFiles.size} файлов на ${snapshot.remoteIp}:${snapshot.remotePort}..."
-        )
-
-        _scuConfig.update {
-            it.copy(
-                isOperationInProgress = true,
-                activeOperationName = "C-STORE (${validFiles.size} файлов)",
-                lastStatusTitle = "Отправка пакета файлов...",
-                lastStatusMessage = "Передача ${validFiles.size} DICOM-файлов на ${snapshot.remoteIp}:${snapshot.remotePort}...",
-                isLastOperationSuccess = null,
-                isLastOperationWarning = false
-            )
-        }
-
-        // Сбрасываем статусы файлов перед отправкой
-        _candidateFiles.update { current ->
-            current.map { file ->
-                if (file.isValidDicom) file.copy(sendStatus = FileSendStatus.PENDING, sendErrorMessage = null)
-                else file
-            }
-        }
-
+        val cancellation = ru.medeng.dicomtool.dicom.scu.ScuCancellation()
+        sendCancellation = cancellation
+        _batchProgress.value = ScuBatchProgressState(isSending = true, totalFiles = files.size,
+            summaryMessageRu = "Подготовка отправки ${files.size} файлов...")
+        _scuConfig.update { it.copy(isOperationInProgress = true, activeOperationName = "C-STORE",
+            noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = "Передача файлов", isLastOperationSuccess = null, isLastOperationWarning = false) }
+        _candidateFiles.update { list -> list.map { file ->
+            if (files.any { it.id == file.id }) file.copy(sendStatus = FileSendStatus.PENDING, sendErrorMessage = null) else file
+        } }
         sendJob = viewModelScope.launch(Dispatchers.IO) {
-            val result = scuClient.performCStoreFileBatch(
-                context = appContext,
-                remoteHost = snapshot.remoteIp,
-                remotePort = snapshot.remotePort,
-                callingAeTitle = snapshot.callingAeTitle,
-                calledAeTitle = snapshot.calledAeTitle,
-                files = validFiles,
-                onFileProgress = { fileIndex, file, status, errorMsg ->
-                    _batchProgress.update { prog ->
-                        prog.copy(
-                            currentIndex = fileIndex + 1,
-                            currentFileName = file.fileName,
-                            sentSuccessCount = if (status == FileSendStatus.SUCCESS) prog.sentSuccessCount + 1 else prog.sentSuccessCount,
-                            sentWarningCount = if (status == FileSendStatus.WARNING) prog.sentWarningCount + 1 else prog.sentWarningCount,
-                            failedCount = if (status == FileSendStatus.FAILED) prog.failedCount + 1 else prog.failedCount
-                        )
-                    }
-                    _candidateFiles.update { list ->
-                        list.map { item ->
-                            if (item.id == file.id) {
-                                item.copy(sendStatus = status, sendErrorMessage = errorMsg)
-                            } else item
-                        }
-                    }
-                },
-                isCancelled = { _batchProgress.value.isCancelled }
-            )
-
-            withContext(Dispatchers.Main) {
-                _batchProgress.update {
-                    it.copy(
-                        isSending = false,
-                        summaryMessageRu = result.summaryMessageRu
-                    )
+            val ownJob = coroutineContext[Job]!!
+            try {
+                val result = scuClient.performCStoreFileBatch(appContext, snapshot.remoteIp, snapshot.remotePort,
+                    snapshot.callingAeTitle, snapshot.calledAeTitle, files,
+                    onFileProgress = { index, file, status, message ->
+                        _candidateFiles.update { list -> list.map {
+                            if (it.id == file.id) it.copy(sendStatus = status, sendErrorMessage = message) else it
+                        } }
+                        val outcomes = _candidateFiles.value.filter { candidate -> files.any { it.id == candidate.id } }
+                        _batchProgress.update { it.copy(currentIndex = index + 1, currentFileName = file.fileName,
+                            sentSuccessCount = outcomes.count { f -> f.sendStatus == FileSendStatus.SUCCESS },
+                            sentWarningCount = outcomes.count { f -> f.sendStatus == FileSendStatus.WARNING },
+                            failedCount = outcomes.count { f -> f.sendStatus == FileSendStatus.FAILED },
+                            skippedCount = outcomes.count { f -> f.sendStatus == FileSendStatus.SKIPPED },
+                            cancelledCount = outcomes.count { f -> f.sendStatus == FileSendStatus.CANCELLED },
+                            unconfirmedCount = outcomes.count { f -> f.sendStatus == FileSendStatus.UNCONFIRMED }) }
+                    }, isCancelled = { !ownJob.isActive || cancellation.isRequested }, cancellation = cancellation)
+                withContext(kotlinx.coroutines.NonCancellable + Dispatchers.Main) {
+                    _batchProgress.update { it.copy(summaryMessageRu = result.summaryMessageRu,
+                        sentSuccessCount = result.successCount, sentWarningCount = result.warningCount,
+                        failedCount = result.failedCount, skippedCount = result.skippedCount,
+                        cancelledCount = result.cancelledCount, unconfirmedCount = result.unconfirmedCount,
+                        isCancelled = result.isCancelled) }
+                    val confirmed = !result.isCancelled && result.totalFiles > 0 &&
+                        result.successCount + result.warningCount == result.totalFiles
+                    _scuConfig.update { it.copy(noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = when {
+                        result.isCancelled -> "Передача отменена"
+                        result.unconfirmedCount > 0 -> "Есть неизвестные результаты"
+                        confirmed && result.warningCount == 0 -> "Все файлы успешно отправлены"
+                        confirmed -> "Передача с предупреждениями"
+                        else -> "Пакет завершён с ошибками"
+                    }, lastStatusMessage = result.summaryMessageRu, isLastOperationSuccess = confirmed,
+                        isLastOperationWarning = result.warningCount > 0 || result.unconfirmedCount > 0 || result.closureWarnings.isNotEmpty() ||
+                            (!confirmed && result.successCount > 0)) }
                 }
-                _scuConfig.update {
-                    it.copy(
-                        isOperationInProgress = false,
-                        activeOperationName = null,
-                        lastStatusTitle = if (result.failedCount == 0 && result.warningCount == 0) "Исследование успешно отправлено" else if (result.failedCount == 0) "Исследование отправлено с предупреждениями" else "Пакет завершён с ошибками",
-                        lastStatusMessage = result.summaryMessageRu,
-                        isLastOperationSuccess = result.failedCount == 0,
-                        isLastOperationWarning = result.warningCount > 0 && result.failedCount == 0
-                    )
+            } catch (e: Exception) {
+                withContext(kotlinx.coroutines.NonCancellable + Dispatchers.Main) {
+                    _batchProgress.update { it.copy(summaryMessageRu = "Передача завершена без полного результата: ${e.message}") }
+                    _scuConfig.update { it.copy(isLastOperationSuccess = false, noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = "Передача не подтверждена",
+                        lastStatusMessage = "Результаты на PACS могут быть неизвестны: ${e.message}") }
+                }
+            } finally {
+                cancellation.request()
+                withContext(kotlinx.coroutines.NonCancellable + Dispatchers.Main) {
+                    _batchProgress.update { it.copy(isSending = false) }
+                    _scuConfig.update { it.copy(isOperationInProgress = false, activeOperationName = null) }
+                    sendCancellation = null; sendJob = null
                 }
             }
         }
+        sendJob?.invokeOnCompletion { ru.medeng.dicomtool.dicom.scu.ScuOperationGate.release(lease) }
     }
-
     // --- Действия раздела «Хранилище DICOM и SAF» ---
 
 
-    fun refreshStorageInfo() {
-        val count = studyRepository.getTotalSavedFilesCount()
-        val bytes = studyRepository.getTotalStorageBytes()
-        val studiesCount = studyRepository.studiesFlow.value.size
-        _storageLocationInfo.value = storageManager?.getStorageLocationInfo(
-            totalBytes = bytes,
-            filesCount = count,
-            studiesCount = studiesCount
-        ) ?: StorageLocationInfo(
-            type = StorageType.INTERNAL,
-            displayPath = studyRepository.storageRootDir.absolutePath,
-            totalBytes = bytes,
-            filesCount = count,
-            studiesCount = studiesCount
-        )
-    }
-
-    fun setCustomSafStorage(treeUri: Uri): Result<Unit> {
-        val sm = storageManager ?: return Result.failure(IllegalStateException("Менеджер хранилища недоступен"))
-        val result = sm.setCustomSafStorage(treeUri)
-        if (result.isSuccess) {
-            studyRepository.refreshFromDisk()
-            refreshStorageInfo()
-        }
-        return result
-    }
-
-    fun resetToInternalStorage() {
-        storageManager?.resetToInternalStorage()
-        studyRepository.refreshFromDisk()
-        refreshStorageInfo()
-    }
+    fun refreshStorageInfo() = archive.refresh()
+    fun setCustomSafStorage(treeUri: Uri) = archive.setSaf(treeUri)
+    fun resetToInternalStorage() = archive.resetInternal()
 
     /**
      * Открывает активный каталог хранения в системном файловом менеджере Android (если настроен SAF).
      */
     fun openStorageFolder(context: android.content.Context) {
-        val info = _storageLocationInfo.value
+        val info = storageLocationInfo.value
         if (info.type == StorageType.SAF && !info.safTreeUriString.isNullOrBlank()) {
             val uri = Uri.parse(info.safTreeUriString)
             try {
@@ -1257,27 +1277,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    fun migrateStudies(fromInternalToSaf: Boolean) {
-        val sm = storageManager ?: return
-        if (_isMigrating.value) return
-        _isMigrating.value = true
-        _migrationStatusMessage.value = "Выполняется безопасный перенос исследований..."
-        viewModelScope.launch {
-            val res = withContext(Dispatchers.IO) {
-                sm.migrateFiles(fromInternalToSaf) { current, total ->
-                    _migrationStatusMessage.value = "Перенос: $current из $total файлов..."
-                }
-            }
-            studyRepository.refreshFromDisk()
-            refreshStorageInfo()
-            _isMigrating.value = false
-            _migrationStatusMessage.value = if (res.failedCount == 0) {
-                "Успешно перенесено ${res.successfullyMigrated} файлов."
-            } else {
-                "Перенесено ${res.successfullyMigrated} файлов. Ошибок: ${res.failedCount} (${res.errorDetails.firstOrNull() ?: ""})"
-            }
-        }
-    }
+    fun migrateStudies(fromInternalToSaf: Boolean) = archive.migrate(fromInternalToSaf)
 
     private fun applyScuOperationResult(result: ScuOperationResult) {
         when (result) {
@@ -1286,7 +1286,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
                     it.copy(
                         isOperationInProgress = false,
                         activeOperationName = null,
-                        lastStatusTitle = result.shortTitleRu,
+                        noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = result.shortTitleRu,
                         lastStatusMessage = result.userMessageRu,
                         isLastOperationSuccess = true,
                         isLastOperationWarning = false
@@ -1299,7 +1299,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
                     it.copy(
                         isOperationInProgress = false,
                         activeOperationName = null,
-                        lastStatusTitle = result.shortTitleRu,
+                        noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = result.shortTitleRu,
                         lastStatusMessage = result.userMessageRu,
                         isLastOperationSuccess = true,
                         isLastOperationWarning = true
@@ -1312,7 +1312,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
                     it.copy(
                         isOperationInProgress = false,
                         activeOperationName = null,
-                        lastStatusTitle = result.shortTitleRu,
+                        noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = result.shortTitleRu,
                         lastStatusMessage = result.userMessageRu,
                         isLastOperationSuccess = false,
                         isLastOperationWarning = false
@@ -1357,44 +1357,61 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun clearAllLogs() {
-        technicalLogger.clearLogs()
-        _expandedLogIds.value = emptySet()
-        _expandedSessionKeys.value = emptySet()
+        viewModelScope.launch {
+            val cleared = withContext(Dispatchers.IO) { technicalLogger.clearLogsAndWait() }
+            if (cleared) { _expandedLogIds.value = emptySet(); _expandedSessionKeys.value = emptySet() }
+            Toast.makeText(appContext, if (cleared) "Журнал очищен" else "Очистка журнала не подтверждена; проверьте состояние logger", Toast.LENGTH_LONG).show()
+        }
     }
 
     // --- Действия раздела «DICOM-теги» (Этап 4.1) ---
 
     fun loadExternalDicomFile(uri: Uri) {
+        val ticket = metadataRequests.next()
+        _externalReadId.value = java.util.UUID.randomUUID().toString()
+        externalLoadJob?.cancel()
+        renderRequests.next(); renderJob?.cancel(); frameCache.clear()
         _selectedExternalFileUri.value = uri
-        _externalFileError.value = null
-        _isExternalFileLoading.value = true
-        _viewerCurrentFrame.value = 1
-        _isViewerFullScreen.value = false
-        lastLoadedFilePath = null
-        viewModelScope.launch(Dispatchers.IO) {
+        changeViewerSource(ru.medeng.dicomtool.domain.model.ViewerSource.External(uri.toString()))
+        _viewerRenderState.value = DicomViewerRenderState.Loading
+        _externalFileSummary.value = null; _externalFileTags.value = emptyList()
+        _externalFileError.value = null; _isExternalFileLoading.value = true
+        _viewerCurrentFrame.value = 1; _isViewerFullScreen.value = false; lastLoadedFilePath = null
+        val encoding = _externalTagEncodingOverride.value.charsetName
+        externalLoadJob = viewModelScope.launch {
             try {
-                val parseResult = DicomFileReader.readFromUri(
-                    context = appContext,
-                    uri = uri,
-                    forcedCharset = _externalTagEncodingOverride.value.charsetName
-                )
-                withContext(Dispatchers.Main) {
-                    _externalFileSummary.value = parseResult.summary
-                    _externalFileTags.value = parseResult.tags
-                    _isExternalFileLoading.value = false
+                val job = coroutineContext[Job]!!
+                val parsed = withContext(Dispatchers.IO) { viewerWorkMutex.withLock {
+                    metadataRequests.check(ticket)
+                    DicomFileReader.readFromUri(appContext, uri, encoding) { job.ensureActive(); metadataRequests.check(ticket) }
+                } }
+                metadataRequests.check(ticket)
+                _externalFileSummary.value = parsed.summary; _externalFileTags.value = parsed.tags
+                _isExternalFileLoading.value = false
+                if (_viewerSource.value == ru.medeng.dicomtool.domain.model.ViewerSource.External(uri.toString())) triggerFrameDecodeAndRender(true)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled
+            } catch (oom: OutOfMemoryError) {
+                if (metadataRequests.isCurrent(ticket)) {
+                    _externalFileSummary.value = null; _externalFileTags.value = emptyList()
+                    _externalFileError.value = "Недостаточно памяти для метаданных DICOM"; _isExternalFileLoading.value = false
+                    if (_viewerSource.value == ru.medeng.dicomtool.domain.model.ViewerSource.External(uri.toString()))
+                        _viewerRenderState.value = DicomViewerRenderState.Error(_externalFileError.value!!)
                 }
             } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
+                if (metadataRequests.isCurrent(ticket)) {
                     _externalFileError.value = e.message ?: "Ошибка чтения DICOM-файла"
-                    _externalFileSummary.value = null
-                    _externalFileTags.value = emptyList()
-                    _isExternalFileLoading.value = false
+                    _externalFileSummary.value = null; _externalFileTags.value = emptyList(); _isExternalFileLoading.value = false
+                    if (_viewerSource.value == ru.medeng.dicomtool.domain.model.ViewerSource.External(uri.toString()))
+                        _viewerRenderState.value = DicomViewerRenderState.Error(_externalFileError.value!!)
                 }
             }
         }
     }
 
     fun clearExternalFile() {
+        metadataRequests.next(); externalLoadJob?.cancel(); _isExternalFileLoading.value = false
+        renderRequests.next(); frameCache.clear()
+        changeViewerSource(ru.medeng.dicomtool.domain.model.ViewerSource.None)
         renderJob?.cancel()
         _selectedExternalFileUri.value = null
         _externalFileSummary.value = null
@@ -1419,10 +1436,41 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
         _externalTagSearchQuery.value = query
     }
 
+    init {
+        viewModelScope.launch {
+            var observingOtherOwner = false
+            ru.medeng.dicomtool.dicom.scu.ScuOperationGate.active.collect { lease ->
+                if (lease != null && lease.owner != scuLeaseOwner) {
+                    observingOtherOwner = true
+                    _scuConfig.update { it.copy(isOperationInProgress = true, activeOperationName = lease.operation,
+                        noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = "Операция ещё выполняется", lastStatusMessage = "Ожидается завершение сетевой операции предыдущего экрана и освобождение ресурсов.", isLastOperationSuccess = null) }
+                } else if (lease == null && observingOtherOwner) {
+                    observingOtherOwner = false
+                    _scuConfig.update { it.copy(isOperationInProgress = false, activeOperationName = null,
+                        noticeId = java.util.UUID.randomUUID().toString(), lastStatusTitle = "Операция завершена", lastStatusMessage = "Проверьте результаты файлов, ответы узла и состояние записи технического журнала.", isLastOperationSuccess = null) }
+                }
+            }
+        }
+        viewModelScope.launch {
+            combine(studies, archive.busy, archiveIndexState) { list, busy, state -> Triple(list, busy, state) }
+                .collect { (list, busy, state) ->
+                    val source = _viewerSource.value as? ru.medeng.dicomtool.domain.model.ViewerSource.Received
+                    if (!busy && !state.isLoading && source != null && list.none { it.studyInstanceUid == source.studyInstanceUid }) {
+                        changeViewerSource(ru.medeng.dicomtool.domain.model.ViewerSource.None)
+                        _selectedStudyUid.value = null
+                    }
+                }
+        }
+    }
+
     override fun onCleared() {
+        receivedTagRequests.next(); receivedTagJob?.cancel()
+        metadataRequests.next(); renderRequests.next(); externalLoadJob?.cancel()
+        sendCancellation?.request()
+        scanJob?.cancel()
         super.onCleared()
         renderJob?.cancel()
         frameCache.clear()
-        DicomRuntimeRegistry.clearScuTempCache(appContext)
+        // Each SCU operation cleans up only its own temporary file in finally.
     }
 }

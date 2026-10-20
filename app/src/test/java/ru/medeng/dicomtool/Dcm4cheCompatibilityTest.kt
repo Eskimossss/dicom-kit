@@ -1,5 +1,8 @@
 package ru.medeng.dicomtool
 
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.dcm4che3.data.Attributes
 import org.dcm4che3.data.Tag
 import org.dcm4che3.data.UID
@@ -74,6 +77,7 @@ class DicomScpStage2IntegrationTest {
         scpServer.stopServer()
         scuExecutor.shutdownNow()
         scuScheduled.shutdownNow()
+        logger.shutdown()
         tempRootDir.deleteRecursively()
     }
 
@@ -162,7 +166,8 @@ class DicomScpStage2IntegrationTest {
         // Проверяем извлечение тегов для UI (включая вложенную последовательность SQ)
         val extractedTags = repository.getTagsForInstanceFile(savedFilePath)
         assertTrue(extractedTags.any { it.tagHex == "(0010,0010)" && it.value == "IVANOV^IVAN^IVANOVICH" })
-        assertTrue(extractedTags.any { it.tagHex == "(0008,1110)" && it.vr == "SQ" && it.value.contains("1.2.840.10008.5.1.4.1.1.2") })
+        assertTrue(extractedTags.any { it.tagHex == "(0008,1110)" && it.vr == "SQ" &&
+            it.sequenceItems.any { item -> item.tags.any { tag -> tag.value.contains("1.2.840.10008.5.1.4.1.1.2") } } })
         assertTrue(extractedTags.any { it.tagHex == "(7FE0,0010)" })
 
         // 3. Проверяем повторную отправку (Re-transmission) того же SOPInstanceUID:
@@ -241,7 +246,13 @@ class DicomScpStage2IntegrationTest {
         }
 
         // 6. Проверяем технический журнал и его сохранение между перезапусками
-        val logEntries = logger.logsFlow.value
+        // The peer may receive RJ before the SCP thread returns from its write and logs the callback.
+        // Wait for that actual event; do not infer it from the client's exception or invent a log entry.
+        val logEntries = runBlocking {
+            withTimeout(2000) {
+                logger.logsFlow.first { entries -> entries.any { it.category == DicomLogCategory.ASSOCIATE_RJ } }
+            }
+        }
         assertTrue(logEntries.any { it.category == DicomLogCategory.TCP_CONNECT })
         assertTrue(logEntries.any { it.category == DicomLogCategory.ASSOCIATE_RQ })
         assertTrue(logEntries.any { it.category == DicomLogCategory.ASSOCIATE_AC })
@@ -251,20 +262,24 @@ class DicomScpStage2IntegrationTest {
         assertTrue(logEntries.any { it.category == DicomLogCategory.C_STORE_RQ })
         assertTrue(logEntries.any { it.category == DicomLogCategory.C_STORE_RSP })
         assertTrue(logEntries.any { it.category == DicomLogCategory.ASSOCIATE_RJ })
-        assertTrue(logEntries.any { it.category == DicomLogCategory.RELEASE_RQ })
-        assertTrue(logEntries.any { it.category == DicomLogCategory.RELEASE_RP })
+        // Decoder termination does not prove that an A-RELEASE PDU was observed.
+        assertTrue(logEntries.any { it.category == DicomLogCategory.TCP_DISCONNECT })
+        assertFalse(logEntries.any { it.category == DicomLogCategory.RELEASE_RP })
 
         // Убеждаемся, что ФИО пациента не попало в технический журнал
         val allLogStrings = logEntries.flatMap { it.summaryLines + it.technicalDetails.values + it.title }
         assertFalse("PatientName must not leak into technical log", allLogStrings.any { it.contains("IVANOV^IVAN") })
 
         // Проверяем перезагрузку журнала с диска и сохранение журнала при полной очистке исследований
+        assertTrue("Observed events must cross the background writer barrier", logger.flushPendingWrites())
         val reloadedLogger = PersistentDicomTechnicalLogger(logFile)
-        assertEquals(logEntries.size, reloadedLogger.logsFlow.value.size)
+        assertTrue("Every observed event must reload; later connection callbacks may add more",
+            reloadedLogger.logsFlow.value.map { it.id }.containsAll(logEntries.map { it.id }))
 
         repository.clearAllStudies()
         assertEquals(0, repository.studiesFlow.value.size)
         assertTrue("Clearing studies must NOT delete technical logs", reloadedLogger.logsFlow.value.isNotEmpty())
+        reloadedLogger.shutdown()
     }
 
     private fun performCEcho(callingAe: String, calledAe: String, host: String, port: Int): Int {
@@ -405,5 +420,38 @@ class DicomScpStage2IntegrationTest {
         val verifier = Dcm4cheEngineVerifier()
         val report = verifier.verifyDcm4cheStackCompatibility()
         assertTrue(report.details, report.isCompatible)
+    }
+
+    @Test
+    fun unsafeStudyUidReturnsFailedCStoreAndKeepsCompleteSyntheticPayload() {
+        val port = java.net.ServerSocket(0).use { it.localPort }
+        assertTrue(scpServer.startServer("STORAGE_TEST", port).isSuccess)
+        val pixels = ByteArray(128 * 128 * 2) { (it % 127).toByte() }
+        val dataset = createSampleImageDataset(UID.CTImageStorage, "1.2.3.4.5", "..", "1.2.3.4",
+            "CT", "SYNTHETIC^STORAGE", "SYNTHETIC", pixels)
+        val status = performCStore("TEST_SCU", "STORAGE_TEST", "127.0.0.1", port,
+            UID.CTImageStorage, "1.2.3.4.5", UID.ExplicitVRLittleEndian, dataset)
+        assertEquals(Status.ProcessingFailure, status)
+        assertTrue(storageDir.walkTopDown().none { it.extension == "dcm" })
+        val retained = File(storageDir, ".incoming_tmp").listFiles()!!.single()
+        DicomInputStream(retained).use { dis ->
+            dis.readFileMetaInformation()
+            assertArrayEquals(pixels, dis.readDataset().getBytes(Tag.PixelData))
+        }
+    }
+
+    @Test
+    fun publicationFailureDoesNotReturnSuccessfulCStoreOrDestroyPayload() {
+        val blocker = File(storageDir, "1.2.3/1.2.3.4/1.2.3.4.5.dcm").apply { mkdirs() }
+        val keep = File(blocker, "keep.txt").apply { writeText("existing original must remain") }
+        val port = java.net.ServerSocket(0).use { it.localPort }
+        assertTrue(scpServer.startServer("STORAGE_TEST", port).isSuccess)
+        val dataset = createSampleImageDataset(UID.CTImageStorage, "1.2.3.4.5", "1.2.3", "1.2.3.4",
+            "CT", "SYNTHETIC^STORAGE", "SYNTHETIC", ByteArray(128 * 128 * 2))
+        val status = performCStore("TEST_SCU", "STORAGE_TEST", "127.0.0.1", port,
+            UID.CTImageStorage, "1.2.3.4.5", UID.ExplicitVRLittleEndian, dataset)
+        assertEquals(Status.ProcessingFailure, status)
+        assertEquals("existing original must remain", keep.readText())
+        assertEquals(1, File(storageDir, ".incoming_tmp").listFiles()!!.count { it.extension == "part" })
     }
 }

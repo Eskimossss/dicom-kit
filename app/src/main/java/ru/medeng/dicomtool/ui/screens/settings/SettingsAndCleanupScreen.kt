@@ -88,8 +88,12 @@ import java.util.Locale
 @Composable
 fun SettingsAndCleanupScreen(
     storageInfo: StorageLocationInfo,
+    receptionOptions: ru.medeng.dicomtool.data.storage.ReceptionStorageOptions,
+    onReceptionOptionsChange: (ru.medeng.dicomtool.data.storage.ReceptionStorageOptions) -> Unit,
+    onRecoverIncoming: () -> Unit,
     isMigrating: Boolean,
     migrationStatusMessage: String?,
+    migrationNoticeId: String,
     studiesCount: Int,
     filesCount: Int,
     totalBytes: Long,
@@ -131,7 +135,8 @@ fun SettingsAndCleanupScreen(
             },
             text = {
                 Text(
-                    text = "Будут удалены все принятые DICOM-файлы ($filesCount шт.) из активного хранилища. Технический журнал DICOM сохранится. Это действие нельзя отменить.",
+                    text = "Будут удалены подтверждённые файлы приложения из хранилища. Неизвестные SAF-документы и сохранённые входящие .incoming_tmp/*.part не удаляются. Технический журнал сохранится. Это действие нельзя отменить." +
+                        (storageInfo.retainedIncoming.warningMessage?.let { "\n\n$it" } ?: ""),
                     color = TextSecondarySlate,
                     softWrap = true
                 )
@@ -403,6 +408,9 @@ fun SettingsAndCleanupScreen(
                             color = TextSecondarySlate,
                             softWrap = true
                         )
+                        storageInfo.retainedIncoming.warningMessage?.let { warning ->
+                            ru.medeng.dicomtool.ui.components.AppNotice("settings-retained:${storageInfo.retainedIncoming}", warning)
+                        }
                         if (storageInfo.type == StorageType.SAF) {
                             Text(
                                 text = "Постоянный доступ через Storage Access Framework без MANAGE_EXTERNAL_STORAGE",
@@ -430,6 +438,25 @@ fun SettingsAndCleanupScreen(
 
                 Spacer(modifier = Modifier.height(12.dp))
 
+                if (storageInfo.retainedIncoming.filesCount > 0) {
+                    TextButton(onClick = onRecoverIncoming, enabled = !isMigrating) { Text("Повторить сохранение входящих файлов") }
+                }
+                Text("Повторные передачи", fontWeight = FontWeight.SemiBold)
+                ru.medeng.dicomtool.data.storage.IncomingDuplicatePolicy.entries.forEach { policy ->
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()
+                        .clickable(enabled = !isMigrating) { onReceptionOptionsChange(receptionOptions.copy(duplicates = policy)) }) {
+                        androidx.compose.material3.RadioButton(selected = receptionOptions.duplicates == policy,
+                            enabled = !isMigrating, onClick = { onReceptionOptionsChange(receptionOptions.copy(duplicates = policy)) })
+                        Text(policy.label, fontSize = 12.sp)
+                    }
+                }
+                Text("При переносе и восстановлении точные повторы объединяются в одну проверенную копию; разные данные сохраняются отдельно.", fontSize = 11.sp)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    androidx.compose.material3.Checkbox(checked = receptionOptions.patientFolderNames, enabled = !isMigrating,
+                        onCheckedChange = { onReceptionOptionsChange(receptionOptions.copy(patientFolderNames = it)) })
+                    Text("ФИО + UID для папок новых исследований", fontSize = 12.sp)
+                }
+                Text("ФИО в имени папки содержит персональные данные. Старые папки не переименовываются; продолжение исследования сохраняется в существующую папку.", fontSize = 11.sp)
                 // Кнопки управления хранилищем
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -509,13 +536,7 @@ fun SettingsAndCleanupScreen(
                 }
 
                 if (!migrationStatusMessage.isNullOrBlank()) {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = migrationStatusMessage,
-                        fontSize = 12.sp,
-                        color = if (migrationStatusMessage.contains("Ошибок")) ErrorRed else PrimaryBlue,
-                        lineHeight = 16.sp
-                    )
+                    ru.medeng.dicomtool.ui.components.AppNotice("archive-operation:$migrationNoticeId:$migrationStatusMessage", migrationStatusMessage)
                 }
             }
 
@@ -553,7 +574,7 @@ fun SettingsAndCleanupScreen(
                     )
                 }
                 Text(
-                    text = "Будут удалены все DICOM-файлы из папки хранения. Технический журнал не удаляется.",
+                    text = "Удаляются файлы исследований. Пустые SAF-папки могут остаться для защиты сторонних документов. Журнал и оставшиеся входящие данные не удаляются.",
                     fontSize = 12.sp,
                     lineHeight = 16.sp,
                     color = TextSecondarySlate,

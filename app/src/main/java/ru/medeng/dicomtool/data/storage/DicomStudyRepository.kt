@@ -64,17 +64,25 @@ interface DicomStudyRepository {
  */
 class LocalDicomStudyRepository(
     override val storageRootDir: File,
-    val context: Context? = null,
-    override val storageManager: DicomStorageManager? = null
+    context: Context? = null,
+    override val storageManager: DicomStorageManager? = null,
+    eagerLoad: Boolean = true,
+    private val onHeaderRead: () -> Unit = {}
 ) : DicomStudyRepository {
 
+    private val context = context?.applicationContext as? android.app.Application
     private val lock = ReentrantLock()
+    private val coordinator by lazy { StorageCoordinator.forRoot(storageRootDir) }
+    private val records = LinkedHashMap<String, ParsedRecord>()
+    private val readProblems = java.util.concurrent.ConcurrentHashMap<String, DicomReadProblem>()
+    private fun currentProblems() = readProblems.values.sortedBy { it.fileName }
+    private val _indexState = MutableStateFlow(ArchiveIndexState(isLoading = !eagerLoad))
+    val indexState: StateFlow<ArchiveIndexState> = _indexState.asStateFlow()
     private val _studiesFlow = MutableStateFlow<List<DicomStudyItem>>(emptyList())
     override val studiesFlow: StateFlow<List<DicomStudyItem>> = _studiesFlow.asStateFlow()
 
     init {
-        storageRootDir.mkdirs()
-        refreshFromDisk()
+        if (eagerLoad) refreshFromDisk()
     }
 
     override fun saveIncomingInstance(
@@ -82,68 +90,70 @@ class LocalDicomStudyRepository(
         studyInstanceUid: String,
         seriesInstanceUid: String,
         sopInstanceUid: String
-    ): DicomSaveResult {
-        return if (storageManager != null) {
+    ): DicomSaveResult = saveWithOptions(tempIncomingFile, studyInstanceUid, seriesInstanceUid, sopInstanceUid,
+        storageManager?.receptionOptions?.value ?: ReceptionStorageOptions(duplicates = IncomingDuplicatePolicy.DEDUPLICATE))
+
+    internal fun saveRetainedIncoming(file: File, study: String, series: String, sop: String): DicomSaveResult =
+        saveWithOptions(file, study, series, sop, (storageManager?.receptionOptions?.value ?: ReceptionStorageOptions()).copy(duplicates = IncomingDuplicatePolicy.DEDUPLICATE))
+
+    private fun saveWithOptions(tempIncomingFile: File, studyInstanceUid: String, seriesInstanceUid: String,
+                                sopInstanceUid: String, options: ReceptionStorageOptions): DicomSaveResult = coordinator.receiving {
+        val folder = if (options.patientFolderNames) runCatching {
+            DicomInputStream(tempIncomingFile).use { dis ->
+                dis.includeBulkData = DicomInputStream.IncludeBulkData.NO
+                ru.medeng.dicomtool.dicom.tags.BoundedDicomRead.install(dis)
+                dis.readFileMetaInformation()
+                val ds = dis.readDatasetUntilPixelData()
+                StudyFolderNames.create(DicomCharsetDecoder.decodeStringAttribute(ds, Tag.PatientName, VR.PN, "").value, studyInstanceUid)
+            }
+        }.getOrDefault(studyInstanceUid) else studyInstanceUid
+        val result = if (storageManager != null) {
             storageManager.saveIncomingDicomFile(
                 tempIncomingFile = tempIncomingFile,
                 studyInstanceUid = studyInstanceUid,
                 seriesInstanceUid = seriesInstanceUid,
-                sopInstanceUid = sopInstanceUid
+                sopInstanceUid = sopInstanceUid,
+                duplicatePolicy = options.duplicates, studyFolderName = folder
             )
         } else {
-            // Резервное сохранение во внутреннее хранилище
-            val targetDir = File(
-                File(storageRootDir, sanitizeFolder(studyInstanceUid)),
-                sanitizeFolder(seriesInstanceUid)
-            ).apply { mkdirs() }
-            val primaryTarget = File(targetDir, "${sanitizeFolder(sopInstanceUid)}.dcm")
-            val finalTarget: File
-            val duplicateNote: String
-
-            if (primaryTarget.exists()) {
-                val isIdentical = tempIncomingFile.length() == primaryTarget.length() &&
-                    tempIncomingFile.readBytes().contentEquals(primaryTarget.readBytes())
-                if (isIdentical) {
-                    tempIncomingFile.delete()
-                    finalTarget = primaryTarget
-                    duplicateNote = "Identical re-transmission detected"
-                } else {
-                    val copyFile = File(targetDir, "${sanitizeFolder(sopInstanceUid)}_dup_${System.currentTimeMillis()}.dcm")
-                    val moved = tempIncomingFile.renameTo(copyFile)
-                    if (!moved) {
-                        tempIncomingFile.copyTo(copyFile, overwrite = true)
-                        tempIncomingFile.delete()
-                    }
-                    finalTarget = copyFile
-                    duplicateNote = "Duplicate SOP Instance UID saved separately as ${copyFile.name}"
-                }
-            } else {
-                val moved = tempIncomingFile.renameTo(primaryTarget)
-                if (!moved) {
-                    tempIncomingFile.copyTo(primaryTarget, overwrite = true)
-                    tempIncomingFile.delete()
-                }
-                finalTarget = primaryTarget
-                duplicateNote = "Saved as new instance"
-            }
-
-            DicomSaveResult.Success(
-                destinationDescription = finalTarget.absolutePath,
-                savedSizeBytes = finalTarget.length(),
-                duplicateActionNote = duplicateNote
-            )
+            VerifiedDicomStore(FileStorageAccess(storageRootDir), DocumentOwnership.forRoot(storageRootDir),
+                StorageCoordinator.forRoot(storageRootDir)).save(tempIncomingFile.storageSource(),
+                studyInstanceUid, seriesInstanceUid, sopInstanceUid, options.duplicates, folder)
         }
+        if (result is DicomSaveResult.Success) {
+            // Read only the verified destination; indexing is not a second C-STORE transaction.
+            runCatching {
+                val path = result.destinationDescription
+                val rec = if (path.startsWith("content://")) {
+                    val uri = Uri.parse(path)
+                    parseSummaryFromSource(path, uri.lastPathSegment ?: "received.dcm", result.savedSizeBytes,
+                        System.currentTimeMillis()) { context?.contentResolver?.openInputStream(uri) }
+                } else {
+                    val file = File(path)
+                    parseSummaryFromSource(path, file.name, result.savedSizeBytes, file.lastModified()) { FileInputStream(file) }
+                }
+                lock.withLock {
+                    if (rec != null) {
+                        records[path] = rec
+                        _indexState.value = _indexState.value.copy(indexedFiles = records.size, readProblems = currentProblems())
+                        publishRecords(records.values.filter { it.studyInstanceUid == rec.studyInstanceUid }, rec.studyInstanceUid)
+                    } else _indexState.value = _indexState.value.copy(readProblems = currentProblems())
+                }
+            }.onFailure { _indexState.value = _indexState.value.copy(warning = "Файл сохранён; индекс требует обновления: ${it.javaClass.simpleName}") }
+        }
+        result
     }
 
-    override fun refreshFromDisk() {
-        lock.withLock {
+    override fun refreshFromDisk() = coordinator.maintenance {
+        _indexState.value = ArchiveIndexState(isLoading = true)
+        try { lock.withLock {
+            storageRootDir.mkdirs()
             val parsedRecords = ArrayList<ParsedRecord>()
+            readProblems.clear()
 
             // 1. Сканируем внутреннее хранилище (если существует)
             if (storageRootDir.exists()) {
-                val internalFiles = storageRootDir.walkTopDown()
-                    .filter { it.isFile && it.extension.equals("dcm", ignoreCase = true) }
-                    .toList()
+                val internalFiles = StoragePaths.dicomFiles(storageRootDir).toList()
 
                 for (file in internalFiles) {
                     val rec = parseSummaryFromSource(
@@ -159,6 +169,7 @@ class LocalDicomStudyRepository(
 
             // 2. Сканируем настроенный SAF каталог (если настроен, доступен и context != null)
             val safUri = storageManager?.getSavedSafTreeUri()
+            var warning: String? = null
             if (context != null && safUri != null && storageManager?.isSafStorageWritable(safUri) == true) {
                 try {
                     val rootDoc = DocumentFile.fromTreeUri(context, safUri)
@@ -181,16 +192,18 @@ class LocalDicomStudyRepository(
                             }
                         }
                     }
-                } catch (_: Exception) {
-                    // Ошибки сканирования SAF (например временное отключение карты) не ломают чтение внутреннего хранилища
-                }
-            }
+                } catch (e: Exception) { warning = "Индекс SAF неполон: ${e.javaClass.simpleName}" }
+            } else if (safUri != null) warning = "SAF недоступен: доступ отозван или провайдер отключён. Показаны только доступные внутренние файлы."
+            records.clear()
+            parsedRecords.forEach { records[it.path] = it }
+            publishRecords(parsedRecords)
+            _indexState.value = ArchiveIndexState(warning = warning, indexedFiles = parsedRecords.size, readProblems = currentProblems())
+        } } catch (e: Exception) {
+            _indexState.value = ArchiveIndexState(warning = "Обновление индекса не завершено: ${e.javaClass.simpleName}")
+        }
+    }
 
-            if (parsedRecords.isEmpty()) {
-                _studiesFlow.value = emptyList()
-                return
-            }
-
+    private fun publishRecords(parsedRecords: Collection<ParsedRecord>, affectedStudy: String? = null) {
             // Группируем по StudyInstanceUID
             val groupedByStudy = parsedRecords.groupBy { it.studyInstanceUid }
 
@@ -200,6 +213,7 @@ class LocalDicomStudyRepository(
 
                 val seriesGroups = groupedBySeries.map { (seriesUid, seriesRecords) ->
                     val firstInSeries = seriesRecords.first()
+                    val duplicateCounts = seriesRecords.groupingBy { it.sopInstanceUid }.eachCount()
                     val sortedInstances = seriesRecords
                         .sortedWith(compareBy({ it.instanceNumber }, { it.sopInstanceUid }, { it.displayName }))
                         .map { rec ->
@@ -226,7 +240,7 @@ class LocalDicomStudyRepository(
                                 encodingWarning = rec.encodingWarning,
                                 filePath = rec.path,
                                 fileSizeBytes = rec.fileSize,
-                                duplicateCopyCount = seriesRecords.count { it.sopInstanceUid == rec.sopInstanceUid } - 1
+                                duplicateCopyCount = (duplicateCounts[rec.sopInstanceUid] ?: 1) - 1
                             )
                         }
                     DicomSeriesGroup(
@@ -276,8 +290,8 @@ class LocalDicomStudyRepository(
                 )
             }.sortedByDescending { it.studyDateFormatted }
 
-            _studiesFlow.value = studyItems
-        }
+            _studiesFlow.value = if (affectedStudy == null) studyItems else
+                (_studiesFlow.value.filterNot { it.studyInstanceUid == affectedStudy } + studyItems).sortedByDescending { it.studyDateFormatted }
     }
 
     override fun getTagsForStudy(
@@ -312,62 +326,8 @@ class LocalDicomStudyRepository(
 
         return try {
             val rawStream = streamOpener() ?: return emptyList()
-            DicomInputStream(BufferedInputStream(rawStream, 65536)).use { dis ->
-                dis.includeBulkData = DicomInputStream.IncludeBulkData.NO
-                val fmi: Attributes? = dis.readFileMetaInformation()
-                val dataset: Attributes = dis.readDatasetUntilPixelData()
-                val pixelDataTagPresent = dis.tag() == Tag.PixelData
-                val pixelDataVr = if (pixelDataTagPresent) dis.vr()?.name ?: "OW" else null
-                val pixelDataLength = if (pixelDataTagPresent) dis.unsignedLength() else -1L
-
-                val declaredCharsetTerms = DicomCharsetDecoder.getDeclaredSpecificCharacterSets(dataset)
-                val result = ArrayList<DicomTagEntry>()
-                val dict = ElementDictionary.getStandardElementDictionary()
-
-                if (fmi != null) {
-                    extractAttributesToTagList(fmi, dict, emptyList(), result)
-                }
-                extractAttributesToTagList(dataset, dict, declaredCharsetTerms, result)
-
-                if (pixelDataTagPresent) {
-                    val rows = dataset.getInt(Tag.Rows, 0)
-                    val cols = dataset.getInt(Tag.Columns, 0)
-                    val frames = dataset.getInt(Tag.NumberOfFrames, 1).coerceAtLeast(1)
-                    val bitsAlloc = dataset.getInt(Tag.BitsAllocated, 16)
-                    val bitsStored = dataset.getInt(Tag.BitsStored, bitsAlloc)
-                    val highBit = dataset.getInt(Tag.HighBit, bitsStored - 1)
-                    val pixRep = if (dataset.getInt(Tag.PixelRepresentation, 0) == 1) "signed" else "unsigned"
-                    val photo = dataset.getString(Tag.PhotometricInterpretation, "MONOCHROME2").trim()
-                    val tsuid = (fmi?.getString(Tag.TransferSyntaxUID) ?: dis.transferSyntax ?: UID.ImplicitVRLittleEndian).trim()
-                    val tsName = runCatching { UID.nameOf(tsuid) }.getOrDefault(tsuid)
-
-                    val sizeDesc = if (pixelDataLength >= 0) {
-                        val mb = String.format(Locale.US, "%.2f", pixelDataLength / (1024.0 * 1024.0))
-                        "$pixelDataLength байт ($mb МБ)"
-                    } else {
-                        "Инкапсулированный поток"
-                    }
-                    val contentSummary = buildString {
-                        append("Размер Pixel Data: $sizeDesc | ")
-                        append("Разрешение: ${cols}×${rows}, кадров: $frames | ")
-                        append("Формат: $photo, $bitsAlloc/$bitsStored бит (HighBit=$highBit, $pixRep) | ")
-                        append("Transfer Syntax: $tsuid ($tsName)")
-                    }
-                    result.add(
-                        DicomTagEntry(
-                            tagHex = "(7FE0,0010)",
-                            vr = pixelDataVr ?: "OW",
-                            name = "Pixel Data",
-                            nameRu = "Массив данных изображения (Pixel Data)",
-                            value = contentSummary,
-                            tagInt = Tag.PixelData,
-                            isBinary = true,
-                            binaryByteCount = pixelDataLength.coerceAtLeast(0)
-                        )
-                    )
-                }
-                result
-            }
+            rawStream.use { ru.medeng.dicomtool.dicom.tags.DicomFileReader.readFromStream(it,
+                fileName = file?.name ?: "received.dcm", fileSizeBytes = file?.length() ?: 0).tags }
         } catch (e: Exception) {
             listOf(
                 DicomTagEntry(
@@ -381,80 +341,31 @@ class LocalDicomStudyRepository(
         }
     }
 
-    override fun deleteStudy(studyInstanceUid: String): Boolean {
+    override fun deleteStudy(studyInstanceUid: String): Boolean = coordinator.maintenance {
         lock.withLock {
             val study = _studiesFlow.value.firstOrNull { it.studyInstanceUid == studyInstanceUid }
-                ?: return false
-            var deletedAny = false
-            study.seriesList.flatMap { it.instances }.forEach { inst ->
-                if (inst.filePath.startsWith("content://") && context != null) {
-                    try {
-                        val uri = Uri.parse(inst.filePath)
-                        val doc = DocumentFile.fromSingleUri(context, uri)
-                        if (doc != null && doc.delete()) {
-                            deletedAny = true
-                        }
-                    } catch (_: Exception) {}
-                } else {
-                    val f = File(inst.filePath)
-                    val seriesDir = f.parentFile
-                    val studyDir = seriesDir?.parentFile
-                    if (f.exists() && f.delete()) {
-                        deletedAny = true
-                    }
-                    if (seriesDir != null && seriesDir.exists() && seriesDir.listFiles().isNullOrEmpty()) {
-                        seriesDir.delete()
-                    }
-                    if (studyDir != null && studyDir != storageRootDir && studyDir.exists() && studyDir.listFiles().isNullOrEmpty()) {
-                        studyDir.delete()
-                    }
-                }
+                ?: return@withLock false
+            var removed = (storageManager?.clearOwnedSaf(studyInstanceUid) ?: 0) > 0
+            for (inst in study.seriesList.flatMap { it.instances }) {
+                if (inst.filePath.startsWith("content://")) continue // SAF deletion only through ownership ledger.
+                val file = runCatching { StoragePaths.contained(storageRootDir, File(inst.filePath)) }.getOrNull() ?: continue
+                if (file.isFile && file.extension.equals("dcm", true) && file.delete()) removed = true
             }
             refreshFromDisk()
-            return deletedAny
+            removed
         }
     }
 
-    override fun clearAllStudies(): Int {
+    override fun clearAllStudies(): Int = coordinator.maintenance {
         lock.withLock {
-            var deletedCount = 0
-            if (storageRootDir.exists()) {
-                storageRootDir.walkBottomUp().forEach { file ->
-                    if (file != storageRootDir) {
-                        if (file.isFile && file.extension.equals("dcm", ignoreCase = true)) {
-                            if (file.delete()) deletedCount++
-                        } else if (file.isDirectory) {
-                            file.delete()
-                        }
-                    }
-                }
+            var removed = storageManager?.clearOwnedSaf() ?: 0
+            // The internal root is private app storage. Never follow paths outside it or delete directories.
+            StoragePaths.dicomFiles(storageRootDir).forEach { candidate ->
+                val file = runCatching { StoragePaths.contained(storageRootDir, candidate) }.getOrNull()
+                if (file != null && file.delete()) removed++
             }
-
-            // Очищаем SAF-файлы, если настроены
-            val safUri = storageManager?.getSavedSafTreeUri()
-            if (context != null && safUri != null && storageManager?.isSafStorageWritable(safUri) == true) {
-                try {
-                    val rootDoc = DocumentFile.fromTreeUri(context, safUri)
-                    rootDoc?.listFiles()?.forEach { studyDoc ->
-                        if (studyDoc.isDirectory) {
-                            studyDoc.listFiles().forEach { seriesDoc ->
-                                if (seriesDoc.isDirectory) {
-                                    seriesDoc.listFiles().forEach { dcmDoc ->
-                                        if (dcmDoc.isFile && dcmDoc.name?.endsWith(".dcm", ignoreCase = true) == true) {
-                                            if (dcmDoc.delete()) deletedCount++
-                                        }
-                                    }
-                                    seriesDoc.delete()
-                                }
-                            }
-                            studyDoc.delete()
-                        }
-                    }
-                } catch (_: Exception) {}
-            }
-
             refreshFromDisk()
-            return deletedCount
+            removed
         }
     }
 
@@ -512,12 +423,19 @@ class LocalDicomStudyRepository(
         lastModified: Long,
         streamOpener: () -> InputStream?
     ): ParsedRecord? {
+        var stage = DicomReadStage.OPEN
         return try {
-            val rawStream = streamOpener() ?: return null
-            DicomInputStream(BufferedInputStream(rawStream, 65536)).use { dis ->
+            onHeaderRead()
+            val rawStream = streamOpener() ?: throw java.io.FileNotFoundException("Source unavailable")
+            stage = DicomReadStage.FILE_META
+            rawStream.use { source -> DicomInputStream(BufferedInputStream(source, 65536)).use { dis ->
                 dis.includeBulkData = DicomInputStream.IncludeBulkData.NO
+                ru.medeng.dicomtool.dicom.tags.BoundedDicomRead.install(dis)
+                stage = DicomReadStage.FILE_META
                 val fmi = dis.readFileMetaInformation()
+                stage = DicomReadStage.HEADER
                 val ds = dis.readDatasetUntilPixelData()
+                stage = DicomReadStage.METADATA
 
                 val studyUid = ds.getString(Tag.StudyInstanceUID)?.takeIf { it.isNotBlank() }
                     ?: "UNKNOWN_STUDY"
@@ -580,6 +498,7 @@ class LocalDicomStudyRepository(
                     charsetDiag.warningMessage
                 ).firstOrNull()
 
+                readProblems.remove(path)
                 ParsedRecord(
                     path = path,
                     displayName = displayName,
@@ -618,171 +537,11 @@ class LocalDicomStudyRepository(
                     specificCharacterSet = charsetDiag.effectiveCharsetDescription,
                     encodingWarning = combinedWarning
                 )
-            }
-        } catch (_: Exception) {
+            } }
+        } catch (error: Exception) {
+            readProblems[path] = DicomReadProblem.from(path, displayName, stage, error)
             null
         }
-    }
-
-    private fun extractAttributesToTagList(
-        attrs: Attributes,
-        dict: ElementDictionary,
-        inheritedCharsetTerms: List<String>,
-        out: MutableList<DicomTagEntry>,
-        depth: Int = 0
-    ) {
-        val localCharsetTerms = DicomCharsetDecoder.getDeclaredSpecificCharacterSets(attrs)
-            .ifEmpty { inheritedCharsetTerms }
-
-        for (tag in attrs.tags()) {
-            val vr = attrs.getVR(tag) ?: dict.vrOf(tag) ?: VR.UN
-            val tagHex = formatTagHex(tag)
-            val isPrivate = TagUtils.isPrivateTag(tag)
-            val creator = if (isPrivate) attrs.privateCreatorOf(tag) else null
-            val tagNames = ru.medeng.dicomtool.dicom.tags.DicomTagDictionary.resolveTagNames(tag, creator)
-
-            if (vr == VR.SQ) {
-                val seq: Sequence? = attrs.getSequence(tag)
-                val seqItems = ArrayList<ru.medeng.dicomtool.domain.model.DicomSequenceItem>()
-                val fullValueStr = formatAttributeValueFull(attrs, tag, vr, dict, localCharsetTerms, depth = depth)
-                if (!seq.isNullOrEmpty()) {
-                    seq.forEachIndexed { idx, itemAttrs ->
-                        val itemTags = ArrayList<DicomTagEntry>()
-                        extractAttributesToTagList(itemAttrs, dict, localCharsetTerms, itemTags, depth + 1)
-                        seqItems.add(ru.medeng.dicomtool.domain.model.DicomSequenceItem(idx + 1, itemTags))
-                    }
-                }
-                out.add(
-                    DicomTagEntry(
-                        tagHex = tagHex,
-                        vr = "SQ",
-                        name = tagNames.nameEn,
-                        value = fullValueStr,
-                        nameRu = tagNames.nameRu,
-                        tagInt = tag,
-                        isPrivate = isPrivate,
-                        isSequence = true,
-                        sequenceItems = seqItems,
-                        isBinary = false,
-                        depth = depth
-                    )
-                )
-                continue
-            }
-
-            val valueStr = formatAttributeValueFull(attrs, tag, vr, dict, localCharsetTerms, depth = depth)
-            val isBinary = vr == VR.OB || vr == VR.OW || vr == VR.UN || vr == VR.OF || vr == VR.OD
-            val byteCount = if (isBinary) runCatching { attrs.getBytes(tag)?.size?.toLong() ?: 0L }.getOrDefault(0L) else 0L
-
-            out.add(
-                DicomTagEntry(
-                    tagHex = tagHex,
-                    vr = vr.name,
-                    name = tagNames.nameEn,
-                    value = valueStr,
-                    nameRu = tagNames.nameRu,
-                    tagInt = tag,
-                    isPrivate = isPrivate,
-                    isSequence = false,
-                    sequenceItems = emptyList(),
-                    isBinary = isBinary,
-                    binaryByteCount = byteCount,
-                    depth = depth
-                )
-            )
-        }
-    }
-
-    private fun formatAttributeValueFull(
-        attrs: Attributes,
-        tag: Int,
-        vr: VR,
-        dict: ElementDictionary,
-        charsetTerms: List<String>,
-        depth: Int
-    ): String {
-        if (vr == VR.SQ) {
-            val seq: Sequence? = attrs.getSequence(tag)
-            if (seq.isNullOrEmpty()) return "Empty Sequence (0 items)"
-            val indent = "  ".repeat(depth + 1)
-            val sb = StringBuilder("Sequence (${seq.size} items):")
-            seq.forEachIndexed { idx, item ->
-                val itemCharset = DicomCharsetDecoder.getDeclaredSpecificCharacterSets(item)
-                    .ifEmpty { charsetTerms }
-                sb.append("\n$indent[Item #${idx + 1}]")
-                for (subTag in item.tags()) {
-                    val subVr = item.getVR(subTag) ?: dict.vrOf(subTag) ?: VR.UN
-                    val subHex = formatTagHex(subTag)
-                    val subName = dict.keywordOf(subTag).takeIf { !it.isNullOrBlank() } ?: "PrivateTag"
-                    val subVal = if (depth < 4) {
-                        formatAttributeValueFull(item, subTag, subVr, dict, itemCharset, depth + 1)
-                    } else {
-                        decodeSingleTagString(item, subTag, subVr, itemCharset)
-                    }
-                    sb.append("\n$indent  $subHex [$subVr] $subName = $subVal")
-                }
-            }
-            return sb.toString()
-        }
-
-        if (DicomCharsetDecoder.isCharsetAffectedVr(vr)) {
-            val rawBytes = runCatching { attrs.getBytes(tag) }.getOrNull()
-            if (rawBytes != null) {
-                val decoded = DicomCharsetDecoder.decodeBytesWithDiagnostics(rawBytes, vr, charsetTerms)
-                return if (decoded.diagnosticWarning != null) {
-                    "${decoded.value}  [⚠ ${decoded.diagnosticWarning}]"
-                } else {
-                    decoded.value
-                }
-            }
-        }
-
-        val strings = attrs.getStrings(tag)
-        if (!strings.isNullOrEmpty()) {
-            val rawJoined = strings.joinToString("\\")
-            if (vr == VR.UI && strings.size == 1) {
-                val uidVal = strings[0].trim { it <= ' ' || it == '\u0000' }
-                val uidName = runCatching { UID.nameOf(uidVal) }.getOrNull()
-                if (!uidName.isNullOrBlank() && uidName != "?" && uidName != uidVal) {
-                    return "$uidVal ($uidName)"
-                }
-            }
-            return rawJoined
-        }
-
-        val bytes = runCatching { attrs.getBytes(tag) }.getOrNull()
-        if (bytes != null) {
-            if (bytes.isEmpty()) return ""
-            val previewCount = bytes.size.coerceAtMost(64)
-            val hex = bytes.take(previewCount).joinToString(" ") { "%02X".format(it) }
-            return if (bytes.size > previewCount) {
-                "$hex ... (${bytes.size} байт)"
-            } else {
-                "$hex (${bytes.size} байт)"
-            }
-        }
-
-        return ""
-    }
-
-    private fun decodeSingleTagString(
-        attrs: Attributes,
-        tag: Int,
-        vr: VR,
-        charsetTerms: List<String>
-    ): String {
-        if (DicomCharsetDecoder.isCharsetAffectedVr(vr)) {
-            val rawBytes = runCatching { attrs.getBytes(tag) }.getOrNull()
-            if (rawBytes != null) {
-                val decoded = DicomCharsetDecoder.decodeBytesWithDiagnostics(rawBytes, vr, charsetTerms)
-                return decoded.value
-            }
-        }
-        return attrs.getString(tag, "")
-    }
-
-    private fun formatTagHex(tag: Int): String {
-        return TagUtils.toString(tag).uppercase(Locale.ROOT)
     }
 
     private fun formatDicomDateTime(dateRaw: String, timeRaw: String, fileLastModified: Long): String {
@@ -804,7 +563,4 @@ class LocalDicomStudyRepository(
         return sdf.format(Date(fileLastModified))
     }
 
-    private fun sanitizeFolder(name: String): String {
-        return name.replace(Regex("[^a-zA-Z0-9._-]"), "_").take(64)
-    }
 }

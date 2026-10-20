@@ -264,22 +264,7 @@ object DicomCharsetDecoder {
             }
 
             "ISO_IR 144" -> {
-                // Проверяем, не записаны ли байты в Windows-1251 при ошибочно выставленном ISO_IR 144
-                if (looksLikeWin1251InsteadOfIso8859_5(bytes)) {
-                    val win1251Text = decodePersonNameOrText(bytes, vr, CHARSET_WIN1251)
-                    return DecodedDicomText(
-                        value = win1251Text,
-                        diagnosticWarning = "Несоответствие кодировки: в (0008,0005) заявлена ISO_IR 144 (ISO-8859-5), однако коды байтов соответствуют Windows-1251 (CP1251)."
-                    )
-                }
-                val utf8Exact = tryDecodeStrictUtf8(bytes, vr)
-                if (utf8Exact != null && containsCyrillic(utf8Exact) && bytes.size >= 4) {
-                    return DecodedDicomText(
-                        value = utf8Exact,
-                        diagnosticWarning = "Несоответствие кодировки: в (0008,0005) заявлена ISO_IR 144 (ISO-8859-5), но данные фактически закодированы в UTF-8."
-                    )
-                }
-                // Стандартное декодирование ISO_IR 144 (ISO-8859-5, кириллица)
+                // ISO-8859-5 can decode these bytes. A language heuristic cannot disprove the declaration.
                 val iso144Text = decodePersonNameOrText(bytes, vr, CHARSET_ISO_8859_5)
                 return DecodedDicomText(iso144Text, syntaxDeviationNote)
             }

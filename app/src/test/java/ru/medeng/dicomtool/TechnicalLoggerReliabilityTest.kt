@@ -144,8 +144,8 @@ class TechnicalLoggerReliabilityTest {
         // Короткие метки могут совпадать
         assertEquals("SCU-1", session1.displayLabel)
         assertEquals("SCU-2", session2.displayLabel)
-        assertEquals("ASSOC-1", scp1.displayLabel)
-        assertEquals("ASSOC-1", scp2.displayLabel)
+        assertTrue(scp1.displayLabel.startsWith("SCP-"))
+        assertNotEquals(scp1.sessionUid, scp2.sessionUid)
 
         // Внутренние уникальные идентификаторы не совпадают
         assertNotEquals(session1.sessionUid, session2.sessionUid)

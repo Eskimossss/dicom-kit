@@ -16,6 +16,7 @@ android {
         targetSdk = 35
         versionCode = 10301
         versionName = "1.3.1"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         vectorDrawables {
             useSupportLibrary = true
@@ -49,6 +50,12 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Opt-in isolated emulator package; normal debug/release application IDs are unchanged.
+            if (providers.gradleProperty("stage51Isolated").orNull == "true") {
+                applicationIdSuffix = ".storagesafetytest"
+            }
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(
@@ -111,5 +118,10 @@ dependencies {
     implementation(libs.slf4j.simple)
 
     testImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.junit)
+    androidTestImplementation(platform(libs.androidx.compose.bom))
+    androidTestImplementation(libs.androidx.ui.test.junit4)
+    debugImplementation(libs.androidx.ui.test.manifest)
     debugImplementation(libs.androidx.ui.tooling)
 }

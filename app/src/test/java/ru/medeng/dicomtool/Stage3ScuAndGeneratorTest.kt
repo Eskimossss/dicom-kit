@@ -433,7 +433,7 @@ class Stage3ScuAndGeneratorTest {
             // 6. Проверяем подробность технического журнала (наличие ролей SCU и SCP, отсутствие PHI)
             val allLogs = logger.logsFlow.value
             assertTrue(allLogs.any { it.associationId.startsWith("SCU-") && it.technicalDetails["Роль"] == "SCU" })
-            assertTrue(allLogs.any { it.associationId.startsWith("ASSOC-") })
+            assertTrue(allLogs.any { it.associationId.startsWith("SCP-") })
             assertFalse(
                 "Technical log must never contain patient personal name",
                 allLogs.any { entry ->

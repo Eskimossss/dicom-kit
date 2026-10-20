@@ -144,7 +144,7 @@ import kotlin.math.roundToInt
 @Composable
 fun SendScuScreen(
     config: ScuSendConfig,
-    preparedObject: PreparedSecondaryCaptureDicomObject,
+    preparedObject: PreparedSecondaryCaptureDicomObject?,
     freehandStrokes: List<FreehandStroke>,
     isExpandedWidth: Boolean,
     candidateFiles: List<ScuCandidateFile> = emptyList(),
@@ -378,12 +378,8 @@ private fun LastScuOperationResultBanner(
     batchProgress: ScuBatchProgressState = ScuBatchProgressState()
 ) {
     val isBusy = config.isOperationInProgress || batchProgress.isSending
-    val isWarning = config.isLastOperationWarning || (batchProgress.failedCount > 0 && batchProgress.sentSuccessCount > 0)
-    val isSuccess = if (batchProgress.totalFiles > 0 && !batchProgress.isSending) {
-        batchProgress.failedCount == 0
-    } else {
-        config.isLastOperationSuccess
-    }
+    val isWarning = config.isLastOperationWarning
+    val isSuccess = config.isLastOperationSuccess
 
     val bgColor = when {
         isBusy -> PrimaryBlueLight
@@ -407,69 +403,73 @@ private fun LastScuOperationResultBanner(
         else -> TextPrimaryDark
     }
 
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(10.dp),
-        color = bgColor,
-        border = BorderStroke(1.dp, borderColor)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ru.medeng.dicomtool.ui.components.NoticeVisibility("scu:${config.noticeId}:${if (isBusy) "busy" else "result"}",
+        autoHideSuccess = !isBusy && isSuccess == true && !isWarning) { dismiss ->
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(10.dp),
+            color = bgColor,
+            border = BorderStroke(1.dp, borderColor)
         ) {
-            if (isBusy) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(20.dp),
-                    color = PrimaryBlue,
-                    strokeWidth = 2.2.dp
-                )
-            } else {
-                val icon = when {
-                    isWarning -> Icons.Default.WarningAmber
-                    isSuccess == true -> Icons.Default.CheckCircle
-                    else -> Icons.Default.ErrorOutline
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                if (isBusy) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        color = PrimaryBlue,
+                        strokeWidth = 2.2.dp
+                    )
+                } else {
+                    val icon = when {
+                        isWarning -> Icons.Default.WarningAmber
+                        isSuccess == true -> Icons.Default.CheckCircle
+                        else -> Icons.Default.ErrorOutline
+                    }
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = accentColor,
+                        modifier = Modifier.size(20.dp)
+                    )
                 }
-                Icon(
-                    imageVector = icon,
-                    contentDescription = null,
-                    tint = accentColor,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
-            SelectionContainer(modifier = Modifier.weight(1f)) {
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    val title = if (batchProgress.isSending) {
-                        "Отправка DICOM-файлов…"
-                    } else {
-                        config.lastStatusTitle
-                    }
-                    if (!title.isNullOrBlank()) {
-                        Text(
-                            text = title,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = accentColor
-                        )
-                    }
-                    val msg = if (batchProgress.isSending) {
-                        "Передано ${batchProgress.sentSuccessCount} из ${batchProgress.totalFiles}" +
-                            if (batchProgress.currentFileName != null) " (${batchProgress.currentFileName})" else ""
-                    } else {
-                        config.lastStatusMessage
-                    }
-                    if (!msg.isNullOrBlank()) {
-                        Text(
-                            text = msg,
-                            fontSize = 12.sp,
-                            lineHeight = 17.sp,
-                            color = TextPrimaryDark,
-                            softWrap = true
-                        )
+                SelectionContainer(modifier = Modifier.weight(1f)) {
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        val title = if (batchProgress.isSending) {
+                            "Отправка DICOM-файлов…"
+                        } else {
+                            config.lastStatusTitle
+                        }
+                        if (!title.isNullOrBlank()) {
+                            Text(
+                                text = title,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = accentColor
+                            )
+                        }
+                        val msg = if (batchProgress.isSending) {
+                            "Передано ${batchProgress.sentSuccessCount} из ${batchProgress.totalFiles}" +
+                                if (batchProgress.currentFileName != null) " (${batchProgress.currentFileName})" else ""
+                        } else {
+                            config.lastStatusMessage
+                        }
+                        if (!msg.isNullOrBlank()) {
+                            Text(
+                                text = msg,
+                                fontSize = 12.sp,
+                                lineHeight = 17.sp,
+                                color = TextPrimaryDark,
+                                softWrap = true
+                            )
+                        }
                     }
                 }
+                ru.medeng.dicomtool.ui.components.NoticeCloseButton(dismiss, Modifier.align(Alignment.Top))
             }
         }
     }
@@ -590,7 +590,7 @@ private fun PacsConnectionCard(
             }
 
             val cStoreEnabled = if (sendMode == ScuSendMode.TEST_IMAGE) {
-                !isBusy
+                !isBusy && config.syntheticEncoding.validationError(config) == null
             } else {
                 !isBusy && validCandidateFilesCount > 0
             }
@@ -689,6 +689,7 @@ fun PatientMetadataFormFields(
     val isDateError = dateValidation is DateValidationResult.Invalid
 
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        SyntheticEncodingSelector(config, onUpdateConfig)
         HorizontalFormFieldRow(
             label = "ФИО пациента",
             value = config.patientName,
@@ -965,7 +966,7 @@ private fun HorizontalFormFieldRow(
 @Composable
 fun TestImageGeneratorCard(
     config: ScuSendConfig,
-    preparedObject: PreparedSecondaryCaptureDicomObject,
+    preparedObject: PreparedSecondaryCaptureDicomObject?,
     freehandStrokes: List<FreehandStroke>,
     onUpdateConfig: ((ScuSendConfig) -> ScuSendConfig) -> Unit,
     onSetImageMode: (TestImageMode) -> Unit,
@@ -1018,7 +1019,7 @@ fun TestImageGeneratorCard(
 @Composable
 fun TestImageGeneratorContent(
     config: ScuSendConfig,
-    preparedObject: PreparedSecondaryCaptureDicomObject,
+    preparedObject: PreparedSecondaryCaptureDicomObject?,
     freehandStrokes: List<FreehandStroke>,
     onUpdateConfig: ((ScuSendConfig) -> ScuSendConfig) -> Unit,
     onSetImageMode: (TestImageMode) -> Unit,
@@ -1028,6 +1029,10 @@ fun TestImageGeneratorContent(
     onClearCanvas: () -> Unit,
     @Suppress("UNUSED_PARAMETER") onRegenerateUids: () -> Unit = {}
 ) {
+    if (preparedObject == null) {
+        Text(config.syntheticEncoding.validationError(config) ?: "Синтетический DICOM ещё не подготовлен.", color = ErrorRed)
+        return
+    }
     val activeStrokePoints = remember { mutableStateListOf<NormalizedPoint>() }
 
     // Создаём реальный Bitmap предпросмотра 512×512 из фактического буфера Pixel Data подготовленного объекта
@@ -1428,7 +1433,7 @@ private fun GeneratorModeTab(
 @Composable
 fun ScuImageGeneratorSubScreen(
     config: ScuSendConfig,
-    preparedObject: PreparedSecondaryCaptureDicomObject,
+    preparedObject: PreparedSecondaryCaptureDicomObject?,
     freehandStrokes: List<FreehandStroke>,
     onUpdateConfig: ((ScuSendConfig) -> ScuSendConfig) -> Unit,
     onSetImageMode: (TestImageMode) -> Unit,
@@ -1461,6 +1466,7 @@ fun ScuImageGeneratorSubScreen(
                 fontWeight = FontWeight.Bold,
                 color = TextPrimaryDark
             )
+            SyntheticEncodingSelector(config, onUpdateConfig)
             TestImageGeneratorContent(
                 config = config,
                 preparedObject = preparedObject,
@@ -1739,8 +1745,7 @@ fun BatchSendProgressCard(
                     color = PrimaryBlue
                 )
                 Text(
-                    text = "Успешно: ${progress.sentSuccessCount} / ${progress.totalFiles}" +
-                        if (progress.failedCount > 0) ", Ошибок: ${progress.failedCount}" else "",
+                    text = "Успешно: ${progress.sentSuccessCount}, предупреждений: ${progress.sentWarningCount}, ошибок: ${progress.failedCount}, неизвестно: ${progress.unconfirmedCount}, отменено: ${progress.cancelledCount}, пропущено: ${progress.skippedCount} / ${progress.totalFiles}",
                     fontSize = 12.sp,
                     color = TextSecondarySlate
                 )
@@ -1756,7 +1761,8 @@ fun BatchSendProgressCard(
         Spacer(modifier = Modifier.height(8.dp))
 
         val fraction = if (progress.totalFiles > 0) {
-            (progress.sentSuccessCount + progress.failedCount).toFloat() / progress.totalFiles.toFloat()
+            (progress.sentSuccessCount + progress.sentWarningCount + progress.failedCount +
+                progress.skippedCount + progress.cancelledCount + progress.unconfirmedCount).toFloat() / progress.totalFiles.toFloat()
         } else {
             0f
         }
@@ -1905,6 +1911,8 @@ private fun DicomCandidateFileItemRow(
         FileSendStatus.FAILED -> ErrorRed.copy(alpha = 0.45f)
         FileSendStatus.SENDING -> PrimaryBlue
         FileSendStatus.SKIPPED -> CardBorderGray
+        FileSendStatus.CANCELLED -> CardBorderGray
+        FileSendStatus.UNCONFIRMED -> WarningAmber
         FileSendStatus.PENDING -> if (file.isValidDicom) CardBorderGray else WarningAmber.copy(alpha = 0.45f)
     }
 
@@ -1914,6 +1922,8 @@ private fun DicomCandidateFileItemRow(
         FileSendStatus.FAILED -> ErrorRed.copy(alpha = 0.08f)
         FileSendStatus.SENDING -> PrimaryBlueLight
         FileSendStatus.SKIPPED -> InputBackgroundGray
+        FileSendStatus.CANCELLED -> InputBackgroundGray
+        FileSendStatus.UNCONFIRMED -> WarningAmber.copy(alpha = 0.10f)
         FileSendStatus.PENDING -> CardSurfaceWhite
     }
 
@@ -2070,3 +2080,32 @@ fun formatFileSize(bytes: Long): String {
     }
 }
 
+
+/** Service setting for the synthetic generator; selected-file forwarding does not use it. */
+@Composable
+private fun SyntheticEncodingSelector(config: ScuSendConfig, onUpdateConfig: ((ScuSendConfig) -> ScuSendConfig) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("Кодировка DICOM", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+        Box {
+            OutlinedButton(onClick = { expanded = true }, enabled = !config.isOperationInProgress, modifier = Modifier.fillMaxWidth()) {
+                Text(config.syntheticEncoding.label, fontSize = 12.sp, softWrap = true)
+            }
+            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, modifier = Modifier.widthIn(max = 400.dp)) {
+                ru.medeng.dicomtool.dicom.scu.SyntheticDicomEncoding.entries.forEach { option ->
+                    DropdownMenuItem(text = { Text(option.label, fontSize = 12.sp) }, onClick = {
+                        expanded = false; onUpdateConfig { it.copy(syntheticEncoding = option) }
+                    })
+                }
+            }
+        }
+        Text("Только для новых тестовых DICOM. Исходные файлы не перекодируются.", fontSize = 11.sp, color = TextSecondarySlate)
+        val identity = listOf(config.patientName, config.patientId, config.studyDescription, config.seriesDescription).hashCode()
+        config.syntheticEncoding.validationError(config)?.let {
+            ru.medeng.dicomtool.ui.components.AppNotice("synthetic-invalid:${config.syntheticEncoding}:$identity", it, error = true)
+        }
+        config.syntheticEncoding.warning(config)?.let {
+            ru.medeng.dicomtool.ui.components.AppNotice("synthetic-warning:${config.syntheticEncoding}:$identity", it)
+        }
+    }
+}

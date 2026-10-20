@@ -3,23 +3,16 @@ package ru.medeng.dicomtool.ui.screens.received
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.content.res.Configuration
 import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.displayCutout
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -27,7 +20,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -35,17 +27,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Brightness6
-import androidx.compose.material.icons.filled.Contrast
-import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.DeleteOutline
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Remove
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material3.AlertDialog
@@ -53,44 +37,27 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
-import androidx.compose.material3.TabRowDefaults
-import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.FilterQuality
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -98,21 +65,17 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
-import ru.medeng.dicomtool.dicom.pixel.DicomWindowPreset
 import ru.medeng.dicomtool.domain.model.DicomInstanceFileItem
 import ru.medeng.dicomtool.domain.model.DicomSeriesGroup
 import ru.medeng.dicomtool.domain.model.DicomStudyItem
 import ru.medeng.dicomtool.domain.model.DicomTagEntry
-import ru.medeng.dicomtool.ui.components.DicomSharedViewportBox
 import ru.medeng.dicomtool.ui.components.DicomToolSubScreenTopBar
 import ru.medeng.dicomtool.ui.components.KeyValueTableRow
 import ru.medeng.dicomtool.ui.components.ModalityFilterChip
-import ru.medeng.dicomtool.ui.components.ViewerToolButton
 import ru.medeng.dicomtool.ui.theme.CardBorderGray
 import ru.medeng.dicomtool.ui.theme.CardSurfaceWhite
 import ru.medeng.dicomtool.ui.theme.DicomViewerCanvasBlack
 import ru.medeng.dicomtool.ui.theme.ErrorRed
-import ru.medeng.dicomtool.ui.theme.ErrorRedLight
 import ru.medeng.dicomtool.ui.theme.InputBackgroundGray
 import ru.medeng.dicomtool.ui.theme.PrimaryBlue
 import ru.medeng.dicomtool.ui.theme.PrimaryBlueLight
@@ -125,7 +88,6 @@ import ru.medeng.dicomtool.ui.viewmodel.DicomViewerRenderState
 import java.util.Locale
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.roundToInt
 
 /**
  * Экран «Принятые исследования».
@@ -135,6 +97,7 @@ import kotlin.math.roundToInt
 @Composable
 fun ReceivedStudiesScreen(
     studies: List<DicomStudyItem>,
+    indexState: ru.medeng.dicomtool.data.storage.ArchiveIndexState = ru.medeng.dicomtool.data.storage.ArchiveIndexState(),
     selectedModality: String,
     selectedStudyUid: String?,
     onSelectModality: (String) -> Unit,
@@ -142,6 +105,21 @@ fun ReceivedStudiesScreen(
     onDeleteStudy: (String) -> Unit,
     onRefreshStudies: () -> Unit
 ) {
+    var showReadProblems by rememberSaveable { mutableStateOf(false) }
+    if (showReadProblems) {
+        AlertDialog(onDismissRequest = { showReadProblems = false }, title = { Text("Диагностика чтения DICOM") },
+            text = { LazyColumn(Modifier.heightIn(max = 420.dp)) {
+                items(indexState.readProblems, key = { it.source }) { problem ->
+                    Column(Modifier.padding(vertical = 8.dp)) {
+                        Text(problem.fileName, fontWeight = FontWeight.Bold)
+                        Text("Стадия: ${problem.stage.label}", fontSize = 12.sp)
+                        Text(problem.reason, fontSize = 12.sp)
+                        Text("Файл не изменён. Проверьте доступ или исходник у отправителя.", fontSize = 12.sp)
+                    }
+                }
+            } }, confirmButton = { TextButton(onClick = onRefreshStudies) { Text("Повторить чтение") } },
+            dismissButton = { TextButton(onClick = { showReadProblems = false }) { Text("Закрыть") } })
+    }
     val filteredStudies = remember(studies, selectedModality) {
         if (selectedModality == "ALL") studies
         else studies.filter { it.modality.equals(selectedModality, ignoreCase = true) }
@@ -196,6 +174,15 @@ fun ReceivedStudiesScreen(
             }
         }
 
+        if (indexState.isLoading) Text("Обновление списка исследований…", fontSize = 12.sp)
+        indexState.warning?.let { ru.medeng.dicomtool.ui.components.AppNotice("archive:${indexState.noticeId}", it) }
+        if (indexState.readProblems.isNotEmpty()) {
+            ru.medeng.dicomtool.ui.components.AppNotice("archive-read:${indexState.noticeId}:${indexState.readProblems.hashCode()}",
+                "${indexState.readProblems.size} файла с ошибками чтения DICOM. Подробности — в диагностике ниже.")
+            TextButton(onClick = { showReadProblems = true }) {
+                Text("Диагностика чтения DICOM (${indexState.readProblems.size})", color = ErrorRed)
+            }
+        }
         Spacer(modifier = Modifier.height(12.dp))
 
         if (filteredStudies.isEmpty()) {
@@ -377,33 +364,7 @@ private fun StudyListItemCard(
             }
 
             if (!study.encodingWarning.isNullOrBlank()) {
-                Spacer(modifier = Modifier.height(6.dp))
-                Surface(
-                    shape = RoundedCornerShape(6.dp),
-                    color = WarningAmberLight,
-                    border = BorderStroke(1.dp, WarningAmber),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.WarningAmber,
-                            contentDescription = null,
-                            tint = WarningAmber,
-                            modifier = Modifier.size(15.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = study.encodingWarning,
-                            fontSize = 11.sp,
-                            lineHeight = 15.sp,
-                            color = TextPrimaryDark,
-                            softWrap = true
-                        )
-                    }
-                }
+                ru.medeng.dicomtool.ui.components.AppNotice("charset-study:${study.diagnosticNoticeId}", study.encodingWarning)
             }
         }
     }
@@ -478,7 +439,6 @@ fun DicomViewerAndTagsScreen(
     onToggleInvert: () -> Unit,
     onAdjustWindow: (Int, Int) -> Unit,
     onSetWindowWidthLevel: (Int, Int) -> Unit,
-    onApplyWindowPreset: (DicomWindowPreset) -> Unit,
     onStepFrame: (Int) -> Unit,
     onStepInstance: (Int) -> Unit,
     onEnsureDecoded: () -> Unit,
@@ -488,11 +448,6 @@ fun DicomViewerAndTagsScreen(
         onEnsureDecoded()
     }
 
-    val configuration = LocalConfiguration.current
-    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-
-    var selectedTab by rememberSaveable(initialTab) { mutableIntStateOf(initialTab) }
-    var showMenu by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
 
     val activeSeries: DicomSeriesGroup? = remember(study, selectedSeriesUid) {
@@ -546,745 +501,41 @@ fun DicomViewerAndTagsScreen(
         )
     }
 
-    val subtitleText = buildString {
-        append("${study.modality} | Серия $seriesIndex/${study.seriesCount} | Снимок $safeInstanceIdx/$instancesInActiveSeries")
-        if (totalFramesInInstance > 1) {
-            append(" | Кадр $currentFrame/$totalFramesInInstance")
-        }
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(CardSurfaceWhite)
-            .windowInsetsPadding(WindowInsets.displayCutout)
-    ) {
+    Column(Modifier.fillMaxSize()) {
         if (!isFullScreen) {
-            DicomToolSubScreenTopBar(
-                title = study.patientName,
-                subtitle = subtitleText,
-                onBack = onBack,
-                trailingContent = {
+            DicomToolSubScreenTopBar(title = study.patientName, subtitle = study.modality, onBack = onBack,
+                trailingContent = { IconButton(onClick = { showDeleteConfirm = true }) {
+                    Icon(Icons.Default.DeleteOutline, contentDescription = "Удалить исследование")
+                } })
+        }
+        ru.medeng.dicomtool.ui.components.DicomViewerWorkspace(
+            sourceKey = study.studyInstanceUid, diagnosticNoticeId = study.diagnosticNoticeId, metadata = listOf("Пациент" to study.patientName,
+                "ID пациента" to study.patientId, "Дата исследования" to study.studyDateFormatted,
+                "Описание исследования" to study.studyDescription), tags = tags, query = tagSearchQuery,
+            renderState = renderState, zoom = zoom, pan = pan, inverted = inverted, ww = windowWidth, wl = windowCenter,
+            frame = currentFrame, frames = totalFramesInInstance, instance = safeInstanceIdx, instances = instancesInActiveSeries,
+            fullScreen = isFullScreen, initialTab = initialTab, encodingWarning = activeInstance?.encodingWarning ?: study.encodingWarning,
+            onQuery = onTagSearchChange, onZoom = onZoomFactor, onPan = onPanDelta, onFit = onFitToScreen,
+            onResetView = onResetTransform, onResetWindow = onResetWindowOnly, onInvert = onToggleInvert,
+            onAdjustWindow = onAdjustWindow, onWindow = onSetWindowWidthLevel, onFrame = onStepFrame,
+            onInstance = onStepInstance, onFullScreen = onToggleFullScreen, modifier = Modifier.weight(1f),
+            leadingControls = {
+                var seriesMenu by remember { mutableStateOf(false) }
+                if (study.seriesList.size > 1) {
                     Box {
-                        IconButton(onClick = { showMenu = true }) {
-                            Icon(
-                                imageVector = Icons.Default.MoreVert,
-                                contentDescription = "Меню исследования",
-                                tint = TextPrimaryDark
-                            )
-                        }
-                        DropdownMenu(
-                            expanded = showMenu,
-                            onDismissRequest = { showMenu = false },
-                            modifier = Modifier.background(CardSurfaceWhite)
-                        ) {
-                            DropdownMenuItem(
-                                text = { Text(if (isFullScreen) "Выйти из полного экрана" else "На весь экран", color = TextPrimaryDark) },
-                                onClick = {
-                                    showMenu = false
-                                    onToggleFullScreen()
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Вписать в экран (Fit to Screen)", color = TextPrimaryDark) },
-                                onClick = {
-                                    showMenu = false
-                                    onFitToScreen()
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Сбросить WW/WL к значениям DICOM", color = TextPrimaryDark) },
-                                onClick = {
-                                    showMenu = false
-                                    onResetWindowOnly()
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Полный сброс WW/WL и масштаба", color = TextPrimaryDark) },
-                                onClick = {
-                                    showMenu = false
-                                    onResetTransform()
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Удалить исследование", color = ErrorRed) },
-                                onClick = {
-                                    showMenu = false
-                                    showDeleteConfirm = true
-                                }
-                            )
+                        OutlinedButton(onClick = { seriesMenu = true }) { Text("Серия $seriesIndex/${study.seriesCount}") }
+                        DropdownMenu(expanded = seriesMenu, onDismissRequest = { seriesMenu = false }) {
+                            study.seriesList.forEach { series ->
+                                DropdownMenuItem(text = { Text("${series.seriesNumber}: ${series.seriesDescription}") },
+                                    onClick = { seriesMenu = false; onSelectSeries(series.seriesInstanceUid) })
+                            }
                         }
                     }
                 }
-            )
-        }
-
-        if (isFullScreen) {
-            // В полноэкранном режиме вьюпорт занимает всё пространство экрана
-            DicomSharedViewportBox(
-                renderState = renderState,
-                zoom = zoom,
-                pan = pan,
-                inverted = inverted,
-                windowWidth = windowWidth,
-                windowCenter = windowCenter,
-                currentFrame = currentFrame,
-                totalFrames = totalFramesInInstance,
-                currentInstance = safeInstanceIdx,
-                totalInstances = instancesInActiveSeries,
-                defaultColumns = activeInstance?.columns ?: study.columns,
-                defaultRows = activeInstance?.rows ?: study.rows,
-                defaultPhotometricInterpretation = activeInstance?.photometricInterpretation ?: study.photometricInterpretation,
-                defaultBitsStored = activeInstance?.bitsStored ?: study.bitsStored,
-                defaultBitsAllocated = activeInstance?.bitsAllocated ?: study.bitsAllocated,
-                isFullScreen = true,
-                onZoomFactor = onZoomFactor,
-                onPanDelta = onPanDelta,
-                onFitToScreen = onFitToScreen,
-                onResetTransform = onResetTransform,
-                onToggleInvert = onToggleInvert,
-                onAdjustWindow = onAdjustWindow,
-                onStepFrame = onStepFrame,
-                onToggleFullScreen = onToggleFullScreen,
-                modifier = Modifier.fillMaxSize()
-            )
-        } else if (isLandscape && selectedTab == 0) {
-            // Горизонтальная ориентация (Landscape): слева чёрный viewport снимка (60%), справа управление WW/WL и информация (40%)
-            Row(modifier = Modifier.fillMaxSize()) {
-                DicomSharedViewportBox(
-                    renderState = renderState,
-                    zoom = zoom,
-                    pan = pan,
-                    inverted = inverted,
-                    windowWidth = windowWidth,
-                    windowCenter = windowCenter,
-                    currentFrame = currentFrame,
-                    totalFrames = totalFramesInInstance,
-                    currentInstance = safeInstanceIdx,
-                    totalInstances = instancesInActiveSeries,
-                    defaultColumns = activeInstance?.columns ?: study.columns,
-                    defaultRows = activeInstance?.rows ?: study.rows,
-                    defaultPhotometricInterpretation = activeInstance?.photometricInterpretation ?: study.photometricInterpretation,
-                    defaultBitsStored = activeInstance?.bitsStored ?: study.bitsStored,
-                    defaultBitsAllocated = activeInstance?.bitsAllocated ?: study.bitsAllocated,
-                    isFullScreen = false,
-                    onZoomFactor = onZoomFactor,
-                    onPanDelta = onPanDelta,
-                    onFitToScreen = onFitToScreen,
-                    onResetTransform = onResetTransform,
-                    onToggleInvert = onToggleInvert,
-                    onAdjustWindow = onAdjustWindow,
-                    onStepFrame = onStepFrame,
-                    onToggleFullScreen = onToggleFullScreen,
-                    modifier = Modifier
-                        .weight(0.60f)
-                        .fillMaxHeight()
-                )
-                Column(
-                    modifier = Modifier
-                        .weight(0.40f)
-                        .fillMaxHeight()
-                ) {
-                    ViewerTabsHeader(
-                        selectedTab = selectedTab,
-                        onSelectTab = { selectedTab = it }
-                    )
-                    StudyInformationTabContent(
-                        study = study,
-                        activeSeries = activeSeries,
-                        activeInstance = activeInstance,
-                        renderState = renderState,
-                        windowWidth = windowWidth,
-                        windowCenter = windowCenter,
-                        inverted = inverted,
-                        currentFrame = currentFrame,
-                        totalFrames = totalFramesInInstance,
-                        currentInstance = safeInstanceIdx,
-                        totalInstances = instancesInActiveSeries,
-                        onSelectSeries = onSelectSeries,
-                        onSetWindowWidthLevel = onSetWindowWidthLevel,
-                        onAdjustWindow = onAdjustWindow,
-                        onResetWindowOnly = onResetWindowOnly,
-                        onApplyWindowPreset = onApplyWindowPreset,
-                        onToggleInvert = onToggleInvert,
-                        onStepFrame = onStepFrame,
-                        onStepInstance = onStepInstance,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f)
-                    )
-                }
-            }
-        } else {
-            if (selectedTab == 0) {
-                DicomSharedViewportBox(
-                    renderState = renderState,
-                    zoom = zoom,
-                    pan = pan,
-                    inverted = inverted,
-                    windowWidth = windowWidth,
-                    windowCenter = windowCenter,
-                    currentFrame = currentFrame,
-                    totalFrames = totalFramesInInstance,
-                    currentInstance = safeInstanceIdx,
-                    totalInstances = instancesInActiveSeries,
-                    defaultColumns = activeInstance?.columns ?: study.columns,
-                    defaultRows = activeInstance?.rows ?: study.rows,
-                    defaultPhotometricInterpretation = activeInstance?.photometricInterpretation ?: study.photometricInterpretation,
-                    defaultBitsStored = activeInstance?.bitsStored ?: study.bitsStored,
-                    defaultBitsAllocated = activeInstance?.bitsAllocated ?: study.bitsAllocated,
-                    isFullScreen = false,
-                    onZoomFactor = onZoomFactor,
-                    onPanDelta = onPanDelta,
-                    onFitToScreen = onFitToScreen,
-                    onResetTransform = onResetTransform,
-                    onToggleInvert = onToggleInvert,
-                    onAdjustWindow = onAdjustWindow,
-                    onStepFrame = onStepFrame,
-                    onToggleFullScreen = onToggleFullScreen,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(0.52f)
-                        .heightIn(min = 240.dp)
-                )
-            }
-
-            ViewerTabsHeader(
-                selectedTab = selectedTab,
-                onSelectTab = { selectedTab = it }
-            )
-
-            if (selectedTab == 0) {
-                StudyInformationTabContent(
-                    study = study,
-                    activeSeries = activeSeries,
-                    activeInstance = activeInstance,
-                    renderState = renderState,
-                    windowWidth = windowWidth,
-                    windowCenter = windowCenter,
-                    inverted = inverted,
-                    currentFrame = currentFrame,
-                    totalFrames = totalFramesInInstance,
-                    currentInstance = safeInstanceIdx,
-                    totalInstances = instancesInActiveSeries,
-                    onSelectSeries = onSelectSeries,
-                    onSetWindowWidthLevel = onSetWindowWidthLevel,
-                    onAdjustWindow = onAdjustWindow,
-                    onResetWindowOnly = onResetWindowOnly,
-                    onApplyWindowPreset = onApplyWindowPreset,
-                    onToggleInvert = onToggleInvert,
-                    onStepFrame = onStepFrame,
-                    onStepInstance = onStepInstance,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(0.48f)
-                )
-            } else {
-                DicomTagsTableContent(
-                    tags = tags,
-                    tagSearchQuery = tagSearchQuery,
-                    encodingWarning = activeInstance?.encodingWarning ?: study.encodingWarning,
-                    onTagSearchChange = onTagSearchChange,
-                    onTagClick = { tag: DicomTagEntry -> onSelectTagForDetail(tag) }
-                )
-            }
-        }
+            })
     }
 }
 
-@Composable
-private fun ViewerTabsHeader(
-    selectedTab: Int,
-    onSelectTab: (Int) -> Unit
-) {
-    TabRow(
-        selectedTabIndex = selectedTab,
-        containerColor = CardSurfaceWhite,
-        contentColor = PrimaryBlue,
-        indicator = { tabPositions ->
-            TabRowDefaults.SecondaryIndicator(
-                modifier = Modifier.tabIndicatorOffset(tabPositions[selectedTab]),
-                color = PrimaryBlue
-            )
-        }
-    ) {
-        Tab(
-            selected = selectedTab == 0,
-            onClick = { onSelectTab(0) },
-            modifier = Modifier.height(40.dp),
-            text = {
-                Text(
-                    text = "Просмотр и WW/WL",
-                    fontSize = 13.sp,
-                    fontWeight = if (selectedTab == 0) FontWeight.Bold else FontWeight.Medium,
-                    color = if (selectedTab == 0) PrimaryBlue else TextSecondarySlate
-                )
-            }
-        )
-        Tab(
-            selected = selectedTab == 1,
-            onClick = { onSelectTab(1) },
-            modifier = Modifier.height(40.dp),
-            text = {
-                Text(
-                    text = "DICOM теги",
-                    fontSize = 13.sp,
-                    fontWeight = if (selectedTab == 1) FontWeight.Bold else FontWeight.Medium,
-                    color = if (selectedTab == 1) PrimaryBlue else TextSecondarySlate
-                )
-            }
-        )
-    }
-}
-
-
-
-/**
- * Содержимое вкладки «Просмотр и WW/WL»:
- * - Диагностические предупреждения кодировки (0008,0005) и конвейера изображения
- * - Интерактивное управление Window Width / Window Level (слайдеры, кнопки шага, пресеты DICOM, Reset WW/WL)
- * - Переключение серий, экземпляров серии и кадров многокадрового снимка
- * - Таблица метаданных пациента и исследования
- */
-@Composable
-private fun StudyInformationTabContent(
-    study: DicomStudyItem,
-    activeSeries: DicomSeriesGroup?,
-    activeInstance: DicomInstanceFileItem?,
-    renderState: DicomViewerRenderState,
-    windowWidth: Int,
-    windowCenter: Int,
-    inverted: Boolean,
-    currentFrame: Int,
-    totalFrames: Int,
-    currentInstance: Int,
-    totalInstances: Int,
-    onSelectSeries: (String) -> Unit,
-    onSetWindowWidthLevel: (Int, Int) -> Unit,
-    onAdjustWindow: (Int, Int) -> Unit,
-    onResetWindowOnly: () -> Unit,
-    onApplyWindowPreset: (DicomWindowPreset) -> Unit,
-    onToggleInvert: () -> Unit,
-    onStepFrame: (Int) -> Unit,
-    onStepInstance: (Int) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val readyState = renderState as? DicomViewerRenderState.Ready
-    val descriptor = readyState?.descriptor
-    val encodingWarning = activeInstance?.encodingWarning ?: study.encodingWarning
-
-    LazyColumn(
-        modifier = modifier
-            .fillMaxSize()
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        // 1. Диагностическое предупреждение о кодировке (если исходный файл нарушает (0008,0005))
-        if (!encodingWarning.isNullOrBlank()) {
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(10.dp),
-                    colors = CardDefaults.cardColors(containerColor = WarningAmberLight),
-                    border = BorderStroke(1.dp, WarningAmber)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(12.dp),
-                        verticalAlignment = Alignment.Top
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.WarningAmber,
-                            contentDescription = null,
-                            tint = WarningAmber,
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Column {
-                            Text(
-                                text = "Диагностика кодировки исходного DICOM-файла",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = TextPrimaryDark
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = encodingWarning,
-                                fontSize = 12.sp,
-                                lineHeight = 16.sp,
-                                color = TextPrimaryDark,
-                                softWrap = true
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        // 2. Предупреждения медицинского конвейера (например, FOR PROCESSING или отсутствие WW/WL)
-        if (descriptor != null && descriptor.pipelineWarnings.isNotEmpty()) {
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(10.dp),
-                    colors = CardDefaults.cardColors(containerColor = PrimaryBlueLight.copy(alpha = 0.55f)),
-                    border = BorderStroke(1.dp, PrimaryBlue)
-                ) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        descriptor.pipelineWarnings.forEach { warn ->
-                            Text(
-                                text = "ℹ $warn",
-                                fontSize = 12.sp,
-                                lineHeight = 16.sp,
-                                color = TextPrimaryDark,
-                                softWrap = true
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        // 3. Панель управления изображением: WW/WL, Инверсия, Кадры и Снимки серии
-        item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(containerColor = CardSurfaceWhite),
-                border = BorderStroke(1.dp, CardBorderGray)
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "Управление окном WW / WL и кадрами",
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = TextPrimaryDark
-                        )
-                        TextButton(onClick = onResetWindowOnly) {
-                            Text(
-                                text = "Reset WW/WL",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = PrimaryBlue
-                            )
-                        }
-                    }
-
-                    // Пресеты WW/WL и VOI LUT из DICOM-файла
-                    val presets = descriptor?.windowPresets.orEmpty()
-                    if (presets.isNotEmpty()) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            presets.forEach { preset ->
-                                val isSelected = !preset.isVoiLutSequence &&
-                                    windowWidth == preset.windowWidth.roundToInt() &&
-                                    windowCenter == preset.windowCenter.roundToInt()
-                                ModalityFilterChip(
-                                    label = preset.name,
-                                    selected = isSelected,
-                                    onClick = { onApplyWindowPreset(preset) }
-                                )
-                            }
-                        }
-                    }
-
-                    val minMod = descriptor?.minModalityValue ?: 0.0
-                    val maxMod = descriptor?.maxModalityValue ?: max(windowWidth.toDouble(), 16384.0)
-                    val fullSpan = (maxMod - minMod).coerceAtLeast(255.0)
-                    val maxWwSlider = max(fullSpan * 1.5, windowWidth.toDouble() * 1.2).toFloat().coerceAtLeast(255f)
-                    val minWlSlider = min(minMod - fullSpan * 0.25, windowCenter.toDouble() - 500.0).toFloat()
-                    val maxWlSlider = max(maxMod + fullSpan * 0.25, windowCenter.toDouble() + 500.0).toFloat()
-
-                    // Регулировка Window Width (WW)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            text = "Window Width (WW): $windowWidth",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = TextPrimaryDark,
-                            fontFamily = FontFamily.Monospace
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            SmallStepButton(label = "−") { onAdjustWindow(-5, 0) }
-                            SmallStepButton(label = "+") { onAdjustWindow(5, 0) }
-                        }
-                    }
-                    Slider(
-                        value = windowWidth.toFloat().coerceIn(1f, maxWwSlider),
-                        onValueChange = { newWw ->
-                            onSetWindowWidthLevel(newWw.roundToInt().coerceAtLeast(1), windowCenter)
-                        },
-                        valueRange = 1f..maxWwSlider,
-                        colors = SliderDefaults.colors(
-                            thumbColor = PrimaryBlue,
-                            activeTrackColor = PrimaryBlue
-                        ),
-                        modifier = Modifier.height(26.dp)
-                    )
-
-                    // Регулировка Window Level / Center (WL)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            text = "Window Level (WL): $windowCenter",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = TextPrimaryDark,
-                            fontFamily = FontFamily.Monospace
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            SmallStepButton(label = "−") { onAdjustWindow(0, -5) }
-                            SmallStepButton(label = "+") { onAdjustWindow(0, 5) }
-                        }
-                    }
-                    Slider(
-                        value = windowCenter.toFloat().coerceIn(minWlSlider, maxWlSlider),
-                        onValueChange = { newWl ->
-                            onSetWindowWidthLevel(windowWidth, newWl.roundToInt())
-                        },
-                        valueRange = minWlSlider..maxWlSlider.coerceAtLeast(minWlSlider + 1f),
-                        colors = SliderDefaults.colors(
-                            thumbColor = PrimaryBlue,
-                            activeTrackColor = PrimaryBlue
-                        ),
-                        modifier = Modifier.height(26.dp)
-                    )
-
-                    // Переключение инверсии и кадров/снимков
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OutlinedButton(
-                            onClick = onToggleInvert,
-                            shape = RoundedCornerShape(8.dp),
-                            border = BorderStroke(1.dp, if (inverted) PrimaryBlue else CardBorderGray),
-                            colors = ButtonDefaults.outlinedButtonColors(
-                                containerColor = if (inverted) PrimaryBlueLight else CardSurfaceWhite
-                            )
-                        ) {
-                            Text(
-                                text = if (inverted) "Инверсия: ВКЛ" else "Инверсия MONOCHROME",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = if (inverted) PrimaryBlue else TextPrimaryDark
-                            )
-                        }
-
-                        if (totalFrames > 1) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                SmallStepButton(label = "◀") { onStepFrame(-1) }
-                                Text(
-                                    text = "Кадр $currentFrame/$totalFrames",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = TextPrimaryDark
-                                )
-                                SmallStepButton(label = "▶") { onStepFrame(1) }
-                            }
-                        } else if (totalInstances > 1) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                SmallStepButton(label = "◀") { onStepInstance(-1) }
-                                Text(
-                                    text = "Снимок $currentInstance/$totalInstances",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = TextPrimaryDark
-                                )
-                                SmallStepButton(label = "▶") { onStepInstance(1) }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 4. Переключение серий и снимков серии
-        if (study.seriesList.size > 1 || totalInstances > 1) {
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = CardDefaults.cardColors(containerColor = CardSurfaceWhite),
-                    border = BorderStroke(1.dp, CardBorderGray)
-                ) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        if (study.seriesList.size > 1) {
-                            Text(
-                                text = "Серии исследования:",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = TextPrimaryDark,
-                                modifier = Modifier.padding(bottom = 6.dp)
-                            )
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                study.seriesList.forEach { series ->
-                                    val isSelected = series.seriesInstanceUid == activeSeries?.seriesInstanceUid
-                                    ModalityFilterChip(
-                                        label = "Серия #${series.seriesNumber} (${series.instances.size} шт.)",
-                                        selected = isSelected,
-                                        onClick = { onSelectSeries(series.seriesInstanceUid) }
-                                    )
-                                }
-                            }
-                        }
-                        if (totalInstances > 1) {
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = "Изображение в серии: $currentInstance из $totalInstances",
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = TextPrimaryDark
-                                )
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    SmallStepButton(label = "◀ Пред.") { onStepInstance(-1) }
-                                    SmallStepButton(label = "След. ▶") { onStepInstance(1) }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 5. Таблица сведений о пациенте, параметрах изображения и UID
-        item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(containerColor = CardSurfaceWhite),
-                border = BorderStroke(1.dp, CardBorderGray)
-            ) {
-                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) {
-                    KeyValueTableRow("Patient Name (0010,0010)", study.patientName)
-                    KeyValueTableRow("Patient ID (0010,0020)", study.patientId)
-                    KeyValueTableRow("Specific Character Set (0008,0005)", activeInstance?.specificCharacterSet ?: study.specificCharacterSet)
-                    KeyValueTableRow("Study Date", study.studyDateFormatted)
-                    KeyValueTableRow("Modality (0008,0060)", study.modality)
-                    KeyValueTableRow("Study Description (0008,1030)", study.studyDescription)
-                    KeyValueTableRow("Series Description (0008,103E)", activeSeries?.seriesDescription ?: study.seriesDescription)
-                    KeyValueTableRow(
-                        "Разрешение (Columns × Rows)",
-                        "${descriptor?.columns ?: activeInstance?.columns ?: study.columns} × ${descriptor?.rows ?: activeInstance?.rows ?: study.rows}"
-                    )
-                    KeyValueTableRow(
-                        "Photometric Interpretation",
-                        descriptor?.photometricInterpretation ?: activeInstance?.photometricInterpretation ?: study.photometricInterpretation
-                    )
-                    KeyValueTableRow(
-                        "Bits Allocated / Stored / HighBit",
-                        "${descriptor?.bitsAllocated ?: activeInstance?.bitsAllocated ?: study.bitsAllocated} / " +
-                            "${descriptor?.bitsStored ?: activeInstance?.bitsStored ?: study.bitsStored} / " +
-                            "${descriptor?.highBit ?: activeInstance?.highBit ?: study.highBit} " +
-                            "(${if ((descriptor?.pixelRepresentation ?: activeInstance?.pixelRepresentation ?: study.pixelRepresentation) == 1) "Signed" else "Unsigned"})"
-                    )
-                    KeyValueTableRow(
-                        "Rescale Slope / Intercept",
-                        "${descriptor?.rescaleSlope ?: activeInstance?.rescaleSlope ?: study.rescaleSlope} / ${descriptor?.rescaleIntercept ?: activeInstance?.rescaleIntercept ?: study.rescaleIntercept}"
-                    )
-                    KeyValueTableRow("Manufacturer", study.manufacturer)
-                    KeyValueTableRow("Institution Name", study.institutionName)
-                    KeyValueTableRow("Study Instance UID", study.studyInstanceUid)
-                    KeyValueTableRow(
-                        label = "SOP Instance UID",
-                        value = activeInstance?.sopInstanceUid ?: study.sopInstanceUid,
-                        showDivider = false
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun SmallStepButton(
-    label: String,
-    onClick: () -> Unit
-) {
-    Surface(
-        modifier = Modifier
-            .clip(RoundedCornerShape(6.dp))
-            .clickable(onClick = onClick),
-        shape = RoundedCornerShape(6.dp),
-        color = InputBackgroundGray,
-        border = BorderStroke(1.dp, CardBorderGray)
-    ) {
-        Text(
-            text = label,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Bold,
-            color = TextPrimaryDark,
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-        )
-    }
-}
-
-/**
- * Таблица DICOM-тегов с поиском, диагностикой кодировки, адаптивным переносом длинных значений
- * и открытием подробной карточки по нажатию.
- */
-@Composable
-private fun DicomTagsTableContent(
-    tags: List<DicomTagEntry>,
-    tagSearchQuery: String,
-    encodingWarning: String?,
-    onTagSearchChange: (String) -> Unit,
-    onTagClick: (DicomTagEntry) -> Unit
-) {
-    ru.medeng.dicomtool.ui.screens.tags.DicomTagsBrowserComponent(
-        tags = tags,
-        searchQuery = tagSearchQuery,
-        encodingWarning = encodingWarning,
-        showEncodingSelector = false,
-        onSearchQueryChange = onTagSearchChange
-    )
-}
-
-/**
- * Подробная карточка DICOM-тега по нажатию:
- * - Номер тега (GGGG,EEEE)
- * - Название
- * - VR
- * - Полное значение без обрезания (с прокруткой и переносом для длинных UID, текста и последовательностей SQ)
- * - Кнопка копирования значения в буфер обмена
- */
 @Composable
 fun DicomTagDetailDialog(
     tagEntry: DicomTagEntry,

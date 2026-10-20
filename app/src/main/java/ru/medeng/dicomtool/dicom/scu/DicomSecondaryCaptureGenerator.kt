@@ -302,6 +302,7 @@ object DicomSecondaryCaptureGenerator {
         }
 
         return listOf(
+            config.syntheticEncoding.name,
             config.patientName.trim(),
             config.patientId.trim(),
             dicomBirthDate,
@@ -329,6 +330,7 @@ object DicomSecondaryCaptureGenerator {
         forceNewObject: Boolean = false,
         transferSyntaxUid: String = UID.ExplicitVRLittleEndian
     ): PreparedSecondaryCaptureDicomObject {
+        config.syntheticEncoding.validationError(config)?.let { throw IllegalArgumentException(it) }
         val signature = computeContentSignature(config, freehandStrokes, freehandPointsCount)
         val reuseExisting = !forceNewObject && existingObject != null && existingObject.contentSignature == signature
 
@@ -357,9 +359,7 @@ object DicomSecondaryCaptureGenerator {
         val normalizedSex = normalizePatientSex(config.patientSex)
 
         val dataset = Attributes().apply {
-            // Важно: устанавливаем SpecificCharacterSet = ISO_IR 192 (UTF-8) ДО строковых атрибутов,
-            // чтобы dcm4che3 кодировал кириллицу в PatientName / StudyDescription / SeriesDescription в UTF-8.
-            setString(Tag.SpecificCharacterSet, VR.CS, "ISO_IR 192")
+            config.syntheticEncoding.dicomTerm?.let { setString(Tag.SpecificCharacterSet, VR.CS, it) }
             setString(Tag.ImageType, VR.CS, "DERIVED", "SECONDARY")
             setString(Tag.SOPClassUID, VR.UI, SECONDARY_CAPTURE_SOP_CLASS_UID)
             setString(Tag.SOPInstanceUID, VR.UI, uids.sopInstanceUid)
@@ -397,6 +397,7 @@ object DicomSecondaryCaptureGenerator {
             setBytes(Tag.PixelData, VR.OB, pixelBytes)
         }
 
+        config.syntheticEncoding.writeTextAttributes(dataset, config)
         val fmi = dataset.createFileMetaInformation(transferSyntaxUid)
         check(fmi.getString(Tag.MediaStorageSOPClassUID) == SECONDARY_CAPTURE_SOP_CLASS_UID) {
             "MediaStorageSOPClassUID должен совпадать с SOPClassUID ($SECONDARY_CAPTURE_SOP_CLASS_UID)"

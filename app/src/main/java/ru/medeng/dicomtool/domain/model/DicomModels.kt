@@ -8,6 +8,7 @@ import android.net.Uri
 enum class ScpServerStatus {
     STOPPED,
     STARTING,
+    STOPPING,
     RUNNING,
     ERROR
 }
@@ -31,11 +32,13 @@ data class ScpReceiverState(
     val receivedStudiesCount: Int = 0,
     val receivedImagesCount: Int = 0,
     val activeConnectionsCount: Int = 0,
+    val serviceStopping: Boolean = false,
     val uptimeFormatted: String = "00:00:00",
     val storagePath: String = "",
     val connectedNodes: List<String> = emptyList(),
     val validationError: String? = null,
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    val noticeId: String = java.util.UUID.randomUUID().toString()
 )
 
 /**
@@ -113,7 +116,10 @@ data class DicomStudyItem(
     val seriesInstanceUid: String = "",
     val totalBytes: Long = 0L,
     val seriesList: List<DicomSeriesGroup> = emptyList()
-)
+) {
+    // Presentation identity must not change structural archive equality / incremental-index semantics.
+    val diagnosticNoticeId: String = java.util.UUID.randomUUID().toString()
+}
 
 /**
  * Элемент вложенной последовательности DICOM (Item of SQ).
@@ -157,7 +163,8 @@ data class DicomFileSummary(
     val sopClassUid: String,
     val sopClassName: String,
     val specificCharacterSet: String,
-    val encodingWarning: String? = null
+    val encodingWarning: String? = null,
+    val diagnosticNoticeId: String = java.util.UUID.randomUUID().toString()
 )
 
 /**
@@ -237,7 +244,9 @@ enum class FileSendStatus(val labelRu: String) {
     SUCCESS("Успешно"),
     WARNING("Предупреждение"),
     FAILED("Ошибка"),
-    SKIPPED("Пропущен")
+    SKIPPED("Пропущен"),
+    CANCELLED("Отменён до отправки"),
+    UNCONFIRMED("Результат на PACS неизвестен")
 }
 
 /**
@@ -276,6 +285,9 @@ data class ScuBatchProgressState(
     val sentSuccessCount: Int = 0,
     val sentWarningCount: Int = 0,
     val failedCount: Int = 0,
+    val skippedCount: Int = 0,
+    val cancelledCount: Int = 0,
+    val unconfirmedCount: Int = 0,
     val currentIndex: Int = 0,
     val currentFileName: String? = null,
     val summaryMessageRu: String? = null,
@@ -289,6 +301,7 @@ data class ScuBatchProgressState(
  */
 data class ScuSendConfig(
     val sendMode: ScuSendMode = ScuSendMode.TEST_IMAGE,
+    val syntheticEncoding: ru.medeng.dicomtool.dicom.scu.SyntheticDicomEncoding = ru.medeng.dicomtool.dicom.scu.SyntheticDicomEncoding.UTF8,
     val remoteIp: String = "",
     val remotePort: Int = 0,
     val calledAeTitle: String = "",
@@ -315,7 +328,8 @@ data class ScuSendConfig(
     val lastStatusTitle: String? = null,
     val lastStatusMessage: String? = null,
     val isLastOperationSuccess: Boolean? = null,
-    val isLastOperationWarning: Boolean = false
+    val isLastOperationWarning: Boolean = false,
+    val noticeId: String = java.util.UUID.randomUUID().toString()
 )
 
 
@@ -351,7 +365,7 @@ enum class DicomTrafficDirection(val code: String) {
 
 /**
  * Запись подробного технического журнала DICOM обмена.
- * Сохраняется между перезапусками приложения. Не содержит Pixel Data и ФИО пациента.
+ * Сохраняется между перезапусками приложения. Не содержит Pixel Data. Структурированные данные пациентов хранятся приватно и исключаются из безопасного экспорта.
  */
 data class DicomLogEntry(
     val id: String,
@@ -363,7 +377,8 @@ data class DicomLogEntry(
     val summaryLines: List<String>,
     val technicalDetails: Map<String, String> = emptyMap(),
     val isError: Boolean = false,
-    val sessionUid: String = ""
+    val sessionUid: String = "",
+    val patients: List<ru.medeng.dicomtool.data.logging.DicomLogPatient> = emptyList()
 ) {
     val effectiveSessionUid: String
         get() = sessionUid.ifBlank { associationId }

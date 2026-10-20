@@ -7,6 +7,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -66,6 +67,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -107,7 +113,7 @@ import ru.medeng.dicomtool.ui.theme.WarningAmber
  * - Два режима отображения: «Краткий» (по сеансам) и «Подробный» (по событиям).
  * - Локальный офлайн-справочник типовых ошибок с практическими рекомендациями для сервисных инженеров.
  * - Фильтры по направлению, результату и текстовый поиск по всем полям.
- * - Копирование событий и сеансов, а также экспорт с обезличиванием ПДн через Android Share Sheet.
+ * - Копирование и экспорт: техническая сводка по allowlist или полный текст с предупреждением.
  */
 @Composable
 fun DicomLogScreen(
@@ -127,13 +133,17 @@ fun DicomLogScreen(
     onToggleAutoScroll: (Boolean) -> Unit,
     onToggleSessionExpand: (String) -> Unit,
     onToggleLogExpand: (String) -> Unit,
-    onClearLogsConfirmed: () -> Unit
+    onClearLogsConfirmed: () -> Unit,
+    loggerHealth: ru.medeng.dicomtool.data.logging.LoggerHealth = ru.medeng.dicomtool.data.logging.LoggerHealth()
 ) {
     val context = LocalContext.current
     val clipboardManager = LocalClipboardManager.current
 
     var showClearDialog by remember { mutableStateOf(false) }
     var showExportDialog by remember { mutableStateOf(false) }
+    var copyEvent by remember { mutableStateOf<DicomLogEntry?>(null) }
+    var copySession by remember { mutableStateOf<DicomSessionSummary?>(null) }
+    var showLoggerDetails by remember { mutableStateOf(false) }
 
     val listState = rememberLazyListState()
 
@@ -168,7 +178,6 @@ fun DicomLogScreen(
                     onClick = {
                         showClearDialog = false
                         onClearLogsConfirmed()
-                        Toast.makeText(context, "Журнал очищен", Toast.LENGTH_SHORT).show()
                     }
                 ) {
                     Text("Очистить", color = ErrorRed, fontWeight = FontWeight.Bold)
@@ -193,11 +202,32 @@ fun DicomLogScreen(
         )
     }
 
+    if (copyEvent != null || copySession != null) ExportJournalDialog(
+        context = context, sessions = listOfNotNull(copySession), logs = copyEvent?.let { listOf(it) } ?: copySession!!.events,
+        isBriefMode = copySession != null, onDismiss = { copyEvent = null; copySession = null },
+        onCopy = { text, safe ->
+            clipboardManager.setText(AnnotatedString(text))
+            Toast.makeText(context, if (safe) "Техническая сводка скопирована" else "Полный текст скопирован; возможны персональные данные", Toast.LENGTH_SHORT).show()
+        })
+
+    if (showLoggerDetails) AlertDialog(onDismissRequest = { showLoggerDetails = false }, containerColor = CardSurfaceWhite,
+        title = { Text("Состояние журнала", color = TextPrimaryDark) }, text = {
+            Text("Состояние: ${loggerHealth.state}\nПринято: ${loggerHealth.accepted}; записано: ${loggerHealth.persisted}; в очереди: ${loggerHealth.queueDepth}\n" +
+                "${loggerHealth.warning}\nОшибки чтения: ${loggerHealth.readFailures}; отклонено после остановки: ${loggerHealth.rejectedAfterStop}; управляющих команд отклонено: ${loggerHealth.controlRejected}, ошибок: ${loggerHealth.controlFailures}, тайм-аутов: ${loggerHealth.controlTimeouts}\n" +
+                "Незавершённая ротация: ${loggerHealth.rotationPending}\nПоследняя ошибка (может содержать персональные данные): ${loggerHealth.lastError ?: "нет"}\nПри аварийном завершении сохранение очереди не гарантируется.",
+                color = TextSecondarySlate, modifier = Modifier.verticalScroll(rememberScrollState()))
+        }, confirmButton = { TextButton(onClick = { showLoggerDetails = false }) { Text("Закрыть") } })
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(CardSurfaceWhite)
     ) {
+        if (loggerHealth.historyLoading) Text("Загрузка сохранённой истории журнала…", fontSize = 12.sp)
+        if (loggerHealth.needsAttention) {
+            ru.medeng.dicomtool.ui.components.AppNotice("logger-health:${loggerHealth.state}:${loggerHealth.droppedNormal}:${loggerHealth.droppedCritical}:${loggerHealth.writeUnconfirmed}:${loggerHealth.readFailures}:${loggerHealth.controlFailures}:${loggerHealth.lastError.hashCode()}", loggerHealth.warning, modifier = Modifier.clickable { showLoggerDetails = true })
+        }
+        TextButton(onClick = { showLoggerDetails = true }) { Text("Состояние записи журнала", fontSize = 11.sp) }
         // --- 1. ВЕРХНЯЯ ПАНЕЛЬ: Переключатель режимов + действия ---
         Surface(
             modifier = Modifier.fillMaxWidth(),
@@ -435,9 +465,7 @@ fun DicomLogScreen(
                             isExpanded = isExpanded,
                             onToggleExpand = { onToggleSessionExpand(summary.sessionKey) },
                             onCopySession = {
-                                val text = DicomLogExportUtils.formatSession(summary, sanitizePhi = false)
-                                clipboardManager.setText(AnnotatedString(text))
-                                Toast.makeText(context, "Сеанс скопирован в буфер", Toast.LENGTH_SHORT).show()
+                                copySession = summary
                             }
                         )
                     }
@@ -465,9 +493,7 @@ fun DicomLogScreen(
                             isExpanded = isExpanded,
                             onToggleExpand = { onToggleLogExpand(entry.id) },
                             onCopyEvent = {
-                                val text = DicomLogExportUtils.formatSingleEvent(entry, sanitizePhi = false)
-                                clipboardManager.setText(AnnotatedString(text))
-                                Toast.makeText(context, "Событие скопировано в буфер", Toast.LENGTH_SHORT).show()
+                                copyEvent = entry
                             }
                         )
                         HorizontalDivider(color = CardBorderGray.copy(alpha = 0.5f), thickness = 0.5.dp)
@@ -660,11 +686,16 @@ private fun DicomSessionSummaryCard(
                 if (summary.filesCount > 0) {
                     SessionParamRow(label = "Файлов", value = summary.filesCount.toString())
                 }
-                SessionParamRow(
-                    label = "Результат",
-                    value = summary.statusTitle,
-                    valueColor = statusColor
-                )
+                if (summary.primaryOperation == "C-STORE") {
+                    val names = summary.patients.map { it.displayName }
+                    SessionParamRow(label = if (names.size > 1) "Пациенты" else "Пациент",
+                        value = when { names.isEmpty() -> "Не указано"; names.size <= 2 -> names.joinToString(", "); else -> names.size.toString() })
+                    if (names.size >= 3) {
+                        var showPatients by rememberSaveable(summary.sessionKey) { mutableStateOf(false) }
+                        TextButton(onClick = { showPatients = !showPatients }) { Text(if (showPatients) "Скрыть пациентов" else "Показать пациентов") }
+                        if (showPatients) names.forEach { Text(it, fontSize = 12.sp) }
+                    }
+                }
             }
 
             // --- РАСКРЫТАЯ ЧАСТЬ КАРТОЧКИ ---
@@ -1315,26 +1346,30 @@ private fun ExportJournalDialog(
     sessions: List<DicomSessionSummary>,
     logs: List<DicomLogEntry>,
     isBriefMode: Boolean,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    onCopy: ((String, Boolean) -> Unit)? = null
 ) {
     var sanitizePhi by remember { mutableStateOf(true) }
+    var sharing by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
 
-    val previewText = remember(sanitizePhi, sessions, logs, isBriefMode) {
-        val full = DicomLogExportUtils.formatFullExport(
+    val exportSnapshot = remember(sanitizePhi, sessions, logs, isBriefMode) {
+        sanitizePhi to DicomLogExportUtils.formatFullExport(
             sessions = sessions,
             allFilteredEntries = logs,
             isBriefMode = isBriefMode,
             sanitizePhi = sanitizePhi
         )
-        if (full.length > 500) full.take(500) + "\n... [остальной текст в файле]" else full
     }
+    val exportContent = exportSnapshot.second
+    val previewText = if (exportContent.length > 60_000) exportContent.take(60_000) + "\n[Предпросмотр ограничен 60000 символами; экспорт содержит весь выбранный текст]" else exportContent
 
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = CardSurfaceWhite,
         title = {
             Text(
-                text = "Экспорт журнала DICOM",
+                    text = if (onCopy == null) "Экспорт журнала DICOM" else "Копирование журнала DICOM",
                 fontWeight = FontWeight.Bold,
                 color = TextPrimaryDark
             )
@@ -1342,7 +1377,7 @@ private fun ExportJournalDialog(
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
                 Text(
-                    text = "Выберите режим конфиденциальности перед отправкой через Android Share Sheet:",
+                    text = if (onCopy == null) "Выберите содержимое перед отправкой через Android Share Sheet:" else "Выберите содержимое для буфера обмена:",
                     fontSize = 13.sp,
                     color = TextSecondarySlate
                 )
@@ -1353,24 +1388,25 @@ private fun ExportJournalDialog(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { sanitizePhi = true }
+                        .clickable(enabled = !sharing) { sanitizePhi = true }
                         .padding(vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     RadioButton(
                         selected = sanitizePhi,
+                        enabled = !sharing,
                         onClick = { sanitizePhi = true }
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Column {
                         Text(
-                            text = "Без персональных данных (рекомендуется)",
+                    text = "Безопасная техническая сводка (по умолчанию)",
                             fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = TextPrimaryDark
                         )
                         Text(
-                            text = "Маскируются ФИО пациента, ID и даты рождения.",
+                            text = "Только разрешённые технические поля; свободный текст и идентификаторы исследований исключены.",
                             fontSize = 11.sp,
                             color = TextSecondarySlate
                         )
@@ -1381,24 +1417,25 @@ private fun ExportJournalDialog(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { sanitizePhi = false }
+                        .clickable(enabled = !sharing) { sanitizePhi = false }
                         .padding(vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     RadioButton(
                         selected = !sanitizePhi,
+                        enabled = !sharing,
                         onClick = { sanitizePhi = false }
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Column {
                         Text(
-                            text = "Полный технический журнал",
+                            text = "Полный технический журнал (может содержать персональные данные)",
                             fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = TextPrimaryDark
                         )
                         Text(
-                            text = "Экспортируются все исходные значения без изменений.",
+                            text = "Полные поля выбранных записей. Оперативный список ограничен 2000 событиями.",
                             fontSize = 11.sp,
                             color = TextSecondarySlate
                         )
@@ -1426,9 +1463,9 @@ private fun ExportJournalDialog(
                         )
                         Text(
                             text = if (sanitizePhi) {
-                                "Применяется эвристическое маскирование персональных данных. Исходный журнал в приложении не изменяется."
+                                "Используется разрешённый список проверяемых технических полей. Это не гарантия юридической анонимизации. Исходные записи не изменяются."
                             } else {
-                                "Внимание: экспортируемый файл может содержать идентификаторы пациентов. Убедитесь в согласии субъектов ПДн."
+                                "Полные данные могут содержать ФИО, Patient ID, имена файлов, пути и строки исключений. Проверьте текст перед копированием или передачей."
                             },
                             fontSize = 11.sp,
                             lineHeight = 14.sp,
@@ -1460,7 +1497,7 @@ private fun ExportJournalDialog(
                         fontSize = 10.sp,
                         fontFamily = FontFamily.Monospace,
                         color = TextSecondarySlate,
-                        modifier = Modifier.padding(6.dp),
+                        modifier = Modifier.padding(6.dp).verticalScroll(rememberScrollState()),
                         lineHeight = 13.sp
                     )
                 }
@@ -1468,19 +1505,27 @@ private fun ExportJournalDialog(
         },
         confirmButton = {
             Button(
-                onClick = {
-                    onDismiss()
-                    val fullContent = DicomLogExportUtils.formatFullExport(
-                        sessions = sessions,
-                        allFilteredEntries = logs,
-                        isBriefMode = isBriefMode,
-                        sanitizePhi = sanitizePhi
-                    )
-                    DicomLogExportUtils.shareExportFile(context, fullContent, sanitizePhi)
+                onClick = click@{
+                    // A mode change awaiting recomposition must not label an old full preview as safe.
+                    if (exportSnapshot.first != sanitizePhi) return@click
+                    if (onCopy != null) { onCopy(exportContent, exportSnapshot.first); onDismiss() }
+                    else {
+                        sharing = true
+                        val safeSnapshot = exportSnapshot.first
+                        val contentSnapshot = exportContent
+                        scope.launch {
+                            try {
+                                val file = withContext(Dispatchers.IO) { DicomLogExportUtils.prepareExportFile(context, contentSnapshot, safeSnapshot) }
+                                DicomLogExportUtils.sharePreparedFile(context, file, safeSnapshot); onDismiss()
+                            } catch (e: Exception) { Toast.makeText(context, "Экспорт не выполнен: ${e.javaClass.simpleName}", Toast.LENGTH_LONG).show() }
+                            finally { sharing = false }
+                        }
+                    }
                 },
+                enabled = !sharing,
                 colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue)
             ) {
-                Text("Поделиться", fontWeight = FontWeight.Bold)
+                Text(if (onCopy == null) "Поделиться" else if (sanitizePhi) "Копировать сводку" else "Копировать полный текст", fontWeight = FontWeight.Bold)
             }
         },
         dismissButton = {

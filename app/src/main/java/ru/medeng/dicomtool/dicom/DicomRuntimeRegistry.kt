@@ -35,7 +35,8 @@ object DicomRuntimeRegistry {
             LocalDicomStudyRepository(
                 storageRootDir = dir,
                 context = appCtx,
-                storageManager = storageManager
+                storageManager = storageManager,
+                eagerLoad = false
             ).also { studyRepositoryInstance = it }
         }
     }
@@ -44,7 +45,7 @@ object DicomRuntimeRegistry {
     fun getTechnicalLogger(context: Context): PersistentDicomTechnicalLogger {
         return technicalLoggerInstance ?: run {
             val logFile = File(context.applicationContext.filesDir, "logs/dicom_technical_log.tsv")
-            PersistentDicomTechnicalLogger(logFile).also { technicalLoggerInstance = it }
+            PersistentDicomTechnicalLogger(logFile, deferHistoryLoad = true).also { technicalLoggerInstance = it }
         }
     }
 
@@ -53,7 +54,11 @@ object DicomRuntimeRegistry {
         return scpServerInstance ?: run {
             val repo = getStudyRepository(context)
             val logger = getTechnicalLogger(context)
-            DicomStorageScpServer(repo, logger).also { scpServerInstance = it }
+            DicomStorageScpServer(repo, logger).also {
+                val prefs = context.applicationContext.getSharedPreferences("scp_configuration", Context.MODE_PRIVATE)
+                it.updateConfiguration(prefs.getString("ae", "ANDROID_PACS") ?: "ANDROID_PACS", prefs.getInt("port", 11112))
+                scpServerInstance = it
+            }
         }
     }
 
@@ -65,6 +70,13 @@ object DicomRuntimeRegistry {
             DicomScuClient(logger, scuCacheDir).also { scuClientInstance = it }
         }
     }
+
+    private var archiveInstance: ru.medeng.dicomtool.data.storage.ArchiveOperations? = null
+
+    @Synchronized
+    fun getArchiveOperations(context: Context): ru.medeng.dicomtool.data.storage.ArchiveOperations =
+        archiveInstance ?: ru.medeng.dicomtool.data.storage.ArchiveOperations(getStudyRepository(context), getScpServer(context))
+            .also { archiveInstance = it }
 
     fun clearScuTempCache(context: Context) {
         val scuCacheDir = File(context.applicationContext.cacheDir, "scu_temp")

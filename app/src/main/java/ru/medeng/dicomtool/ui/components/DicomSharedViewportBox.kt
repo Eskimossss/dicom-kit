@@ -9,9 +9,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
-import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -21,7 +23,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
@@ -80,6 +81,7 @@ import kotlin.math.roundToInt
  * - Панель инструментов с кнопками Zoom+/-, Fit, Инверсия, WW+/-, Сброс и «На весь экран»
  * - Боковые стрелки переключения кадров / снимков
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun DicomSharedViewportBox(
     renderState: DicomViewerRenderState,
@@ -90,6 +92,7 @@ fun DicomSharedViewportBox(
     windowCenter: Int,
     currentFrame: Int,
     totalFrames: Int,
+    modifier: Modifier = Modifier,
     currentInstance: Int = 1,
     totalInstances: Int = 1,
     defaultColumns: Int = 0,
@@ -105,8 +108,8 @@ fun DicomSharedViewportBox(
     onToggleInvert: () -> Unit,
     onAdjustWindow: (Int, Int) -> Unit,
     onStepFrame: (Int) -> Unit,
-    onToggleFullScreen: () -> Unit,
-    modifier: Modifier = Modifier
+    onStepInstance: (Int) -> Unit = onStepFrame,
+    onToggleFullScreen: () -> Unit
 ) {
     var controlsVisible by remember { mutableStateOf(true) }
 
@@ -156,10 +159,11 @@ fun DicomSharedViewportBox(
                 Image(
                     bitmap = imageBitmap,
                     contentDescription = "DICOM изображение",
-                    contentScale = ContentScale.Fit,
+                    contentScale = ContentScale.FillBounds,
                     filterQuality = FilterQuality.Medium,
                     modifier = Modifier
-                        .fillMaxSize()
+                        .aspectRatio(renderState.descriptor.columns.toFloat() / renderState.descriptor.rows)
+                        .align(Alignment.Center)
                         .graphicsLayer(
                             scaleX = zoom,
                             scaleY = zoom,
@@ -286,7 +290,7 @@ fun DicomSharedViewportBox(
                         .padding(horizontal = 7.dp, vertical = 4.dp)
                 ) {
                     Text(
-                        text = "WW:$windowWidth WL:$windowCenter" + if (inverted) " • INV" else "",
+                        text = (if ((renderState as? DicomViewerRenderState.Ready)?.descriptor?.photometricInterpretation == "RGB") "RGB • WW/WL не применяется" else "WW:$windowWidth WL:$windowCenter") + if (inverted) " • INV" else "",
                         color = Color.White,
                         fontSize = 11.sp,
                         lineHeight = 14.sp,
@@ -323,7 +327,7 @@ fun DicomSharedViewportBox(
                     )
                     Text(
                         text = if (totalFrames > 1) {
-                            "Кадр $currentFrame/$totalFrames" + if (totalInstances > 1) " • Сн. $currentInstance/$totalInstances" else ""
+                            "Кадр $currentFrame/$totalFrames" + if (totalInstances > 1) " • Снимок $currentInstance/$totalInstances" else ""
                         } else {
                             if (totalInstances > 1) "Снимок $currentInstance/$totalInstances" else "1 кадр"
                         },
@@ -353,14 +357,14 @@ fun DicomSharedViewportBox(
                 modifier = Modifier
                     .padding(start = 8.dp)
                     .size(36.dp)
-                    .clickable { onStepFrame(-1) },
+                    .clickable { if (totalFrames > 1) onStepFrame(-1) else onStepInstance(-1) },
                 shape = RoundedCornerShape(6.dp),
                 color = Color.DarkGray.copy(alpha = 0.72f)
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
-                        contentDescription = "Предыдущий кадр/снимок",
+                        contentDescription = if (totalFrames > 1) "Предыдущий кадр" else "Предыдущий снимок",
                         tint = Color.White
                     )
                 }
@@ -377,14 +381,14 @@ fun DicomSharedViewportBox(
                 modifier = Modifier
                     .padding(end = 8.dp)
                     .size(36.dp)
-                    .clickable { onStepFrame(1) },
+                    .clickable { if (totalFrames > 1) onStepFrame(1) else onStepInstance(1) },
                 shape = RoundedCornerShape(6.dp),
                 color = Color.DarkGray.copy(alpha = 0.72f)
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                        contentDescription = "Следующий кадр/снимок",
+                        contentDescription = if (totalFrames > 1) "Следующий кадр" else "Следующий снимок",
                         tint = Color.White
                     )
                 }
@@ -408,12 +412,10 @@ fun DicomSharedViewportBox(
                     shape = RoundedCornerShape(10.dp),
                     color = Color.Black.copy(alpha = 0.65f)
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .horizontalScroll(rememberScrollState())
-                            .padding(horizontal = 6.dp, vertical = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(5.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(5.dp, Alignment.CenterHorizontally),
+                        verticalArrangement = Arrangement.spacedBy(5.dp)
                     ) {
                         ViewerToolButton(
                             icon = if (isFullScreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
@@ -422,6 +424,10 @@ fun DicomSharedViewportBox(
                             isActive = isFullScreen
                         ) {
                             onToggleFullScreen()
+                        }
+                        if (totalFrames > 1 && totalInstances > 1) {
+                            ViewerToolButton(icon = Icons.AutoMirrored.Filled.KeyboardArrowLeft, label = "Снимок−", description = "Предыдущий снимок") { onStepInstance(-1) }
+                            ViewerToolButton(icon = Icons.AutoMirrored.Filled.KeyboardArrowRight, label = "Снимок+", description = "Следующий снимок") { onStepInstance(1) }
                         }
                         ViewerToolButton(icon = Icons.Default.Add, label = "Zoom+", description = "Увеличить") {
                             onZoomFactor(1.25f)
@@ -435,18 +441,24 @@ fun DicomSharedViewportBox(
                         ViewerToolButton(
                             icon = Icons.Default.Brightness6,
                             label = if (inverted) "Инв:ВКЛ" else "Инверсия",
-                            description = "Инверсия MONOCHROME",
+                            description = "Инверсия изображения",
                             isActive = inverted
                         ) {
                             onToggleInvert()
                         }
                         ViewerToolButton(icon = Icons.Default.Contrast, label = "WW-", description = "Уменьшить WW") {
-                            onAdjustWindow(-10, 0)
+                            onAdjustWindow(-(windowWidth / 20).coerceAtLeast(1), 0)
                         }
                         ViewerToolButton(icon = Icons.Default.Contrast, label = "WW+", description = "Увеличить WW") {
-                            onAdjustWindow(10, 0)
+                            onAdjustWindow((windowWidth / 20).coerceAtLeast(1), 0)
                         }
-                        ViewerToolButton(icon = Icons.Default.Refresh, label = "Сброс", description = "Сброс WW/WL и масштаба") {
+                        ViewerToolButton(icon = Icons.Default.Brightness6, label = "WL-", description = "Уменьшить WL") {
+                            onAdjustWindow(0, -(windowWidth / 20).coerceAtLeast(1))
+                        }
+                        ViewerToolButton(icon = Icons.Default.Brightness6, label = "WL+", description = "Увеличить WL") {
+                            onAdjustWindow(0, (windowWidth / 20).coerceAtLeast(1))
+                        }
+                        ViewerToolButton(icon = Icons.Default.Refresh, label = "Сброс вида", description = "Сбросить WW/WL, масштаб, сдвиг и инверсию") {
                             onResetTransform()
                         }
                     }
