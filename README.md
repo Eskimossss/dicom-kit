@@ -211,3 +211,26 @@ export JAVA_HOME="/path/to/jdk-21"
 - [`JOURNAL_STAGE_4_3_1_RESULT.md`](docs/JOURNAL_STAGE_4_3_1_RESULT.md) — Отчёт о внедрении неблокирующей фоновой записи и потокобезопасности.
 - [`JOURNAL_STAGE_4_3_2_RESULT.md`](docs/JOURNAL_STAGE_4_3_2_RESULT.md) — Отчёт о создании краткого и подробного режимов журнала.
 - [`JOURNAL_STAGE_4_3_3_RESULT.md`](docs/JOURNAL_STAGE_4_3_3_RESULT.md) — Отчёт об улучшении интерфейса журнала и разграничении AE/узлов.
+
+---
+
+## Лицензия
+
+Собственный исходный код проекта **DICOM Kit** (пакет `ru.medeng.dicomtool`) лицензирован на условиях **[MIT License](LICENSE)**:
+
+```text
+Copyright (c) 2026 Eskimossss
+```
+
+Вы можете свободно использовать, модифицировать и распространять исходный код проекта при условии сохранения указания авторства и текста лицензии MIT.
+
+### Сторонние компоненты и библиотеки
+
+Проект использует компоненты с открытым исходным кодом:
+- **dcm4che** (`dcm4che-core`, `dcm4che-net`, `dcm4che-dict`): мульти-лицензия MPL 1.1 / LGPL 2.1 / GPL 2.0. В проекте DICOM Kit используется на условиях **Mozilla Public License Version 1.1 (MPL 1.1)**, допускающей создание комбинированных произведений (Larger Works) без изменения лицензии собственного кода приложения. Исходный код dcm4che доступен на [GitHub](https://github.com/dcm4che/dcm4che).
+- **Google AndroidX & Jetpack Compose**: лицензия **Apache License 2.0**.
+- **Kotlin & Coroutines** (JetBrains): лицензия **Apache License 2.0**.
+- **SLF4J**: лицензия **MIT License**.
+
+Подробный перечень сторонних библиотек, тексты лицензий и ссылки на репозитории приведены в файле [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+

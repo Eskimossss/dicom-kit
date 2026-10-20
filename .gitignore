@@ -26,6 +26,7 @@ captures/
 *.jks
 *.keystore
 signing.properties
+keystore.properties
 
 # Medical Data & PHI (Patient Health Information) Protection
 # ВНИМАНИЕ: Медицинские данные пациентов строго запрещено коммитить в публичный репозиторий!
