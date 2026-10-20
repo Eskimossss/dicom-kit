@@ -11,6 +11,9 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -385,9 +388,13 @@ fun MwlAppointmentsTab(
                     if (importInput.isBlank()) {
                         Toast.makeText(context, "Вставьте JSON для импорта", Toast.LENGTH_SHORT).show()
                     } else {
-                        val count = viewModel.importSyntheticData(importInput)
-                        Toast.makeText(context, "Импортировано исследований: $count", Toast.LENGTH_SHORT).show()
-                        viewModel.showDataImportDialog.value = false
+                        try {
+                            val count = viewModel.importSyntheticData(importInput)
+                            Toast.makeText(context, "Импортировано исследований: $count", Toast.LENGTH_SHORT).show()
+                            viewModel.showDataImportDialog.value = false
+                        } catch (_: Exception) {
+                            Toast.makeText(context, "Импорт не выполнен: проверьте формат, обязательные поля и доступное место. Сохранённые данные не изменены.", Toast.LENGTH_LONG).show()
+                        }
                     }
                 }) {
                     Text("Импортировать")
@@ -599,13 +606,16 @@ private fun StudyEditorDialog(
     var spsStartTime by remember { mutableStateOf(study.spsStartTime) }
     var stationAe by remember { mutableStateOf(study.scheduledStationAeTitle) }
     var stationName by remember { mutableStateOf(study.scheduledStationName) }
+    var location by remember { mutableStateOf(study.spsLocation) }
+    var procedureId by remember { mutableStateOf(study.requestedProcedureId) }
+    var stepId by remember { mutableStateOf(study.spsId) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (study.accessionNumber.isEmpty()) "Новое назначение" else "Редактирование назначения") },
         text = {
             Column(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().heightIn(max = 520.dp).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Text("Пациент: ${currentSelectedPatient?.patientName ?: study.patientName} (${currentSelectedPatient?.patientId ?: study.patientId})", fontWeight = FontWeight.Bold, fontSize = 13.sp)
@@ -618,6 +628,10 @@ private fun StudyEditorDialog(
                     modifier = Modifier.fillMaxWidth()
                 )
 
+                OutlinedTextField(value = procedureId, onValueChange = { procedureId = it }, label = { Text("Requested Procedure ID (до 16 символов)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = stepId, onValueChange = { stepId = it }, label = { Text("SPS ID (до 16 символов)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = location, onValueChange = { location = it }, label = { Text("Место выполнения SPS (до 16 символов)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = stationName, onValueChange = { stationName = it }, label = { Text("Имя станции (до 16 символов)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 Text("Описание исследования (VR: LO)", fontSize = 11.sp, color = TextSecondarySlate)
                 OutlinedTextField(
                     value = rpDescription,
@@ -705,7 +719,10 @@ private fun StudyEditorDialog(
                         spsStartDate = spsStartDate.trim(),
                         spsStartTime = spsStartTime.trim(),
                         scheduledStationAeTitle = stationAe.trim(),
-                        scheduledStationName = stationName.trim()
+                        scheduledStationName = stationName.trim(),
+                        spsLocation = location.trim(),
+                        requestedProcedureId = procedureId.trim(),
+                        spsId = stepId.trim()
                     )
                 )
             }) {

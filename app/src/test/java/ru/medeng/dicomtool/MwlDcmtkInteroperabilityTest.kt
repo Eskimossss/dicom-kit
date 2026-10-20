@@ -58,6 +58,7 @@ class MwlDcmtkInteroperabilityTest {
             patientId = p1.patientId,
             accessionNumber = "ACC-DCMTK-01",
             studyInstanceUid = MwlValidation.generateStudyInstanceUid(),
+            requestedProcedureDescription = "TEST PROCEDURE",
             requestedProcedureId = "RP-CR-01",
             spsId = "SPS-CR-01",
             modality = "CR",
@@ -74,6 +75,7 @@ class MwlDcmtkInteroperabilityTest {
             patientId = p2.patientId,
             accessionNumber = "ACC-DCMTK-02",
             studyInstanceUid = MwlValidation.generateStudyInstanceUid(),
+            requestedProcedureDescription = "TEST PROCEDURE",
             requestedProcedureId = "RP-CT-02",
             spsId = "SPS-CT-02",
             modality = "CT",
@@ -94,6 +96,7 @@ class MwlDcmtkInteroperabilityTest {
         if (::scpServer.isInitialized) {
             scpServer.stopServer()
         }
+        if (::logger.isInitialized) logger.close()
         if (::tempDir.isInitialized) {
             tempDir.deleteRecursively()
         }

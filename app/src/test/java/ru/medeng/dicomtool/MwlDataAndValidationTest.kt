@@ -98,6 +98,7 @@ class MwlDataAndValidationTest {
             patientId = p.patientId,
             accessionNumber = "ACC-01",
             studyInstanceUid = MwlValidation.generateStudyInstanceUid(),
+            requestedProcedureDescription = "TEST PROCEDURE",
             requestedProcedureId = "RP-01",
             spsId = "SPS-01",
             modality = "CR",

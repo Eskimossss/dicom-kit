@@ -57,6 +57,7 @@ class MwlScpAndScuDimseTest {
             patientId = p1.patientId,
             accessionNumber = "ACC-CR-01",
             studyInstanceUid = MwlValidation.generateStudyInstanceUid(),
+            requestedProcedureDescription = "TEST PROCEDURE",
             requestedProcedureId = "RP-CR-01",
             spsId = "SPS-CR-01",
             modality = "CR",
@@ -72,6 +73,7 @@ class MwlScpAndScuDimseTest {
             patientId = p2.patientId,
             accessionNumber = "ACC-CT-02",
             studyInstanceUid = MwlValidation.generateStudyInstanceUid(),
+            requestedProcedureDescription = "TEST PROCEDURE",
             requestedProcedureId = "RP-CT-02",
             spsId = "SPS-CT-02",
             modality = "CT",
@@ -86,6 +88,7 @@ class MwlScpAndScuDimseTest {
     @After
     fun tearDown() {
         scpServer.stopServer()
+        logger.close()
         tempDir.deleteRecursively()
     }
 

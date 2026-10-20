@@ -23,8 +23,10 @@ import java.util.concurrent.ConcurrentLinkedQueue
 
 class MwlTechnicalLogger(
     private val logFile: File,
-    private val maxMemoryEntries: Int = 1000
-) {
+    private val maxMemoryEntries: Int = 1000,
+    private val maxDiskBytes: Long = 2L * 1024 * 1024,
+    private val beforeDiskWrite: () -> Unit = {}
+) : java.io.Closeable {
     private val lock = Any()
     private val _logsFlow = MutableStateFlow<List<DicomLogEntry>>(emptyList())
     val logsFlow: StateFlow<List<DicomLogEntry>> = _logsFlow.asStateFlow()
@@ -32,16 +34,41 @@ class MwlTechnicalLogger(
     private val timeFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
     private val exportDateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
 
+    private sealed class Command {
+        data class Write(val entry: DicomLogEntry) : Command()
+        data object Clear : Command()
+        data class Barrier(val done: java.util.concurrent.CompletableFuture<Unit>) : Command()
+        data object Stop : Command()
+    }
+    private val queue = java.util.concurrent.ArrayBlockingQueue<Command>(256)
+    private val dropped = java.util.concurrent.atomic.AtomicLong()
+    @Volatile private var closed = false
+    @Volatile var lastWriteError: String? = null
+        private set
+    private val writer: Thread
+    val droppedEntries: Long get() = dropped.get()
+
     init {
         logFile.parentFile?.mkdirs()
         loadLogsFromDisk()
+        writer = Thread({
+            while (true) {
+                when (val command = queue.take()) {
+                    is Command.Write -> appendEntryToDisk(command.entry)
+                    Command.Clear -> runCatching { logFile.delete(); File(logFile.path + ".1").delete() }
+                    is Command.Barrier -> command.done.complete(Unit)
+                    Command.Stop -> return@Thread
+                }
+            }
+        }, "mwl-log-writer").apply { isDaemon = true; start() }
     }
 
     private fun loadLogsFromDisk() = synchronized(lock) {
-        if (!logFile.exists()) return
-        val list = mutableListOf<DicomLogEntry>()
+        val sources = listOf(File(logFile.path + ".1"), logFile).filter { it.isFile }
+        if (sources.isEmpty()) return
+        val list = java.util.ArrayDeque<DicomLogEntry>()
         try {
-            BufferedReader(InputStreamReader(FileInputStream(logFile), StandardCharsets.UTF_8)).use { reader ->
+            for (source in sources) BufferedReader(InputStreamReader(FileInputStream(source), StandardCharsets.UTF_8)).use { reader ->
                 var line: String?
                 while (reader.readLine().also { line = it } != null) {
                     val l = line?.trim() ?: continue
@@ -86,6 +113,7 @@ class MwlTechnicalLogger(
                             parts[9].split("|||")
                         } else emptyList()
 
+                        if (list.size >= maxMemoryEntries) list.removeFirst()
                         list.add(
                             DicomLogEntry(
                                 id = id,
@@ -105,7 +133,7 @@ class MwlTechnicalLogger(
             }
         } catch (_: Exception) {}
 
-        _logsFlow.value = list.takeLast(maxMemoryEntries)
+        _logsFlow.value = list.toList().reversed()
     }
 
     fun recordEvent(
@@ -118,6 +146,7 @@ class MwlTechnicalLogger(
         technicalDetails: Map<String, String> = emptyMap(),
         isError: Boolean = false
     ) = synchronized(lock) {
+        if (closed) return@synchronized
         val entry = DicomLogEntry(
             id = UUID.randomUUID().toString(),
             timestampFormatted = timeFormat.format(Date()),
@@ -139,11 +168,12 @@ class MwlTechnicalLogger(
         _logsFlow.value = current
 
         // Запись в файл на диск
-        appendEntryToDisk(entry)
+        if (!closed && !queue.offer(Command.Write(entry))) dropped.incrementAndGet()
     }
 
     private fun appendEntryToDisk(entry: DicomLogEntry) {
         try {
+            beforeDiskWrite()
             val sb = java.lang.StringBuilder()
             sb.append(entry.id).append('\t')
             sb.append(entry.timestampFormatted).append('\t')
@@ -160,20 +190,42 @@ class MwlTechnicalLogger(
             val summaryStr = entry.summaryLines.joinToString("|||") { escapeTsv(it) }
             sb.append(summaryStr).append('\n')
 
-            FileOutputStream(logFile, true).use { fos ->
-                fos.write(sb.toString().toByteArray(StandardCharsets.UTF_8))
-                fos.flush()
-                try {
-                    fos.fd.sync()
-                } catch (_: Exception) {}
+            val bytes = sb.toString().toByteArray(StandardCharsets.UTF_8)
+            require(bytes.size <= maxDiskBytes) { "MWL log entry exceeds disk limit" }
+            if (logFile.length() + bytes.size > maxDiskBytes) {
+                java.nio.file.Files.move(logFile.toPath(), File(logFile.path + ".1").toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
             }
-        } catch (_: Exception) {}
+            FileOutputStream(logFile, true).use { fos ->
+                fos.write(bytes)
+                fos.flush()
+                fos.fd.sync()
+            }
+        } catch (e: Exception) { lastWriteError = e.javaClass.simpleName }
+    }
+
+    fun flush(timeoutMs: Long = 5000): Boolean {
+        if (closed) return false
+        val done = java.util.concurrent.CompletableFuture<Unit>()
+        return try {
+            queue.offer(Command.Barrier(done), timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS) &&
+                run { done.get(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS); true }
+        } catch (_: Exception) { false }
+    }
+    override fun close() {
+        synchronized(lock) {
+            if (closed) return
+            closed = true
+        }
+        // close is a lifecycle operation, never called on the DIMSE path.
+        if (!queue.offer(Command.Stop, 5, java.util.concurrent.TimeUnit.SECONDS)) writer.interrupt()
+        writer.join(5000)
     }
 
     private fun escapeTsv(s: String): String = s.replace("\t", " ").replace("\n", " ").replace("\r", "")
 
     fun clearLogs() = synchronized(lock) {
-        if (logFile.exists()) logFile.delete()
+        queue.removeIf { it is Command.Write }
+        check(!closed && queue.offer(Command.Clear)) { "MWL logger queue is full; clear was not performed" }
         _logsFlow.value = emptyList()
     }
 
@@ -189,6 +241,8 @@ class MwlTechnicalLogger(
         sb.append("Дата экспорта: ${exportDateFormat.format(Date())}\n")
         sb.append("Режим экспорта PHI: ").append(if (includePhi) "ВКЛЮЧЕН (реальные данные пациентов)" else "ОБЕЗЛИЧЕН (PHI скрыты)").append("\n")
         sb.append("Всего записей в журнале: ${_logsFlow.value.size}\n")
+        sb.append("Переполнение очереди (пропущено записей): $droppedEntries\n")
+        lastWriteError?.let { sb.append("Последняя ошибка записи: $it\n") }
         sb.append("----------------------------------------------------------------------\n\n")
 
         val entries = _logsFlow.value.reversed() // В хронологическом порядке
@@ -200,10 +254,10 @@ class MwlTechnicalLogger(
                 entry.associationId,
                 entry.category.name
             ))
-            sb.append("  Заголовок: ").append(sanitizePhi(entry.title, includePhi)).append("\n")
+            sb.append("  Заголовок: ").append(if (includePhi) entry.title else entry.category.name).append("\n")
             if (entry.isError) sb.append("  СТАТУС: ОШИБКА / СБОЙ\n")
 
-            if (entry.summaryLines.isNotEmpty()) {
+            if (includePhi && entry.summaryLines.isNotEmpty()) {
                 sb.append("  Сводка:\n")
                 entry.summaryLines.forEach { line ->
                     sb.append("    • ").append(sanitizePhi(line, includePhi)).append("\n")
@@ -213,9 +267,9 @@ class MwlTechnicalLogger(
             if (entry.technicalDetails.isNotEmpty()) {
                 sb.append("  Технические детали:\n")
                 entry.technicalDetails.forEach { (k, v) ->
-                    val sanitizedKey = k
-                    val sanitizedVal = if (isPhiField(k)) sanitizePhi(v, includePhi) else v
-                    sb.append("    - %-28s : %s\n".format(sanitizedKey, sanitizedVal))
+                    if (includePhi || (k in SAFE_NUMERIC_FIELDS && v.matches(Regex("[0-9A-Fa-fxXHh ()]+")))) {
+                        sb.append("    - %-28s : %s\n".format(k, v))
+                    }
                 }
             }
             sb.append("\n")
@@ -224,21 +278,8 @@ class MwlTechnicalLogger(
         sb.toString()
     }
 
-    private fun isPhiField(key: String): Boolean {
-        val lower = key.lowercase(Locale.US)
-        return lower.contains("patient") || lower.contains("name") || lower.contains("birth") ||
-                lower.contains("id") && lower.contains("patient") || lower.contains("фио")
+    private companion object {
+        val SAFE_NUMERIC_FIELDS = setOf("Message ID", "Status", "Port", "TCP Port", "Priority", "PC ID", "Matches Sent", "Total Matches", "Pending Responses", "Received Items", "Presentation Contexts Count")
     }
-
-    private fun sanitizePhi(text: String, includePhi: Boolean): String {
-        if (includePhi) return text
-        // Маскирование ключевых паттернов ФИО и Patient ID
-        var result = text
-        // Если текст содержит явные теги или паттерны пациентов
-        result = result.replace(Regex("Patient Name:\\s*[^|\\n]+", RegexOption.IGNORE_CASE), "Patient Name: [ОБЕЗЛИЧЕНО]")
-        result = result.replace(Regex("Patient ID:\\s*[^|\\n]+", RegexOption.IGNORE_CASE), "Patient ID: [СКРЫТО]")
-        result = result.replace(Regex("Birth Date:\\s*[^|\\n]+", RegexOption.IGNORE_CASE), "Birth Date: [СКРЫТО]")
-        result = result.replace(Regex("ФИО:\\s*[^|\\n]+", RegexOption.IGNORE_CASE), "ФИО: [ОБЕЗЛИЧЕНО]")
-        return result
-    }
+    private fun sanitizePhi(text: String, includePhi: Boolean) = if (includePhi) text else "[СКРЫТО]"
 }

@@ -4,7 +4,10 @@ import kotlinx.coroutines.flow.StateFlow
 import ru.medeng.dicomtool.mwl.model.MwlPatient
 import ru.medeng.dicomtool.mwl.model.MwlScheduledStudy
 
+data class MwlSnapshot(val patients: List<MwlPatient>, val studies: List<MwlScheduledStudy>)
+
 interface MwlRepository {
+    fun snapshot(): MwlSnapshot = MwlSnapshot(getAllPatients(), getAllStudies())
     val patientsFlow: StateFlow<List<MwlPatient>>
     val studiesFlow: StateFlow<List<MwlScheduledStudy>>
 

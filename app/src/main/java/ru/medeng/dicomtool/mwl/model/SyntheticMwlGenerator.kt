@@ -98,7 +98,7 @@ object SyntheticMwlGenerator {
             scheduledStationName = "Кабинет ${100 + index}",
             spsDescription = template.spsDescription,
             scheduledPerformingPhysician = "ЛАБОРАНТ^ТЕСТОВЫЙ^И",
-            spsLocation = "Отделение лучевой диагностики",
+            spsLocation = "Диагностика",
             isSynthetic = true
         )
 
@@ -160,7 +160,7 @@ object SyntheticMwlGenerator {
                 scheduledStationName = "Кабинет ${100 + idx + 1}",
                 spsDescription = template.spsDescription,
                 scheduledPerformingPhysician = "ИНЖЕНЕР^ОПЕРАТОР^С",
-                spsLocation = "Диагностический центр",
+                spsLocation = "Диагностика",
                 isSynthetic = true
             )
         }

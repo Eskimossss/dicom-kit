@@ -21,9 +21,7 @@ object MwlValidation {
         if (trimmed.isEmpty()) {
             return Result.Invalid("patientName", "ФИО пациента не может быть пустым")
         }
-        if (trimmed.length > 64) {
-            return Result.Invalid("patientName", "Длина ФИО пациента превышает 64 символа (VR: PN)")
-        }
+        if (pn(name, "patientName", true) is Result.Invalid) return pn(name, "patientName", true)
         return Result.Valid
     }
 
@@ -53,14 +51,8 @@ object MwlValidation {
         if (trimmed.length != 8 || !trimmed.all { it.isDigit() }) {
             return Result.Invalid(fieldName, "Дата должна быть в формате YYYYMMDD (8 цифр), получено: $trimmed")
         }
-        val year = trimmed.substring(0, 4).toIntOrNull() ?: 0
-        val month = trimmed.substring(4, 6).toIntOrNull() ?: 0
-        val day = trimmed.substring(6, 8).toIntOrNull() ?: 0
-
-        if (year < 1850 || year > 2100) return Result.Invalid(fieldName, "Некорректный год ($year)")
-        if (month !in 1..12) return Result.Invalid(fieldName, "Некорректный месяц ($month)")
-        if (day !in 1..31) return Result.Invalid(fieldName, "Некорректный день месяца ($day)")
-
+        try { java.time.LocalDate.parse(trimmed, java.time.format.DateTimeFormatter.BASIC_ISO_DATE) }
+        catch (_: Exception) { return Result.Invalid(fieldName, "Несуществующая календарная дата") }
         return Result.Valid
     }
 
@@ -68,26 +60,13 @@ object MwlValidation {
      * Валидация времени (VR: TM). Формат: HHMMSS или HHMM.
      */
     fun validateTime(timeStr: String, fieldName: String = "time", required: Boolean = false): Result {
-        val trimmed = timeStr.trim().replace(":", "").replace(".", "")
-        if (trimmed.isEmpty()) {
-            return if (required) Result.Invalid(fieldName, "Время обязательно для заполнения") else Result.Valid
-        }
-        if (!trimmed.all { it.isDigit() }) {
-            return Result.Invalid(fieldName, "Время должно состоять из цифр, получено: $trimmed")
-        }
-        if (trimmed.length !in 2..6) {
-            return Result.Invalid(fieldName, "Время должно быть в формате HHMMSS или HHMM, получено: $trimmed")
-        }
-        val hour = trimmed.substring(0, 2).toIntOrNull() ?: -1
-        if (hour !in 0..23) return Result.Invalid(fieldName, "Некорректный час ($hour)")
-        if (trimmed.length >= 4) {
-            val minute = trimmed.substring(2, 4).toIntOrNull() ?: -1
-            if (minute !in 0..59) return Result.Invalid(fieldName, "Некорректные минуты ($minute)")
-        }
-        if (trimmed.length >= 6) {
-            val second = trimmed.substring(4, 6).toIntOrNull() ?: -1
-            if (second !in 0..59) return Result.Invalid(fieldName, "Некорректные секунды ($second)")
-        }
+        val trimmed = timeStr.trim()
+        if (trimmed.isEmpty()) return if (required) Result.Invalid(fieldName, "Время обязательно") else Result.Valid
+        if (!Regex("[0-9]{2}([0-9]{2}([0-9]{2}(\\.[0-9]{1,6})?)?)?").matches(trimmed)) return Result.Invalid(fieldName, "Ожидается DICOM TM: HH[MM[SS[.FFFFFF]]]")
+        val clock = trimmed.substringBefore('.')
+        if (clock.substring(0, 2).toInt() !in 0..23 ||
+            (clock.length >= 4 && clock.substring(2, 4).toInt() !in 0..59) ||
+            (clock.length >= 6 && clock.substring(4, 6).toInt() !in 0..60)) return Result.Invalid(fieldName, "Некорректное время")
         return Result.Valid
     }
 
@@ -150,6 +129,43 @@ object MwlValidation {
             return Result.Invalid("modality", "Код модальности превышает 16 символов")
         }
         return Result.Valid
+    }
+
+    private fun text(value: String, field: String, max: Int, required: Boolean = false): Result = when {
+        required && value.isBlank() -> Result.Invalid(field, "$field: обязательное поле не заполнено")
+        value.length > max || value.any { it < ' ' || it == '\\' } -> Result.Invalid(field, "$field: недопустимое значение или длина VR")
+        else -> Result.Valid
+    }
+    private fun pn(value: String, field: String, required: Boolean = false): Result {
+        if (required && value.isBlank()) return Result.Invalid(field, "Обязательное имя не заполнено")
+        if (value.split('=').size > 3 || value.split('=').any { it.length > 64 || it.split('^').size > 5 } || value.any { it < ' ' || it == '\\' }) return Result.Invalid(field, "Некорректное DICOM PN")
+        return Result.Valid
+    }
+    fun validatePatient(patient: MwlPatient): Result = listOf(
+        pn(patient.patientName, "patientName", true), text(patient.patientId, "patientId", 64, true),
+        validateDate(patient.patientBirthDate, "patientBirthDate"),
+        if (patient.patientSex in setOf("", "M", "F", "O")) Result.Valid else Result.Invalid("patientSex", "Допустимы M/F/O"),
+        text(patient.medicalAlerts, "medicalAlerts", 64),
+        if (patient.patientWeight.isEmpty() || (patient.patientWeight.length <= 16 && patient.patientWeight.toBigDecimalOrNull() != null)) Result.Valid else Result.Invalid("patientWeight", "Некорректное DS")
+    ).firstOrNull { it is Result.Invalid } ?: Result.Valid
+
+    fun validateStudy(study: MwlScheduledStudy): Result = listOf(
+        pn(study.patientName, "patientName", true), text(study.patientId, "patientId", 64, true),
+        validateStudyInstanceUid(study.studyInstanceUid), validateAccessionNumber(study.accessionNumber),
+        text(study.requestedProcedureId, "requestedProcedureId", 16, true), text(study.spsId, "spsId", 16, true),
+        text(study.requestedProcedureDescription, "requestedProcedureDescription", 64, true),
+        text(study.spsDescription.ifEmpty { study.requestedProcedureDescription }, "spsDescription", 64, true),
+        validateDate(study.spsStartDate, "spsStartDate", true), validateTime(study.spsStartTime, "spsStartTime", true),
+        validateAeTitle(study.scheduledStationAeTitle, "scheduledStationAeTitle"),
+        text(study.scheduledStationName, "scheduledStationName", 16), text(study.spsLocation, "spsLocation", 16),
+        text(study.admissionId, "admissionId", 64), pn(study.referringPhysicianName, "referringPhysicianName"),
+        pn(study.requestingPhysician, "requestingPhysician"), pn(study.scheduledPerformingPhysician, "scheduledPerformingPhysician"),
+        if (Regex("[A-Z0-9 _]{1,16}").matches(study.modality)) Result.Valid else Result.Invalid("modality", "Некорректное CS"),
+        if (Regex("[A-Z0-9 _]{1,16}").matches(study.spsStatus)) Result.Valid else Result.Invalid("spsStatus", "Некорректное CS")
+    ).firstOrNull { it is Result.Invalid } ?: Result.Valid
+
+    fun requireValid(result: Result) {
+        require(result is Result.Valid) { (result as Result.Invalid).let { "${it.field}: ${it.messageRu}" } }
     }
 
     /**

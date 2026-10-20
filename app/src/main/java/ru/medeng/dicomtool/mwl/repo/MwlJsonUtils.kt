@@ -65,123 +65,69 @@ object MwlJsonUtils {
         return sb.toString()
     }
 
-    /**
-     * Преобразует JSON-массив объектов в список Map<String, String>.
-     */
-    fun parseArrayOfObjects(json: String): List<Map<String, String>> {
-        val list = mutableListOf<Map<String, String>>()
-        val trimmed = json.trim()
-        if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) return list
 
-        var inString = false
-        var escape = false
-        var braceLevel = 0
-        var objectStartIndex = -1
-
-        for (i in trimmed.indices) {
-            val c = trimmed[i]
-            if (escape) {
-                escape = false
-                continue
-            }
-            if (c == '\\' && inString) {
-                escape = true
-                continue
-            }
-            if (c == '"') {
-                inString = !inString
-                continue
-            }
-            if (!inString) {
-                if (c == '{') {
-                    if (braceLevel == 0) objectStartIndex = i
-                    braceLevel++
-                } else if (c == '}') {
-                    braceLevel--
-                    if (braceLevel == 0 && objectStartIndex != -1) {
-                        val objStr = trimmed.substring(objectStartIndex, i + 1)
-                        list.add(parseObject(objStr))
-                        objectStartIndex = -1
-                    }
-                }
-            }
-        }
-        return list
+    // Keep nested values as validated JSON so callers can decode arrays without truncation.
+    fun parseObject(json: String): Map<String, String> = Reader(json).let { r ->
+        val result = r.obj(); r.end(); result
     }
-
-    /**
-     * Разбирает один плоский JSON-объект в Map<String, String>.
-     */
-    fun parseObject(json: String): Map<String, String> {
-        val map = mutableMapOf<String, String>()
-        val trimmed = json.trim()
-        if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return map
-        val content = trimmed.substring(1, trimmed.length - 1).trim()
-        if (content.isEmpty()) return map
-
-        var inString = false
-        var escape = false
-        var keyStartIndex = -1
-        var currentKey: String? = null
-        var valueStartIndex = -1
-
-        var i = 0
-        while (i < content.length) {
-            val c = content[i]
-            if (escape) {
-                escape = false
-                i++
-                continue
-            }
-            if (c == '\\' && inString) {
-                escape = true
-                i++
-                continue
-            }
-            if (c == '"') {
-                if (!inString) {
-                    if (currentKey == null) {
-                        keyStartIndex = i + 1
-                    } else if (valueStartIndex == -1) {
-                        valueStartIndex = i + 1
-                    }
-                } else {
-                    if (currentKey == null) {
-                        currentKey = unescape(content.substring(keyStartIndex, i))
-                    } else if (valueStartIndex != -1) {
-                        val value = unescape(content.substring(valueStartIndex, i))
-                        map[currentKey] = value
-                        currentKey = null
-                        valueStartIndex = -1
-                    }
-                }
-                inString = !inString
-                i++
-                continue
-            }
-            if (!inString) {
-                if (c == ':') {
-                    // Переход к значению (если значение не строка, например true/false/number)
-                    if (currentKey != null && valueStartIndex == -1) {
-                        var k = i + 1
-                        while (k < content.length && content[k].isWhitespace()) k++
-                        if (k < content.length && content[k] != '"') {
-                            val vStart = k
-                            while (k < content.length && content[k] != ',' && content[k] != '}') k++
-                            val rawVal = content.substring(vStart, k).trim()
-                            map[currentKey] = rawVal
-                            currentKey = null
-                            i = k
-                            continue
-                        }
-                    }
-                } else if (c == ',') {
-                    currentKey = null
-                    valueStartIndex = -1
+    fun parseArrayOfObjects(json: String): List<Map<String, String>> = Reader(json).let { r ->
+        val result = r.array().map { parseObject(it) }; r.end(); result
+    }
+    private class Reader(private val text: String) {
+        private var i = 0
+        private var depth = 0
+        private fun ws() { while (i < text.length && text[i] in " \t\r\n") i++ }
+        private fun take(c: Char) { ws(); require(i < text.length && text[i++] == c) { "Invalid MWL JSON" } }
+        private fun at(c: Char): Boolean { ws(); return i < text.length && text[i] == c }
+        fun end() { ws(); require(i == text.length) { "Trailing MWL JSON data" } }
+        private fun string(): String {
+            take('"'); val start = i
+            while (i < text.length) {
+                val c = text[i++]
+                if (c == '"') return unescape(text.substring(start, i - 1))
+                require(c.code >= 0x20) { "Unescaped JSON control character" }
+                if (c == '\\') {
+                    require(i < text.length)
+                    val escaped = text[i++]
+                    require(escaped in "\"\\/bfnrtu")
+                    if (escaped == 'u') { require(i + 4 <= text.length && text.substring(i, i + 4).all { it.digitToIntOrNull(16) != null }); i += 4 }
                 }
             }
-            i++
+            error("Unterminated MWL JSON string")
         }
-        return map
+        private fun value(): String {
+            ws(); require(i < text.length); val start = i
+            when (text[i]) {
+                '"' -> string()
+                '{' -> obj()
+                '[' -> array()
+                else -> {
+                    while (i < text.length && text[i] !in ",]} \t\r\n") i++
+                    val token = text.substring(start, i)
+                    require(token in listOf("true", "false", "null") || Regex("-?(0|[1-9][0-9]*)(\\.[0-9]+)?([eE][+-]?[0-9]+)?").matches(token)) { "Invalid MWL JSON value" }
+                }
+            }
+            return text.substring(start, i)
+        }
+        fun obj(): Map<String, String> {
+            require(++depth <= 64); take('{'); val result = linkedMapOf<String, String>()
+            if (!at('}')) do {
+                val key = string(); take(':'); val raw = value()
+                require(!result.containsKey(key)) { "Duplicate JSON key" }
+                result[key] = if (raw.startsWith('"')) unescape(raw.substring(1, raw.length - 1)) else raw
+                if (!at(',')) break
+                take(',')
+            } while (true)
+            take('}'); depth--; return result
+        }
+        fun array(): List<String> {
+            require(++depth <= 64); take('['); val result = mutableListOf<String>()
+            if (!at(']')) do {
+                result.add(value())
+                if (!at(',')) break
+                take(',')
+            } while (true)
+            take(']'); depth--; return result
+        }
     }
 }

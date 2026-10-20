@@ -57,13 +57,12 @@ class MwlScuProfileRepository(private val rootDir: File) {
                     )
                     list.add(p)
                 }
-            } catch (_: Exception) {}
+            } catch (e: Exception) { throw java.io.IOException("Cannot load MWL profiles; existing file was preserved", e) }
         }
         _profilesFlow.value = list
     }
 
     private fun persistToDisk(list: List<MwlScuProfile>) {
-        val tmp = File(rootDir, "mwl_scu_profiles.json.tmp")
         val sb = StringBuilder()
         sb.append("[\n")
         list.forEachIndexed { i, p ->
@@ -83,15 +82,7 @@ class MwlScuProfileRepository(private val rootDir: File) {
         }
         sb.append("]\n")
 
-        FileOutputStream(tmp).use { fos ->
-            fos.write(sb.toString().toByteArray(StandardCharsets.UTF_8))
-            fos.flush()
-            try {
-                fos.fd.sync()
-            } catch (_: Exception) {}
-        }
-        if (profilesFile.exists()) profilesFile.delete()
-        tmp.renameTo(profilesFile)
+        AtomicMwlFile.write(profilesFile, sb.toString())
     }
 
     fun getAllProfiles(): List<MwlScuProfile> = _profilesFlow.value
