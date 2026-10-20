@@ -125,24 +125,77 @@ class ScpLifecycleStage55Test {
         assertFalse(logs.any { it.category == DicomLogCategory.RELEASE_RP || it.category == DicomLogCategory.RELEASE_RQ })
     }
     @Test fun parallelDifferentPixelsWithSameUidPreserveEveryObjectAndLeaveNoParts() {
+        val saveMillis = ConcurrentLinkedQueue<Long>()
+        val responseMillis = ConcurrentLinkedQueue<Long>()
+        server = DicomStorageScpServer(object : DicomStudyRepository by repo {
+            override fun saveIncomingInstance(tempIncomingFile: File, studyInstanceUid: String, seriesInstanceUid: String, sopInstanceUid: String): DicomSaveResult {
+                val began = System.nanoTime()
+                try { return repo.saveIncomingInstance(tempIncomingFile, studyInstanceUid, seriesInstanceUid, sopInstanceUid) }
+                finally { saveMillis.add(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - began)) }
+            }
+        }, logger)
         start()
-        repeat(3) { batch ->
-            val connections = (0 until 8).map { connect() }
-            connections.mapIndexed { n, a -> exec.submit {
-                val ds = data().apply { setBytes(Tag.PixelData, VR.OB, byteArrayOf((batch * 8 + n).toByte(), 42)) }
-                assertEquals(0, store(a, ds))
-            } }.forEach { it.get(15, TimeUnit.SECONDS) }
-            connections.forEach { it.release() }
-            await { server.state.value.activeConnectionsCount == 0 }
+        try {
+            repeat(3) { batch ->
+                val connections = (0 until 8).map { connect() }
+                connections.mapIndexed { n, a -> exec.submit {
+                    val ds = data().apply { setBytes(Tag.PixelData, VR.OB, byteArrayOf((batch * 8 + n).toByte(), 42)) }
+                    val began = System.nanoTime()
+                    try { assertEquals(0, store(a, ds)) }
+                    finally { responseMillis.add(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - began)) }
+                } }.forEach { it.get(15, TimeUnit.SECONDS) }
+                connections.forEach { it.release() }
+                await { server.state.value.activeConnectionsCount == 0 }
+            }
+            val files = repo.storageRootDir.walkTopDown().filter { it.isFile && it.extension == "dcm" }.toList()
+            assertEquals(24, files.size)
+            val pixels = files.map { file -> org.dcm4che3.io.DicomInputStream(file).use { input ->
+                input.readFileMetaInformation(); input.readDataset().getBytes(Tag.PixelData)[0].toInt()
+            } }.toSet()
+            assertEquals((0 until 24).toSet(), pixels)
+            assertEquals(24, repo.getTotalSavedFilesCount())
+            assertTrue(File(repo.storageRootDir, ".incoming_tmp").listFiles().orEmpty().isEmpty())
+        } finally {
+            println("Same-UID save+index milliseconds: ${saveMillis.toList().sorted()}")
+            println("Same-UID C-STORE round-trip milliseconds (client deadline remains 2000): ${responseMillis.toList().sorted()}")
         }
-        val files = repo.storageRootDir.walkTopDown().filter { it.isFile && it.extension == "dcm" }.toList()
-        assertEquals(24, files.size)
-        val pixels = files.map { file -> org.dcm4che3.io.DicomInputStream(file).use { input ->
-            input.readFileMetaInformation(); input.readDataset().getBytes(Tag.PixelData)[0].toInt()
-        } }.toSet()
-        assertEquals((0 until 24).toSet(), pixels)
-        assertEquals(24, repo.getTotalSavedFilesCount())
+    }
+    @Test fun clientResponseTimeoutDoesNotUndoVerifiedObjectOrClaimPeerReceipt() {
+        val saved = CountDownLatch(1)
+        val allowResponse = CountDownLatch(1)
+        server = DicomStorageScpServer(object : DicomStudyRepository by repo {
+            override fun saveIncomingInstance(tempIncomingFile: File, studyInstanceUid: String, seriesInstanceUid: String, sopInstanceUid: String): DicomSaveResult {
+                val result = repo.saveIncomingInstance(tempIncomingFile, studyInstanceUid, seriesInstanceUid, sopInstanceUid)
+                saved.countDown()
+                check(allowResponse.await(6, TimeUnit.SECONDS)) { "Test did not release the response gate" }
+                return result
+            }
+        }, logger)
+        start()
+        val association = connect() // Same unmodified 2000 ms response deadline as the concurrency regression.
+        val send = exec.submit<Throwable?> { runCatching { store(association) }.exceptionOrNull() }
+        try {
+            assertTrue(saved.await(4, TimeUnit.SECONDS))
+            assertTrue("Client must really time out before the response gate opens", send.get(5, TimeUnit.SECONDS) is AAbort)
+        } finally { allowResponse.countDown() }
+        await { server.state.value.activeConnectionsCount == 0 }
+        val file = repo.storageRootDir.walkTopDown().single { it.isFile && it.extension == "dcm" }
+        org.dcm4che3.io.DicomInputStream(file).use { input ->
+            input.readFileMetaInformation()
+            assertArrayEquals(byteArrayOf(12, 34), input.readDataset().getBytes(Tag.PixelData))
+        }
+        assertEquals(1, repo.getTotalSavedFilesCount())
         assertTrue(File(repo.storageRootDir, ".incoming_tmp").listFiles().orEmpty().isEmpty())
+        val summary = DicomSessionGrouper.groupEvents(logger.logsFlow.value).first { it.primaryOperation == "C-STORE" }
+        assertEquals(SessionOutcomeStatus.WARNING, summary.status)
+        assertEquals("VERIFIED", summary.filesTransferred.single().storageResult)
+        // A TCP write can complete locally after the peer timed out. Neither outcome proves peer receipt.
+        when (summary.filesTransferred.single().responseWrite) {
+            "FAILED" -> assertFalse(logger.logsFlow.value.any { it.category == DicomLogCategory.C_STORE_RSP })
+            "LOCAL_COMPLETED" -> assertTrue(logger.logsFlow.value.single { it.category == DicomLogCategory.C_STORE_RSP }
+                .title.contains("peer receipt unconfirmed"))
+            else -> fail("Missing truthful local response-write outcome")
+        }
     }
     @Test fun shortInstanceUidCannotViolateTemporaryFilePrefixContract() {
         start(); val a = connect()

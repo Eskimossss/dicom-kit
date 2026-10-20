@@ -493,7 +493,7 @@ private const val APACHE_2_0_TEXT = """                                 Apache L
       or other liability obligations and/or rights consistent with this
       License."""
 
-private const val MPL_1_1_TEXT = """﻿                          MOZILLA PUBLIC LICENSE
+private const val MPL_1_1_TEXT = """                          MOZILLA PUBLIC LICENSE
                                 Version 1.1
 
                               ---------------

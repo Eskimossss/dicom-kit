@@ -1,5 +1,8 @@
 package ru.medeng.dicomtool
 
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.dcm4che3.data.Attributes
 import org.dcm4che3.data.Tag
 import org.dcm4che3.data.UID
@@ -243,7 +246,13 @@ class DicomScpStage2IntegrationTest {
         }
 
         // 6. Проверяем технический журнал и его сохранение между перезапусками
-        val logEntries = logger.logsFlow.value
+        // The peer may receive RJ before the SCP thread returns from its write and logs the callback.
+        // Wait for that actual event; do not infer it from the client's exception or invent a log entry.
+        val logEntries = runBlocking {
+            withTimeout(2000) {
+                logger.logsFlow.first { entries -> entries.any { it.category == DicomLogCategory.ASSOCIATE_RJ } }
+            }
+        }
         assertTrue(logEntries.any { it.category == DicomLogCategory.TCP_CONNECT })
         assertTrue(logEntries.any { it.category == DicomLogCategory.ASSOCIATE_RQ })
         assertTrue(logEntries.any { it.category == DicomLogCategory.ASSOCIATE_AC })
