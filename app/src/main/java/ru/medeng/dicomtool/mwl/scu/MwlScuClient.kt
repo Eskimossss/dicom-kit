@@ -1,369 +1,153 @@
 package ru.medeng.dicomtool.mwl.scu
 
-import org.dcm4che3.data.Attributes
-import org.dcm4che3.data.Tag
-import org.dcm4che3.data.UID
-import org.dcm4che3.data.VR
-import org.dcm4che3.net.ApplicationEntity
-import org.dcm4che3.net.Association
-import org.dcm4che3.net.Connection
-import org.dcm4che3.net.Device
-import org.dcm4che3.net.DimseRSP
-import org.dcm4che3.net.Priority
-import org.dcm4che3.net.Status
-import org.dcm4che3.net.TransferCapability
-import org.dcm4che3.net.pdu.AAssociateAC
-import org.dcm4che3.net.pdu.AAssociateRJ
-import org.dcm4che3.net.pdu.AAssociateRQ
-import org.dcm4che3.net.pdu.PresentationContext
+import org.dcm4che3.data.*
+import org.dcm4che3.net.*
+import org.dcm4che3.net.pdu.*
 import ru.medeng.dicomtool.data.logging.DicomSessionManager
-import ru.medeng.dicomtool.domain.model.DicomLogCategory
-import ru.medeng.dicomtool.domain.model.DicomTrafficDirection
+import ru.medeng.dicomtool.domain.model.*
 import ru.medeng.dicomtool.mwl.engine.MwlDatasetBuilder
 import ru.medeng.dicomtool.mwl.log.MwlTechnicalLogger
-import ru.medeng.dicomtool.mwl.model.MwlQueryResultItem
-import ru.medeng.dicomtool.mwl.model.MwlScuFilter
-import ru.medeng.dicomtool.mwl.model.MwlScuProfile
+import ru.medeng.dicomtool.mwl.model.*
 import java.io.IOException
-import java.net.ConnectException
-import java.net.SocketTimeoutException
-import java.net.UnknownHostException
+import java.net.Socket
 import java.util.UUID
 import java.util.concurrent.Executors
-import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
-class MwlScuClient(
-    private val logger: MwlTechnicalLogger
-) {
+class MwlScuClient(private val logger: MwlTechnicalLogger) {
     companion object {
-        val SUPPORTED_TRANSFER_SYNTAXES = arrayOf(
-            UID.ImplicitVRLittleEndian,
-            UID.ExplicitVRLittleEndian
-        )
+        val SUPPORTED_TRANSFER_SYNTAXES = arrayOf(UID.ImplicitVRLittleEndian, UID.ExplicitVRLittleEndian)
     }
-
-    private val isCancelled = AtomicBoolean(false)
-    private val currentRspRef = AtomicReference<DimseRSP?>(null)
-    private val currentAssocRef = AtomicReference<Association?>(null)
+    private val active = AtomicBoolean(false)
+    private val cancelled = AtomicBoolean(false)
+    private val cancelSent = AtomicBoolean(false)
+    private val currentRsp = AtomicReference<DimseRSP?>()
+    private val currentAssociation = AtomicReference<Association?>()
+    private val currentSocket = AtomicReference<Socket?>()
+    private val currentExecutor = AtomicReference<java.util.concurrent.ExecutorService?>()
+    private val cancelDeadline = java.util.concurrent.atomic.AtomicLong(Long.MAX_VALUE)
 
     fun cancelQuery() {
-        isCancelled.set(true)
-        val assoc = currentAssocRef.get()
-        val rsp = currentRspRef.get()
-        if (assoc != null && rsp != null) {
-            runCatching { rsp.cancel(assoc) }
-        }
+        if (!active.get()) return
+        cancelled.set(true)
+        val rsp = currentRsp.get()
+        val association = currentAssociation.get()
+        if (rsp != null && association != null) {
+            // DIMSE writes may block: never write on the UI thread.
+            runCatching { currentExecutor.get()?.execute { sendCancel(rsp, association) } }
+        } else runCatching { currentSocket.get()?.close() }
+    }
+    private fun sendCancel(rsp: DimseRSP, association: Association) {
+        if (cancelSent.compareAndSet(false, true)) runCatching { rsp.cancel(association) }
     }
 
-    fun queryWorklist(
-        profile: MwlScuProfile,
-        filter: MwlScuFilter,
-        onProgress: (count: Int) -> Unit = {}
-    ): Result<List<MwlQueryResultItem>> {
-        isCancelled.set(false)
+    fun queryWorklist(profile: MwlScuProfile, filter: MwlScuFilter, onProgress: (Int) -> Unit = {}): Result<MwlQueryOutcome> {
+        if (!active.compareAndSet(false, true)) return Result.failure(IllegalStateException("MWL query already running"))
+        cancelled.set(false); cancelSent.set(false); cancelDeadline.set(Long.MAX_VALUE)
         val session = DicomSessionManager.nextMwlScuSession()
-        val assocId = session.displayLabel
-        val sessionUid = session.sessionUid
-
-        val host = profile.host.trim().ifEmpty { "127.0.0.1" }
-        val port = profile.port
-        val calledAet = profile.calledAet.trim().ifEmpty { "MWL_SCP" }
-        val callingAet = profile.callingAet.trim().ifEmpty { "DICOMKIT_SCU" }
-
-        logger.recordEvent(
-            category = DicomLogCategory.TCP_CONNECT,
-            direction = DicomTrafficDirection.OUTBOUND,
-            associationId = assocId,
-            sessionUid = sessionUid,
-            title = "MWL SCU: Подключение к $host:$port",
-            summaryLines = listOf(
-                "Calling AE: $callingAet  ->  Called AE: $calledAet",
-                "Таймаут подключения: ${profile.connectionTimeoutMs} мс",
-                "Таймаут ответа: ${profile.responseTimeoutMs} мс"
-            ),
-            technicalDetails = mapOf(
-                "Host" to host,
-                "Port" to port.toString(),
-                "Called AET" to calledAet,
-                "Calling AET" to callingAet
-            )
-        )
-
+        val results = mutableListOf<MwlQueryResultItem>()
+        val executor = Executors.newCachedThreadPool()
+        val scheduled = Executors.newSingleThreadScheduledExecutor()
+        currentExecutor.set(executor)
         var association: Association? = null
-        var executor: java.util.concurrent.ExecutorService? = null
-        var scheduled: ScheduledExecutorService? = null
-
+        fun log(title: String, category: DicomLogCategory, status: Int? = null, error: Boolean = false) {
+            logger.recordEvent(category = category, direction = DicomTrafficDirection.OUTBOUND,
+                associationId = session.displayLabel, sessionUid = session.sessionUid, title = title,
+                technicalDetails = buildMap { put("Received Items", results.size.toString()); status?.let { put("Status", "%04X".format(it)) } }, isError = error)
+        }
         return try {
-            val exec = Executors.newCachedThreadPool().also { executor = it }
-            val sched = Executors.newSingleThreadScheduledExecutor().also { scheduled = it }
-
+            require(profile.connectionTimeoutMs in 1..120000 && profile.responseTimeoutMs in 1..120000) { "MWL timeouts must be 1..120000 ms" }
+            require(profile.port in 1..65535 && profile.host.isNotBlank()) { "Invalid MWL endpoint" }
+            MwlValidation.requireValid(MwlValidation.validateAeTitle(profile.calledAet))
+            MwlValidation.requireValid(MwlValidation.validateAeTitle(profile.callingAet))
             val device = Device("dicomkit-mwl-scu")
-            val localConn = Connection().apply {
+            val local = Connection().apply {
                 connectTimeout = profile.connectionTimeoutMs
-                responseTimeout = profile.responseTimeoutMs
-            }
-            val remoteConn = Connection().apply {
-                hostname = host
-                this.port = port
-                connectTimeout = profile.connectionTimeoutMs
-                responseTimeout = profile.responseTimeoutMs
                 acceptTimeout = profile.connectionTimeoutMs
+                responseTimeout = profile.responseTimeoutMs
+                retrieveTimeout = profile.responseTimeoutMs
+                releaseTimeout = profile.connectionTimeoutMs
+                socketCloseDelay = 0
             }
-
-            val localAe = ApplicationEntity(callingAet).apply {
-                isAssociationInitiator = true
-                isAssociationAcceptor = false
-                addConnection(localConn)
-
-                addTransferCapability(
-                    TransferCapability(
-                        "MWL-Find-SCU",
-                        UID.ModalityWorklistInformationModelFind,
-                        TransferCapability.Role.SCU,
-                        *SUPPORTED_TRANSFER_SYNTAXES
-                    )
-                )
-
-                addTransferCapability(
-                    TransferCapability(
-                        "Verification-SCU",
-                        UID.Verification,
-                        TransferCapability.Role.SCU,
-                        *SUPPORTED_TRANSFER_SYNTAXES
-                    )
-                )
+            val remote = Connection().apply { hostname = profile.host.trim(); port = profile.port }
+            val ae = ApplicationEntity(profile.callingAet.trim()).apply { isAssociationInitiator = true; addConnection(local) }
+            device.addConnection(local); device.addApplicationEntity(ae)
+            device.executor = executor; device.scheduledExecutor = scheduled
+            device.connectionMonitor = object : ConnectionMonitor {
+                override fun onConnectionEstablished(conn: Connection, remoteConn: Connection, s: Socket) {
+                    currentSocket.set(s)
+                    if (cancelled.get()) s.close()
+                }
+                override fun onConnectionFailed(conn: Connection, remoteConn: Connection, s: Socket, e: Throwable) { s.close() }
+                override fun onConnectionAccepted(conn: Connection, s: Socket) {}
+                override fun onConnectionRejected(conn: Connection, s: Socket, e: Throwable) {}
+                override fun onConnectionRejectedBlacklisted(conn: Connection, s: Socket) {}
             }
-
-            device.addConnection(localConn)
-            device.addApplicationEntity(localAe)
-            device.executor = exec
-            device.scheduledExecutor = sched
-
+            scheduled.scheduleWithFixedDelay({
+                if (cancelled.get()) {
+                    val deadline = cancelDeadline.get()
+                    if (deadline == Long.MAX_VALUE) cancelDeadline.compareAndSet(deadline, System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(profile.responseTimeoutMs.toLong()))
+                    else if (System.nanoTime() >= deadline) runCatching { currentSocket.get()?.close() }
+                }
+            }, 50, 50, TimeUnit.MILLISECONDS)
             val rq = AAssociateRQ().apply {
-                this.calledAET = calledAet
-                this.callingAET = callingAet
-                addPresentationContext(
-                    PresentationContext(
-                        1,
-                        UID.ModalityWorklistInformationModelFind,
-                        *SUPPORTED_TRANSFER_SYNTAXES
-                    )
-                )
-                addPresentationContext(
-                    PresentationContext(
-                        3,
-                        UID.Verification,
-                        *SUPPORTED_TRANSFER_SYNTAXES
-                    )
-                )
+                callingAET = profile.callingAet.trim(); calledAET = profile.calledAet.trim()
+                addPresentationContext(PresentationContext(1, UID.ModalityWorklistInformationModelFind, *SUPPORTED_TRANSFER_SYNTAXES))
+                addPresentationContext(PresentationContext(3, UID.Verification, *SUPPORTED_TRANSFER_SYNTAXES))
             }
-
-            logger.recordEvent(
-                category = DicomLogCategory.ASSOCIATE_RQ,
-                direction = DicomTrafficDirection.OUTBOUND,
-                associationId = assocId,
-                sessionUid = sessionUid,
-                title = "A-ASSOCIATE-RQ запрос согласования ассоциации MWL",
-                summaryLines = listOf(
-                    "Calling AE: $callingAet  ->  Called AE: $calledAet",
-                    "SOP Class: Modality Worklist FIND (1.2.840.10008.5.1.4.31)"
-                )
-            )
-
-            // Установка TCP соединения и согласование ассоциации
-            val assoc = localAe.connect(localConn, remoteConn, rq)
-            association = assoc
-            currentAssocRef.set(assoc)
-
-            val ac: AAssociateAC = assoc.aAssociateAC
-            val rqMwlPc = rq.presentationContexts.firstOrNull { it.abstractSyntax == UID.ModalityWorklistInformationModelFind }
-            val mwlPc = rqMwlPc?.let { ac.getPresentationContext(it.pcid) }
-
-            if (mwlPc == null || !mwlPc.isAccepted) {
-                logger.recordEvent(
-                    category = DicomLogCategory.ASSOCIATE_RJ,
-                    direction = DicomTrafficDirection.INBOUND,
-                    associationId = assocId,
-                    sessionUid = sessionUid,
-                    title = "Удалённый сервер отклонил Presentation Context для Modality Worklist",
-                    summaryLines = listOf("SOP Class 1.2.840.10008.5.1.4.31 не был принят сервером"),
-                    isError = true
-                )
-                assoc.release()
-                return Result.failure(IllegalStateException("Сервер не принял Presentation Context для Modality Worklist"))
-            }
-
-            val negotiatedTs = mwlPc.transferSyntax ?: UID.ImplicitVRLittleEndian
-            logger.recordEvent(
-                category = DicomLogCategory.ASSOCIATE_AC,
-                direction = DicomTrafficDirection.INBOUND,
-                associationId = assocId,
-                sessionUid = sessionUid,
-                title = "Ассоциация MWL согласована успешно (A-ASSOCIATE-AC)",
-                summaryLines = listOf(
-                    "Согласованный Transfer Syntax: ${runCatching { UID.nameOf(negotiatedTs) }.getOrDefault(negotiatedTs)}",
-                    "PC ID: ${mwlPc.pcid}"
-                ),
-                technicalDetails = mapOf(
-                    "PC ID" to mwlPc.pcid.toString(),
-                    "Transfer Syntax" to negotiatedTs,
-                    "Remote AET" to assoc.calledAET
-                )
-            )
-
-            // Построение C-FIND-RQ Identifier
-            val queryDataset = MwlDatasetBuilder.buildMwlScuQueryDataset(
-                patientName = filter.patientName,
-                patientId = filter.patientId,
-                accessionNumber = filter.accessionNumber,
-                modality = filter.modality,
-                scheduledStationAe = filter.scheduledStationAe,
-                dateRange = filter.buildDateRangePattern(),
-                requestedProcedureId = filter.requestedProcedureId,
-                characterSet = "ISO_IR 192"
-            )
-
-            val filterSummary = mutableListOf<String>()
-            val datePat = filter.buildDateRangePattern()
-            if (datePat.isNotEmpty()) filterSummary.add("Дата: $datePat (${filter.dateOption.labelRu})")
-            if (filter.modality.isNotEmpty()) filterSummary.add("Модальность: ${filter.modality}")
-            if (filter.scheduledStationAe.isNotEmpty()) filterSummary.add("Station AE: ${filter.scheduledStationAe}")
-            if (filter.patientName.isNotEmpty()) filterSummary.add("ФИО: ${filter.patientName}")
-            if (filter.patientId.isNotEmpty()) filterSummary.add("Patient ID: ${filter.patientId}")
-            if (filter.accessionNumber.isNotEmpty()) filterSummary.add("Accession: ${filter.accessionNumber}")
-            if (filterSummary.isEmpty()) filterSummary.add("Без фильтрации (запрос всех записей)")
-
-            logger.recordEvent(
-                category = DicomLogCategory.C_ECHO_RQ,
-                direction = DicomTrafficDirection.OUTBOUND,
-                associationId = assocId,
-                sessionUid = sessionUid,
-                title = "Отправка C-FIND-RQ Modality Worklist",
-                summaryLines = listOf("Параметры фильтра:") + filterSummary
-            )
-
-            val results = mutableListOf<MwlQueryResultItem>()
-            val dimseRsp: DimseRSP = assoc.cfind(
-                UID.ModalityWorklistInformationModelFind,
-                Priority.NORMAL,
-                queryDataset,
-                negotiatedTs,
-                0 // autoCancel = 0
-            )
-            currentRspRef.set(dimseRsp)
-
-            var lastStatusHex = "0000H"
-            var cancelled = false
-
-            while (dimseRsp.next()) {
-                if (isCancelled.get()) {
-                    runCatching { dimseRsp.cancel(assoc) }
-                    cancelled = true
-                }
-
-                val cmd = dimseRsp.command ?: continue
-                val status = cmd.getInt(Tag.Status, 0)
-                lastStatusHex = "%04XH".format(status)
-
+            log("A-ASSOCIATE-RQ MWL", DicomLogCategory.ASSOCIATE_RQ)
+            val assoc = ae.connect(local, remote, rq)
+            association = assoc; currentAssociation.set(assoc)
+            if (cancelled.get()) throw java.util.concurrent.CancellationException("Cancelled during association")
+            val pc = assoc.aAssociateAC.getPresentationContext(1)
+            require(pc != null && pc.isAccepted) { "MWL Presentation Context rejected" }
+            log("A-ASSOCIATE-AC MWL", DicomLogCategory.ASSOCIATE_AC)
+            val keys = MwlDatasetBuilder.buildMwlScuQueryDataset(patientName = filter.patientName, patientId = filter.patientId,
+                accessionNumber = filter.accessionNumber, modality = filter.modality, scheduledStationAe = filter.scheduledStationAe,
+                dateRange = filter.buildDateRangePattern(), requestedProcedureId = filter.requestedProcedureId)
+            log("C-FIND-RQ MWL", DicomLogCategory.C_ECHO_RQ)
+            val rsp = assoc.cfind(UID.ModalityWorklistInformationModelFind, Priority.NORMAL, keys, pc.transferSyntax, 0)
+            currentRsp.set(rsp)
+            if (cancelled.get()) sendCancel(rsp, assoc)
+            var finalStatus: Int? = null
+            while (rsp.next()) {
+                val cmd = rsp.command ?: throw IOException("Missing DIMSE command")
+                if (!cmd.containsValue(Tag.Status)) throw IOException("Missing DIMSE Status")
+                val status = cmd.getInt(Tag.Status, -1)
                 if (Status.isPending(status)) {
-                    val ds = dimseRsp.dataset
-                    if (ds != null) {
-                        val item = parseMwlQueryResultItem(ds)
-                        results.add(item)
-                        onProgress(results.size)
-                    }
-                } else if (status == Status.Cancel) {
-                    cancelled = true
-                    break
-                } else if (status == Status.Success) {
-                    break
-                } else {
-                    // Ошибка со стороны SCP
-                    val errDesc = "Ошибка выполнения ($lastStatusHex)"
-                    logger.recordEvent(
-                        category = DicomLogCategory.NETWORK_ERROR,
-                        direction = DicomTrafficDirection.INBOUND,
-                        associationId = assocId,
-                        sessionUid = sessionUid,
-                        title = "Сервер MWL вернул ошибку выполнения C-FIND",
-                        summaryLines = listOf("Status: $lastStatusHex ($errDesc)"),
-                        technicalDetails = mapOf("Status" to lastStatusHex, "Description" to errDesc),
-                        isError = true
-                    )
-                    break
-                }
+                    val ds = rsp.dataset ?: throw IOException("Pending response has no Identifier")
+                    results.add(parseMwlQueryResultItem(ds)); onProgress(results.size)
+                    if (cancelled.get()) sendCancel(rsp, assoc)
+                } else { finalStatus = status; break }
             }
-
-            if (cancelled) {
-                logger.recordEvent(
-                    category = DicomLogCategory.C_ECHO_RSP,
-                    direction = DicomTrafficDirection.INBOUND,
-                    associationId = assocId,
-                    sessionUid = sessionUid,
-                    title = "C-FIND завершён по отмене пользователя (FE00H Cancel)",
-                    summaryLines = listOf("Получено результатов до отмены: ${results.size}")
-                )
-            } else {
-                logger.recordEvent(
-                    category = DicomLogCategory.C_ECHO_RSP,
-                    direction = DicomTrafficDirection.INBOUND,
-                    associationId = assocId,
-                    sessionUid = sessionUid,
-                    title = "C-FIND успешно завершён (0000H Success)",
-                    summaryLines = listOf("Получено назначений Worklist: ${results.size}"),
-                    technicalDetails = mapOf("Received Items" to results.size.toString(), "Status" to lastStatusHex)
-                )
+            val status = finalStatus ?: throw IOException("C-FIND ended without final Status")
+            log("C-FIND final %04X".format(status), DicomLogCategory.C_ECHO_RSP, status, status != Status.Success && status != Status.Cancel)
+            runCatching { assoc.release(); assoc.waitForSocketClose() }.onFailure {
+                runCatching { assoc.abort() }
+                log("A-RELEASE failed after confirmed DIMSE final", DicomLogCategory.NETWORK_ERROR, error = true)
             }
-
-            // Корректное завершение ассоциации
-            runCatching { assoc.release() }
-            logger.recordEvent(
-                category = DicomLogCategory.RELEASE_RQ,
-                direction = DicomTrafficDirection.OUTBOUND,
-                associationId = assocId,
-                sessionUid = sessionUid,
-                title = "Завершение ассоциации A-RELEASE",
-                summaryLines = listOf("Соединение освобождено штатно")
-            )
-
-            Result.success(results)
+            if (status != Status.Success && status != Status.Cancel) Result.failure(MwlQueryException(status, results.toList()))
+            else Result.success(MwlQueryOutcome(results.toList(), status, cancelled.get()))
         } catch (e: Exception) {
-            val errorMsg = when (e) {
-                is ConnectException -> "TCP Connection Refused: сервер $host:$port недоступен или отклонил соединение"
-                is SocketTimeoutException -> "TCP Timeout: превышено время ожидания ответа от $host:$port"
-                is UnknownHostException -> "DNS Error: не удалось определить адрес хоста '$host'"
-                else -> "${e.javaClass.simpleName}: ${e.message}"
-            }
-
-            logger.recordEvent(
-                category = DicomLogCategory.NETWORK_ERROR,
-                direction = DicomTrafficDirection.OUTBOUND,
-                associationId = assocId,
-                sessionUid = sessionUid,
-                title = "Сбой выполнения запроса MWL SCU",
-                summaryLines = listOf(errorMsg),
-                technicalDetails = mapOf(
-                    "Host" to host,
-                    "Port" to port.toString(),
-                    "Exception" to "${e.javaClass.name}: ${e.message}"
-                ),
-                isError = true
-            )
-
             runCatching { association?.abort() }
-            Result.failure(e)
+            if (cancelled.get()) {
+                log("MWL cancelled locally; remote Cancel not confirmed", DicomLogCategory.ABORT)
+                Result.success(MwlQueryOutcome(results.toList(), null, true))
+            } else {
+                log("MWL query failed: ${e.javaClass.simpleName}", DicomLogCategory.NETWORK_ERROR, error = true)
+                Result.failure(if (e is MwlQueryException) e else MwlQueryException(null, results.toList(), e))
+            }
         } finally {
-            currentRspRef.set(null)
-            currentAssocRef.set(null)
-            executor?.shutdownNow()
-            scheduled?.shutdownNow()
+            currentRsp.set(null); currentAssociation.set(null)
+            runCatching { currentSocket.getAndSet(null)?.close() }
+            currentExecutor.set(null); scheduled.shutdownNow(); executor.shutdownNow(); active.set(false)
         }
     }
 
     private fun parseMwlQueryResultItem(ds: Attributes): MwlQueryResultItem {
-        val cs = ds.getString(Tag.SpecificCharacterSet, "ISO_IR 192")
+        val cs = ds.getString(Tag.SpecificCharacterSet, "ISO_IR 6")
         val pName = ds.getString(Tag.PatientName, "")
         val pId = ds.getString(Tag.PatientID, "")
         val pBirth = ds.getString(Tag.PatientBirthDate, "")
@@ -420,7 +204,7 @@ class MwlScuClient(
             scheduledPerformingPhysician = perfPhys,
             spsLocation = spsLoc,
             specificCharacterSet = cs,
-            rawAttributes = ds
+            rawAttributes = Attributes(ds)
         )
     }
 }

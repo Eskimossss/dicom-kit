@@ -647,51 +647,8 @@ private fun MwlResultDetailDialog(
                     ) {
                         val attrs = item.rawAttributes
                         if (attrs != null) {
-                            val tags = attrs.tags().sorted()
-                            for (t in tags) {
-                                val tagHex = "(%04X,%04X)".format(t ushr 16, t and 0xFFFF)
-                                val vr = attrs.getVR(t)?.name ?: "LO"
-                                val tagName = runCatching { org.dcm4che3.data.ElementDictionary.keywordOf(t, null) }.getOrDefault("")
-
-                                if (t == Tag.ScheduledProcedureStepSequence) {
-                                    Text(
-                                        text = "$tagHex $vr $tagName (Sequence)",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = PrimaryBlue
-                                    )
-                                    val seq = attrs.getSequence(t)
-                                    if (seq != null) {
-                                        for ((idx, itemAttrs) in seq.withIndex()) {
-                                            Text(
-                                                text = "  Item #$idx:",
-                                                fontSize = 10.sp,
-                                                fontWeight = FontWeight.SemiBold,
-                                                color = TextSecondarySlate
-                                            )
-                                            for (itTag in itemAttrs.tags().sorted()) {
-                                                val itHex = "(%04X,%04X)".format(itTag ushr 16, itTag and 0xFFFF)
-                                                val itVr = itemAttrs.getVR(itTag)?.name ?: "LO"
-                                                val itVal = itemAttrs.getString(itTag, "")
-                                                val itName = runCatching { org.dcm4che3.data.ElementDictionary.keywordOf(itTag, null) }.getOrDefault("")
-                                                Text(
-                                                    text = "    $itHex $itVr $itName = $itVal",
-                                                    fontSize = 10.sp,
-                                                    fontFamily = FontFamily.Monospace,
-                                                    color = TextPrimaryDark
-                                                )
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    val valStr = attrs.getString(t, "")
-                                    Text(
-                                        text = "$tagHex $vr $tagName = $valStr",
-                                        fontSize = 10.sp,
-                                        fontFamily = FontFamily.Monospace,
-                                        color = TextPrimaryDark
-                                    )
-                                }
+                            for (line in ru.medeng.dicomtool.mwl.engine.MwlDatasetInspector.lines(attrs)) {
+                                Text(text = line, fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = TextPrimaryDark)
                             }
                         } else {
                             Text("Сырые DICOM-атрибуты недоступны", fontSize = 12.sp, color = TextSecondarySlate)

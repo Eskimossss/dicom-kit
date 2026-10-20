@@ -86,3 +86,15 @@ data class MwlQueryResultItem(
     val specificCharacterSet: String = "",
     val rawAttributes: Attributes? = null
 )
+
+/** A Cancel request is separate from the status actually returned by the SCP. */
+data class MwlQueryOutcome(
+    val items: List<MwlQueryResultItem>,
+    val finalStatus: Int?,
+    val cancelRequested: Boolean
+) : List<MwlQueryResultItem> by items {
+    val completedSuccessfully: Boolean get() = finalStatus == org.dcm4che3.net.Status.Success
+    val cancelConfirmed: Boolean get() = finalStatus == org.dcm4che3.net.Status.Cancel
+}
+class MwlQueryException(val dimseStatus: Int?, val partialResults: List<MwlQueryResultItem>, cause: Throwable? = null) :
+    java.io.IOException(if (dimseStatus != null) "C-FIND Failure %04X".format(dimseStatus) else "MWL transport/protocol failure: ${cause?.javaClass?.simpleName}", cause)

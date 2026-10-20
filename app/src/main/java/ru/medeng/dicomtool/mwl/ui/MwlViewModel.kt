@@ -177,7 +177,9 @@ class MwlViewModel(application: Application) : AndroidViewModel(application) {
         val dateCheck = MwlValidation.validateDate(patient.patientBirthDate, "patientBirthDate", required = false)
         if (dateCheck is MwlValidation.Result.Invalid) return dateCheck
 
-        repository.savePatient(patient)
+        val completeCheck = MwlValidation.validatePatient(patient)
+        if (completeCheck is MwlValidation.Result.Invalid) return completeCheck
+        try { repository.savePatient(patient) } catch (_: Exception) { return MwlValidation.Result.Invalid("storage", "Не удалось сохранить пациента; предыдущие данные сохранены") }
         showPatientDialog.value = false
         editingPatient.value = null
         return MwlValidation.Result.Valid
@@ -253,7 +255,9 @@ class MwlViewModel(application: Application) : AndroidViewModel(application) {
         val timeCheck = MwlValidation.validateTime(study.spsStartTime, "spsStartTime", required = false)
         if (timeCheck is MwlValidation.Result.Invalid) return timeCheck
 
-        repository.saveStudy(study)
+        val completeCheck = MwlValidation.validateStudy(study)
+        if (completeCheck is MwlValidation.Result.Invalid) return completeCheck
+        try { repository.saveStudy(study) } catch (_: Exception) { return MwlValidation.Result.Invalid("storage", "Не удалось сохранить назначение; предыдущие данные сохранены") }
         showStudyDialog.value = false
         editingStudy.value = null
         return MwlValidation.Result.Valid
@@ -354,47 +358,51 @@ class MwlViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun queryWorklist() {
+        if (_isQueryRunning.value) return
         val prof = _selectedProfile.value ?: run {
             _queryStatusMessage.value = "Выберите профиль сервера"
             return
         }
 
+        _isQueryRunning.value = true
         viewModelScope.launch {
-            _isQueryRunning.value = true
             _queryCount.value = 0
             _queryStatusMessage.value = "Подключение к ${prof.host}:${prof.port}…"
             _scuResults.value = emptyList()
 
-            val result = withContext(Dispatchers.IO) {
-                scuClient.queryWorklist(prof, scuFilter.value) { count ->
-                    _queryCount.value = count
+            val result = try {
+                withContext(Dispatchers.IO) {
+                    scuClient.queryWorklist(prof, scuFilter.value) { count -> _queryCount.value = count }
                 }
-            }
-
-            _isQueryRunning.value = false
-            if (result.isSuccess) {
-                val list = result.getOrNull().orEmpty()
-                _scuResults.value = list
-                _queryStatusMessage.value = if (list.isEmpty()) {
-                    "Поиск завершён: совпадений не найдено (0 записей)"
-                } else {
-                    "Успешно получено записей: ${list.size}"
+            } finally { _isQueryRunning.value = false }
+            val outcome = result.getOrNull()
+            if (outcome != null) {
+                _scuResults.value = outcome.items
+                _queryStatusMessage.value = when {
+                    outcome.cancelConfirmed -> "Поиск отменён сервером (FE00). Частичных записей: ${outcome.size}"
+                    !outcome.completedSuccessfully -> "Поиск прерван локально; отмена сервером не подтверждена. Частичных записей: ${outcome.size}"
+                    outcome.isEmpty() -> "Поиск завершён: совпадений не найдено (0 записей)"
+                    else -> "Успешно получено записей: ${outcome.size}"
                 }
             } else {
                 val ex = result.exceptionOrNull()
-                _queryStatusMessage.value = "Ошибка запроса: ${ex?.message ?: ex?.javaClass?.simpleName}"
+                val partial = (ex as? ru.medeng.dicomtool.mwl.model.MwlQueryException)?.partialResults.orEmpty()
+                _scuResults.value = partial
+                _queryStatusMessage.value = "Ошибка запроса: ${ex?.message}. Частичных записей: ${partial.size}"
             }
         }
     }
 
     fun cancelWorklistQuery() {
         scuClient.cancelQuery()
-        _queryStatusMessage.value = "Отправлен запрос отмены C-CANCEL-FIND…"
+        _queryStatusMessage.value = "Отмена поиска запрошена; ожидается подтверждение…"
     }
 
     fun openResultDetail(item: MwlQueryResultItem) {
         selectedResultDetail.value = item
     }
+
+    override fun onCleared() { scuClient.cancelQuery(); super.onCleared() }
 
     // --- Journal & Diagnostics ---
 
