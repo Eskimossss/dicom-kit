@@ -12,7 +12,7 @@ import java.util.Locale
  * Стандартный механизм фильтрации (Matching) Modality Worklist C-FIND согласно DICOM PS3.4 Annex C и Annex K.
  *
  * Поддерживает:
- * - Single Value Matching (включая нечувствительность к регистру для PN, LO, CS).
+ * - Single Value Matching (нечувствительность к регистру только для PN).
  * - Wildcard Matching ('*' и '?') для текстовых полей (PN, LO, SH).
  * - Range Matching для дат DA ('YYYYMMDD-YYYYMMDD', '-YYYYMMDD', 'YYYYMMDD-') и времени TM.
  * - Sequence Matching для вложенных атрибутов Scheduled Procedure Step Sequence (0040,0100).
@@ -61,7 +61,9 @@ object MwlMatchingEngine {
         var spsPhysician: String? = null
         var spsStation: String? = null
 
+        require(!rqAttrs.contains(Tag.ScheduledProcedureStepSequence) || rqAttrs.getVR(Tag.ScheduledProcedureStepSequence) == VR.SQ) { "SPS must have VR SQ" }
         val spsSeq = rqAttrs.getSequence(Tag.ScheduledProcedureStepSequence)
+        require(spsSeq == null || spsSeq.size <= 1) { "SPS must contain at most one query Item" }
         if (spsSeq != null && !spsSeq.isEmpty) {
             val item = spsSeq[0]
             spsMod = item.getString(Tag.Modality)?.trim()?.ifEmpty { null }
@@ -73,6 +75,8 @@ object MwlMatchingEngine {
             spsStation = item.getString(Tag.ScheduledStationName)?.trim()?.ifEmpty { null }
         }
 
+        validateRange(spsDateRange, false)
+        validateRange(spsTimeRange, true)
         return MatchingQuery(
             patientName = pName,
             patientId = pId,
@@ -90,6 +94,18 @@ object MwlMatchingEngine {
         )
     }
 
+    private fun validateRange(pattern: String?, time: Boolean) {
+        if (pattern == null) return
+        val parts = pattern.split('-')
+        require(parts.size <= 2 && parts.any(String::isNotEmpty)) { "Invalid query range" }
+        for (part in parts.filter(String::isNotEmpty)) {
+            val valid = if (time) ru.medeng.dicomtool.mwl.model.MwlValidation.validateTime(part, required = true)
+                else ru.medeng.dicomtool.mwl.model.MwlValidation.validateDate(part, required = true)
+            require(valid is ru.medeng.dicomtool.mwl.model.MwlValidation.Result.Valid) { "Invalid query DA/TM" }
+        }
+        if (parts.size == 2 && parts.all(String::isNotEmpty)) require(parts[0] <= parts[1]) { "Reversed query range" }
+    }
+
     /**
      * Проверяет, удовлетворяет ли назначенное исследование и пациент критериям запроса C-FIND.
      */
@@ -99,17 +115,17 @@ object MwlMatchingEngine {
         query: MatchingQuery
     ): Boolean {
         // 1. Patient Name
-        if (query.patientName != null && !matchStringWildcard(query.patientName, study.patientName, ignoreCase = true)) {
+        if (query.patientName != null && !matchPersonName(query.patientName, patient?.patientName ?: study.patientName)) {
             return false
         }
 
         // 2. Patient ID
-        if (query.patientId != null && !matchStringWildcard(query.patientId, study.patientId, ignoreCase = true)) {
+        if (query.patientId != null && query.patientId != (patient?.patientId ?: study.patientId)) {
             return false
         }
 
         // 3. Accession Number
-        if (query.accessionNumber != null && !matchStringWildcard(query.accessionNumber, study.accessionNumber, ignoreCase = true)) {
+        if (query.accessionNumber != null && !matchStringWildcard(query.accessionNumber, study.accessionNumber, ignoreCase = false)) {
             return false
         }
 
@@ -119,56 +135,51 @@ object MwlMatchingEngine {
         }
 
         // 5. Requested Procedure ID
-        if (query.requestedProcedureId != null && !matchStringWildcard(query.requestedProcedureId, study.requestedProcedureId, ignoreCase = true)) {
+        if (query.requestedProcedureId != null && !matchStringWildcard(query.requestedProcedureId, study.requestedProcedureId, ignoreCase = false)) {
             return false
         }
 
         // 6. Modality (из SPS или корневого уровня)
         val modFilter = query.effectiveModality
         if (modFilter != null) {
-            if (!matchStringWildcard(modFilter, study.modality, ignoreCase = true)) {
+            if (modFilter != study.modality) {
                 return false
             }
         }
 
         // 7. Scheduled Station AE Title
         if (query.spsScheduledStationAeTitle != null) {
-            if (!matchStringWildcard(query.spsScheduledStationAeTitle, study.scheduledStationAeTitle, ignoreCase = true)) {
+            if (query.spsScheduledStationAeTitle != study.scheduledStationAeTitle) {
                 return false
             }
         }
 
-        // 8. SPS Start Date Range (DA)
-        if (query.spsStartDateRange != null) {
-            if (!matchDateRange(query.spsStartDateRange, study.spsStartDate)) {
-                return false
-            }
-        }
-
-        // 9. SPS Start Time Range (TM)
-        if (query.spsStartTimeRange != null) {
-            if (!matchTimeRange(query.spsStartTimeRange, study.spsStartTime)) {
-                return false
-            }
+        val dates = query.spsStartDateRange
+        val times = query.spsStartTimeRange
+        if (dates != null && times != null && '-' in dates && '-' in times) {
+            if (!matchDateTimeRange(dates, times, study.spsStartDate, study.spsStartTime)) return false
+        } else {
+            if (dates != null && !matchDateRange(dates, study.spsStartDate)) return false
+            if (times != null && !matchTimeRange(times, study.spsStartTime)) return false
         }
 
         // 10. SPS ID
         if (query.spsId != null) {
-            if (!matchStringWildcard(query.spsId, study.spsId, ignoreCase = true)) {
+            if (!matchStringWildcard(query.spsId, study.spsId, ignoreCase = false)) {
                 return false
             }
         }
 
         // 11. Scheduled Performing Physician
         if (query.spsPerformingPhysician != null) {
-            if (!matchStringWildcard(query.spsPerformingPhysician, study.scheduledPerformingPhysician, ignoreCase = true)) {
+            if (!matchPersonName(query.spsPerformingPhysician, study.scheduledPerformingPhysician)) {
                 return false
             }
         }
 
         // 12. Scheduled Station Name
         if (query.spsStationName != null) {
-            if (!matchStringWildcard(query.spsStationName, study.scheduledStationName, ignoreCase = true)) {
+            if (!matchStringWildcard(query.spsStationName, study.scheduledStationName, ignoreCase = false)) {
                 return false
             }
         }
@@ -185,21 +196,6 @@ object MwlMatchingEngine {
 
         if (pat == "*" || pat == str) return true
         if (!pat.contains('*') && !pat.contains('?')) {
-            // Для PN в DICOM допускается совпадение первого компонента (фамилии), если остальные не указаны
-            if (pat.contains('^') || str.contains('^')) {
-                val patParts = pat.split('^').filter { it.isNotEmpty() }
-                val strParts = str.split('^').filter { it.isNotEmpty() }
-                if (patParts.isNotEmpty() && strParts.isNotEmpty()) {
-                    var allMatched = true
-                    for (i in patParts.indices) {
-                        if (i >= strParts.size || !matchStringWildcard(patParts[i], strParts[i], ignoreCase)) {
-                            allMatched = false
-                            break
-                        }
-                    }
-                    if (allMatched) return true
-                }
-            }
             return pat == str
         }
 
@@ -223,6 +219,36 @@ object MwlMatchingEngine {
         } catch (_: Exception) {
             pat == str
         }
+    }
+
+    fun matchPersonName(pattern: String, value: String): Boolean {
+        if (pattern.isEmpty()) return true
+        if (value.isEmpty()) return pattern == "*"
+        if ('*' in pattern || '?' in pattern) return matchStringWildcard(pattern, value, true)
+        val expected = pattern.split('=')
+        val actual = value.split('=')
+        return expected.withIndex().all { (group, name) ->
+            val components = name.split('^')
+            val values = actual.getOrNull(group)?.split('^').orEmpty()
+            components.withIndex().all { (index, part) ->
+                part.isEmpty() || part.equals(values.getOrNull(index).orEmpty(), ignoreCase = true)
+            }
+        }
+    }
+
+    fun matchDateTimeRange(dates: String, times: String, date: String, time: String): Boolean {
+        if (date.isEmpty() || time.isEmpty()) return false
+        val ds = dates.split('-', limit = 2)
+        val ts = times.split('-', limit = 2)
+        val actual = date + normalizedTime(time, false)
+        val from = ds[0].takeIf { it.isNotEmpty() }?.let { it + ts[0].takeIf(String::isNotEmpty).let { t -> if (t == null) "000000000000" else normalizedTime(t, false) } }
+        val to = ds[1].takeIf { it.isNotEmpty() }?.let { it + ts[1].takeIf(String::isNotEmpty).let { t -> if (t == null) "235960999999" else normalizedTime(t, true) } }
+        return (from == null || actual >= from) && (to == null || actual <= to)
+    }
+    private fun normalizedTime(time: String, upper: Boolean): String {
+        val parts = time.split('.', limit = 2)
+        val clock = parts[0].padEnd(6, if (upper) '9' else '0')
+        return clock + parts.getOrElse(1) { "" }.padEnd(6, if (upper) '9' else '0')
     }
 
     /**
@@ -259,22 +285,11 @@ object MwlMatchingEngine {
      * - 'time1' (префиксное или точное)
      */
     fun matchTimeRange(rangePattern: String, actualTime: String): Boolean {
-        val trimmed = rangePattern.trim().replace(":", "")
-        val actual = actualTime.trim().replace(":", "").padEnd(6, '0').take(6)
-        if (actual.isEmpty()) return false
-
-        if (!trimmed.contains('-')) {
-            val patPadded = trimmed.padEnd(6, '0').take(6)
-            return actual.startsWith(trimmed) || actual == patPadded
-        }
-
-        val parts = trimmed.split('-')
-        val fromTime = parts.getOrNull(0)?.trim()?.let { if (it.isNotEmpty()) it.padEnd(6, '0').take(6) else "" }.orEmpty()
-        val toTime = parts.getOrNull(1)?.trim()?.let { if (it.isNotEmpty()) it.padEnd(6, '9').take(6) else "" }.orEmpty()
-
-        if (fromTime.isNotEmpty() && actual < fromTime) return false
-        if (toTime.isNotEmpty() && actual > toTime) return false
-
-        return true
+        if (actualTime.isBlank()) return false
+        val actual = normalizedTime(actualTime.trim(), false)
+        val parts = rangePattern.trim().split('-', limit = 2)
+        val from = parts[0].takeIf(String::isNotEmpty)?.let { normalizedTime(it, false) }
+        val to = (parts.getOrNull(1) ?: parts[0]).takeIf(String::isNotEmpty)?.let { normalizedTime(it, true) }
+        return (from == null || actual >= from) && (to == null || actual <= to)
     }
 }

@@ -29,10 +29,12 @@ object MwlDatasetBuilder {
         requestAttributes: Attributes? = null,
         characterSet: String = "ISO_IR 192"
     ): Attributes {
+        ru.medeng.dicomtool.mwl.model.MwlValidation.requireValid(ru.medeng.dicomtool.mwl.model.MwlValidation.validateStudy(study))
+        patient?.let { ru.medeng.dicomtool.mwl.model.MwlValidation.requireValid(ru.medeng.dicomtool.mwl.model.MwlValidation.validatePatient(it)) }
         val ds = Attributes()
 
         // 1. Specific Character Set (0008,0005)
-        ds.setString(Tag.SpecificCharacterSet, VR.CS, characterSet)
+        if (characterSet != "ISO_IR 6") ds.setString(Tag.SpecificCharacterSet, VR.CS, characterSet)
 
         // 2. Patient Module (0010,xxxx)
         val pName = patient?.patientName ?: study.patientName
@@ -105,14 +107,46 @@ object MwlDatasetBuilder {
         if (requestAttributes != null) {
             val reqTags = requestAttributes.tags()
             for (t in reqTags) {
-                if (t != Tag.ScheduledProcedureStepSequence && !ds.contains(t)) {
+                if (t != Tag.ScheduledProcedureStepSequence && t != Tag.SpecificCharacterSet && !ds.contains(t)) {
                     val vr = requestAttributes.getVR(t) ?: VR.LO
                     ds.setNull(t, vr)
                 }
             }
         }
 
+        requireLosslessEncoding(ds)
         return ds
+    }
+
+    fun hasUnsupportedReturnKeys(request: Attributes): Boolean {
+        val root = setOf(Tag.SpecificCharacterSet, Tag.PatientName, Tag.PatientID, Tag.PatientBirthDate, Tag.PatientSex,
+            Tag.PatientWeight, Tag.MedicalAlerts, Tag.AccessionNumber, Tag.StudyInstanceUID, Tag.RequestedProcedureID,
+            Tag.RequestedProcedureDescription, Tag.ReferringPhysicianName, Tag.RequestingPhysician, Tag.AdmissionID,
+            Tag.Modality, Tag.ScheduledProcedureStepSequence)
+        val sps = setOf(Tag.ScheduledStationAETitle, Tag.ScheduledProcedureStepStartDate, Tag.ScheduledProcedureStepStartTime,
+            Tag.Modality, Tag.ScheduledProcedureStepID, Tag.ScheduledProcedureStepDescription, Tag.ScheduledStationName,
+            Tag.ScheduledPerformingPhysicianName, Tag.ScheduledProcedureStepLocation, Tag.ScheduledProcedureStepStatus)
+        return request.tags().any { it !in root } || request.getSequence(Tag.ScheduledProcedureStepSequence)?.any { item -> item.tags().any { it !in sps } } == true
+    }
+
+    fun requireLosslessEncoding(ds: Attributes) {
+        require((ds.getString(Tag.SpecificCharacterSet) ?: "ISO_IR 6") in setOf("ISO_IR 6", "ISO_IR 100", "ISO_IR 144", "ISO_IR 192", "ISO 2022 IR 100", "ISO 2022 IR 144", "GB18030")) { "Unsupported response character set" }
+        val buffer = java.io.ByteArrayOutputStream()
+        org.dcm4che3.io.DicomOutputStream(buffer, org.dcm4che3.data.UID.ExplicitVRLittleEndian).use { it.writeDataset(null, ds) }
+        val decoded = org.dcm4che3.io.DicomInputStream(java.io.ByteArrayInputStream(buffer.toByteArray()), org.dcm4che3.data.UID.ExplicitVRLittleEndian).use { it.readDataset() }
+        fun check(original: Attributes, restored: Attributes) {
+            for (tag in original.tags()) {
+                if (original.getVR(tag) == VR.SQ) {
+                    val items = original.getSequence(tag) ?: continue
+                    val readItems = restored.getSequence(tag)
+                    require(readItems != null && items.size == readItems.size) { "Sequence encoding mismatch" }
+                    items.indices.forEach { check(items[it], readItems[it]) }
+                } else if (original.getVR(tag)?.isStringType == true) {
+                    require(original.getStrings(tag).contentEquals(restored.getStrings(tag))) { "Response character set cannot represent DICOM text (tag %08X)".format(tag) }
+                }
+            }
+        }
+        check(ds, decoded)
     }
 
     /**
@@ -130,7 +164,7 @@ object MwlDatasetBuilder {
         characterSet: String = "ISO_IR 192"
     ): Attributes {
         val ds = Attributes()
-        ds.setString(Tag.SpecificCharacterSet, VR.CS, characterSet)
+        if (characterSet != "ISO_IR 6") ds.setString(Tag.SpecificCharacterSet, VR.CS, characterSet)
 
         // Return keys & matching keys на корневом уровне
         ds.setString(Tag.PatientName, VR.PN, patientName.trim())

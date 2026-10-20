@@ -24,7 +24,7 @@ class MwlMatchingEngineTest {
         patientName = samplePatient.patientName,
         patientId = samplePatient.patientId,
         accessionNumber = "ACC-2026-001",
-        studyInstanceUid = "1.2.840.10008.1.999.1",
+        studyInstanceUid = "2.25.1",
         requestedProcedureId = "RP-550",
         requestedProcedureDescription = "Рентгенография лёгких",
         spsId = "SPS-01",
@@ -61,7 +61,7 @@ class MwlMatchingEngineTest {
 
         // Звёздочка с обеих сторон
         val q2 = MwlMatchingEngine.MatchingQuery(patientId = "*00101*")
-        assertTrue(MwlMatchingEngine.matches(samplePatient, sampleStudy, q2))
+        assertFalse(MwlMatchingEngine.matches(samplePatient, sampleStudy, q2)) // MWL Patient ID uses Single Value Matching.
 
         // Вопросительный знак
         val q3 = MwlMatchingEngine.MatchingQuery(accessionNumber = "ACC-2026-???")

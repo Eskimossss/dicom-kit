@@ -25,7 +25,7 @@ class MwlCharsetEncodingTest {
         patientName = patientCyrillic.patientName,
         patientId = patientCyrillic.patientId,
         accessionNumber = "ACC-CYR-001",
-        studyInstanceUid = "1.2.840.10008.1.999.55",
+        studyInstanceUid = "2.25.55",
         requestedProcedureId = "RP-CYR",
         requestedProcedureDescription = "КТ головного мозга без контраста",
         spsId = "SPS-CYR-01",
@@ -50,7 +50,7 @@ class MwlCharsetEncodingTest {
         assertEquals("PAT-CYR-01", ds.getString(Tag.PatientID))
         assertEquals("19780315", ds.getString(Tag.PatientBirthDate))
         assertEquals("ACC-CYR-001", ds.getString(Tag.AccessionNumber))
-        assertEquals("1.2.840.10008.1.999.55", ds.getString(Tag.StudyInstanceUID))
+        assertEquals("2.25.55", ds.getString(Tag.StudyInstanceUID))
         assertEquals("КТ головного мозга без контраста", ds.getString(Tag.RequestedProcedureDescription))
 
         // Проверка вложенной последовательности SPS

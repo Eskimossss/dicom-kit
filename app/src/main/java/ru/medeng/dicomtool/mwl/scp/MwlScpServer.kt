@@ -94,7 +94,6 @@ class MwlScpServer(
     private val sockets = ConcurrentHashMap<Socket, DicomSessionManager.SessionIdentity>()
     private val associations = ConcurrentHashMap<Socket, Association>()
     private val recentNodes = ConcurrentHashMap<String, Long>()
-    private val cancelledMsgIds = ConcurrentHashMap.newKeySet<Int>()
     private val totalRequests = AtomicInteger(0)
 
     private val _state = MutableStateFlow(
@@ -369,7 +368,6 @@ class MwlScpServer(
 
         sockets.clear()
         associations.clear()
-        cancelledMsgIds.clear()
         device = null
         executor = null
         scheduledExecutor = null
@@ -434,7 +432,7 @@ class MwlScpServer(
     private fun startUptimeTicker() {
         uptimeTimer?.cancel()
         uptimeTimer = Timer("MwlScpUptime", true).apply {
-            scheduleAtFixedRate(object : TimerTask() {
+            schedule(object : TimerTask() {
                 override fun run() {
                     val uptimeSec = (System.currentTimeMillis() - serverStartTimeMs) / 1000
                     val hh = uptimeSec / 3600
@@ -604,10 +602,10 @@ class MwlScpServer(
 
             // 1. Проверка Whitelist Mode (ограничение по Calling AE Title и IP)
             if (_state.value.whitelistMode) {
-                val allowedAets = _state.value.allowedCallingAets.map { it.trim().uppercase(Locale.US) }
+                val allowedAets = _state.value.allowedCallingAets.map { it.trim() }
                 val allowedIps = _state.value.allowedIps.map { it.trim() }
 
-                if (allowedAets.isNotEmpty() && !allowedAets.contains(callingAet.uppercase(Locale.US))) {
+                if (allowedAets.isNotEmpty() && !allowedAets.contains(callingAet)) {
                     val rj = AAssociateRJ(
                         AAssociateRJ.RESULT_REJECTED_PERMANENT,
                         AAssociateRJ.SOURCE_SERVICE_USER,
@@ -625,7 +623,7 @@ class MwlScpServer(
                         ),
                         isError = true
                     )
-                    throw DicomServiceException(Status.NotAuthorized, "Calling AET not recognized")
+                    throw rj
                 }
 
                 if (allowedIps.isNotEmpty() && !allowedIps.contains(remoteIp)) {
@@ -638,7 +636,7 @@ class MwlScpServer(
                         summaryLines = listOf("Удалённый IP: $remoteIp (НЕ РАЗРЕШЁН)"),
                         isError = true
                     )
-                    throw DicomServiceException(Status.NotAuthorized, "Remote IP not allowed")
+                    throw AAssociateRJ(AAssociateRJ.RESULT_REJECTED_PERMANENT, AAssociateRJ.SOURCE_SERVICE_USER, 1)
                 }
             }
 
@@ -698,164 +696,69 @@ class MwlScpServer(
     }
 
     private fun createLoggingCFindScp(): BasicCFindSCP = object : BasicCFindSCP(UID.ModalityWorklistInformationModelFind) {
-
-        override fun onDimseRQ(
-            asAssoc: Association,
-            pc: PresentationContext,
-            dimse: Dimse,
-            cmd: Attributes,
-            data: Attributes
-        ) {
-            val assocId = formatAssocId(asAssoc)
+        override fun onDimseRQ(asAssoc: Association, pc: PresentationContext, dimse: Dimse, cmd: Attributes, data: Attributes) {
+            if (dimse != Dimse.C_FIND_RQ) throw DicomServiceException(Status.UnrecognizedOperation)
+            val msgId = cmd.getInt(Tag.MessageID, -1)
             val sessionUid = formatSessionUid(asAssoc)
-            val msgId = cmd.getInt(Tag.MessageID, 0)
-
-            // 1. Обработка C-CANCEL-RQ
-            if (dimse == Dimse.C_CANCEL_RQ) {
-                val msgIdToCancel = cmd.getInt(Tag.MessageIDBeingRespondedTo, msgId)
-                cancelledMsgIds.add(msgIdToCancel)
-                logger.recordEvent(
-                    category = DicomLogCategory.RELEASE_RQ,
-                    direction = DicomTrafficDirection.INBOUND,
-                    associationId = assocId,
-                    sessionUid = sessionUid,
-                    title = "C-CANCEL-FIND запрос отмены (Message ID: $msgIdToCancel)",
-                    summaryLines = listOf("Клиент запросил отмену поиска C-FIND")
-                )
-                return
+            val assocId = formatAssocId(asAssoc)
+            val cancelled = AtomicBoolean(false)
+            val responseGate = Any()
+            // Registration happens before dispatch, so an immediate C-CANCEL cannot be lost.
+            asAssoc.addCancelRQHandler(msgId) {
+                synchronized(responseGate) { cancelled.set(true) }
+                logger.recordEvent(category = DicomLogCategory.RELEASE_RQ, associationId = assocId, sessionUid = sessionUid,
+                    title = "C-CANCEL-FIND received", technicalDetails = mapOf("Message ID" to msgId.toString()))
             }
-
-            if (dimse != Dimse.C_FIND_RQ) {
-                throw DicomServiceException(Status.UnrecognizedOperation)
-            }
-
-            totalRequests.incrementAndGet()
-            updateConnectionsState()
-
-            val cuid = cmd.getString(Tag.AffectedSOPClassUID, "")
-            val priority = cmd.getInt(Tag.Priority, 0)
-
-            // Разбор Identifier запроса
-            val matchingQuery = MwlMatchingEngine.extractMatchingQuery(data)
-            val requestedCharset = data.getString(Tag.SpecificCharacterSet) ?: "ISO_IR 192"
-
-            val querySummary = mutableListOf<String>()
-            if (!matchingQuery.patientName.isNullOrBlank()) querySummary.add("Patient Name: ${matchingQuery.patientName}")
-            if (!matchingQuery.patientId.isNullOrBlank()) querySummary.add("Patient ID: ${matchingQuery.patientId}")
-            if (!matchingQuery.accessionNumber.isNullOrBlank()) querySummary.add("Accession: ${matchingQuery.accessionNumber}")
-            if (!matchingQuery.effectiveModality.isNullOrBlank()) querySummary.add("Modality: ${matchingQuery.effectiveModality}")
-            if (!matchingQuery.spsScheduledStationAeTitle.isNullOrBlank()) querySummary.add("Station AE: ${matchingQuery.spsScheduledStationAeTitle}")
-            if (!matchingQuery.spsStartDateRange.isNullOrBlank()) querySummary.add("Start Date: ${matchingQuery.spsStartDateRange}")
-            if (querySummary.isEmpty()) querySummary.add("Запрос без ограничений (Universal Matching)")
-
-            logger.recordEvent(
-                category = DicomLogCategory.C_ECHO_RQ, // В логах C_FIND_RQ отображаем как входящий запрос
-                direction = DicomTrafficDirection.INBOUND,
-                associationId = assocId,
-                sessionUid = sessionUid,
-                title = "C-FIND-RQ Modality Worklist (Message ID: $msgId)",
-                summaryLines = listOf("Критерии поиска:") + querySummary,
-                technicalDetails = mapOf(
-                    "Message ID" to msgId.toString(),
-                    "Affected SOP Class UID" to cuid,
-                    "Priority" to priority.toString(),
-                    "Query Charset" to requestedCharset,
-                    "Calling AE Title" to (asAssoc.callingAET ?: "")
-                )
-            )
-
-            // Поиск в локальном хранилище
-            val allPatients = repository.getAllPatients().associateBy { it.id }
-            val allStudies = repository.getAllStudies()
-
-            val matches = mutableListOf<Pair<ru.medeng.dicomtool.mwl.model.MwlPatient?, ru.medeng.dicomtool.mwl.model.MwlScheduledStudy>>()
-            for (study in allStudies) {
-                val patient = allPatients[study.patientInternalId]
-                if (MwlMatchingEngine.matches(patient, study, matchingQuery)) {
-                    matches.add(Pair(patient, study))
-                }
-            }
-
-            var sentCount = 0
-            var wasCancelled = false
-            val responseCharset = _state.value.characterSet
-
             try {
-                for ((patient, study) in matches) {
-                    if (cancelledMsgIds.remove(msgId) || !asAssoc.isReadyForDataTransfer) {
-                        wasCancelled = true
-                        break
-                    }
-
-                    val rspDataset = MwlDatasetBuilder.buildMwlResponseDataset(
-                        patient = patient,
-                        study = study,
-                        requestAttributes = data,
-                        characterSet = responseCharset
-                    )
-
-                    val pendingCmd = Commands.mkCFindRSP(cmd, Status.Pending)
-                    asAssoc.writeDimseRSP(pc, pendingCmd, rspDataset)
-                    sentCount++
-                }
-
-                if (wasCancelled) {
-                    val cancelCmd = Commands.mkCFindRSP(cmd, Status.Cancel)
-                    asAssoc.writeDimseRSP(pc, cancelCmd, null)
-                    logger.recordEvent(
-                        category = DicomLogCategory.C_ECHO_RSP,
-                        direction = DicomTrafficDirection.OUTBOUND,
-                        associationId = assocId,
-                        sessionUid = sessionUid,
-                        title = "C-FIND-RSP Завершено по отмене (Status: FE00H Cancel)",
-                        summaryLines = listOf("Отправлено Pending ответов до отмены: $sentCount"),
-                        technicalDetails = mapOf(
-                            "Message ID" to msgId.toString(),
-                            "Status" to "FE00H (Cancel)",
-                            "Matches Sent" to sentCount.toString()
+                asAssoc.applicationEntity.device.execute {
+                    var sent = 0
+                    try {
+                        totalRequests.incrementAndGet()
+                        updateConnectionsState()
+                        val query = try { MwlMatchingEngine.extractMatchingQuery(data) }
+                            catch (e: IllegalArgumentException) { throw DicomServiceException(Status.IdentifierDoesNotMatchSOPClass, "Invalid MWL Identifier") }
+                        logger.recordEvent(
+                            category = DicomLogCategory.C_ECHO_RQ,
+                            direction = DicomTrafficDirection.INBOUND,
+                            associationId = assocId, sessionUid = sessionUid,
+                            title = "C-FIND-RQ Modality Worklist",
+                            summaryLines = listOfNotNull(query.patientName?.let { "Patient Name: $it" }, query.patientId?.let { "Patient ID: $it" }, query.accessionNumber?.let { "Accession: $it" }),
+                            technicalDetails = mapOf("Message ID" to msgId.toString())
                         )
-                    )
-                } else {
-                    val successCmd = Commands.mkCFindRSP(cmd, Status.Success)
-                    asAssoc.writeDimseRSP(pc, successCmd, null)
-                    logger.recordEvent(
-                        category = DicomLogCategory.C_ECHO_RSP,
-                        direction = DicomTrafficDirection.OUTBOUND,
-                        associationId = assocId,
-                        sessionUid = sessionUid,
-                        title = "C-FIND-RSP Завершено успешно (Status: 0000H Success)",
-                        summaryLines = listOf(
-                            "Найдено совпадений: ${matches.size}",
-                            "Отправлено Pending записей: $sentCount",
-                            "Кодировка: $responseCharset"
-                        ),
-                        technicalDetails = mapOf(
-                            "Message ID" to msgId.toString(),
-                            "Status" to "0000H (Success)",
-                            "Total Matches" to matches.size.toString(),
-                            "Pending Responses" to sentCount.toString(),
-                            "Response Charset" to responseCharset
-                        )
-                    )
+                        val snapshot = repository.snapshot()
+                        val patients = snapshot.patients.associateBy { it.id }
+                        for (study in snapshot.studies) {
+                            if (cancelled.get() || !asAssoc.isReadyForDataTransfer || Thread.currentThread().isInterrupted) break
+                            val patient = patients[study.patientInternalId]
+                            if (!MwlMatchingEngine.matches(patient, study, query)) continue
+                            val ds = MwlDatasetBuilder.buildMwlResponseDataset(patient, study, data, state.value.characterSet)
+                            synchronized(responseGate) {
+                                if (!cancelled.get() && asAssoc.isReadyForDataTransfer) {
+                                    val pending = if (MwlDatasetBuilder.hasUnsupportedReturnKeys(data)) Status.PendingWarning else Status.Pending
+                                    asAssoc.writeDimseRSP(pc, Commands.mkCFindRSP(cmd, pending), ds)
+                                    sent++
+                                }
+                            }
+                        }
+                        synchronized(responseGate) {
+                            if (asAssoc.isReadyForDataTransfer && !Thread.currentThread().isInterrupted) {
+                                val status = if (cancelled.get()) Status.Cancel else Status.Success
+                                asAssoc.writeDimseRSP(pc, Commands.mkCFindRSP(cmd, status))
+                                logger.recordEvent(category = DicomLogCategory.C_ECHO_RSP, direction = DicomTrafficDirection.OUTBOUND,
+                                    associationId = assocId, sessionUid = sessionUid, title = "C-FIND-RSP final %04X".format(status),
+                                    technicalDetails = mapOf("Message ID" to msgId.toString(), "Status" to "%04X".format(status), "Matches Sent" to sent.toString()))
+                            }
+                        }
+                    } catch (e: Exception) {
+                        val status = if (e is DicomServiceException) e.status else Status.UnableToProcess
+                        if (asAssoc.isReadyForDataTransfer) runCatching { asAssoc.writeDimseRSP(pc, Commands.mkCFindRSP(cmd, status)) }
+                        logger.recordEvent(category = DicomLogCategory.NETWORK_ERROR, associationId = assocId, sessionUid = sessionUid,
+                            title = "C-FIND failed", technicalDetails = mapOf("Message ID" to msgId.toString(), "Status" to "%04X".format(status)), isError = true)
+                    } finally { asAssoc.removeCancelRQHandler(msgId) }
                 }
             } catch (e: Exception) {
-                logger.recordEvent(
-                    category = DicomLogCategory.NETWORK_ERROR,
-                    direction = DicomTrafficDirection.OUTBOUND,
-                    associationId = assocId,
-                    sessionUid = sessionUid,
-                    title = "Сбой отправки ответов C-FIND (Message ID: $msgId)",
-                    summaryLines = listOf("Ошибка: ${e.message ?: e.javaClass.simpleName}"),
-                    technicalDetails = mapOf(
-                        "Message ID" to msgId.toString(),
-                        "Exception" to "${e.javaClass.name}: ${e.message}"
-                    ),
-                    isError = true
-                )
-                runCatching {
-                    val failureCmd = Commands.mkCFindRSP(cmd, Status.UnableToProcess)
-                    asAssoc.writeDimseRSP(pc, failureCmd, null)
-                }
+                asAssoc.removeCancelRQHandler(msgId)
+                throw DicomServiceException(Status.UnableToProcess)
             }
         }
     }
