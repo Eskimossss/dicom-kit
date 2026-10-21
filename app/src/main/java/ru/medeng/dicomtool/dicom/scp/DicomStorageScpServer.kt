@@ -972,6 +972,7 @@ class DicomStorageScpServer(
             }
 
             var payloadComplete = false
+            var patients: List<ru.medeng.dicomtool.data.logging.DicomLogPatient> = emptyList()
             try {
                 // 1. Потоковая запись DICOM Part 10 (File Meta Information + PDV поток) без чтения Pixel Data в ОЗУ
                 val fmi = asAssoc.createFileMetaInformation(iuid, cuid, tsuid)
@@ -990,7 +991,6 @@ class DicomStorageScpServer(
                 val studyUid: String
                 val seriesUid: String
                 val datasetSopUid: String
-                val patients: List<ru.medeng.dicomtool.data.logging.DicomLogPatient>
                 DicomInputStream(tempFile).use { dis ->
                     dis.includeBulkData = DicomInputStream.IncludeBulkData.NO
                     ru.medeng.dicomtool.dicom.tags.BoundedDicomRead.install(dis)
@@ -1100,7 +1100,7 @@ class DicomStorageScpServer(
                         "Storage Result" to "FAILED"
                     ),
                     isError = true,
-                    sessionUid = sessionUid
+                    sessionUid = sessionUid, patients = patients
                 )
                 if (e is DicomServiceException) throw e
                 throw DicomServiceException(Status.ProcessingFailure, e)

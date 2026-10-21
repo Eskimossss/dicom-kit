@@ -1,5 +1,9 @@
 package ru.medeng.dicomtool.mwl.ui
 
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.imePadding
+
 import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -86,7 +90,7 @@ import ru.medeng.dicomtool.ui.theme.TextSecondarySlate
 import ru.medeng.dicomtool.ui.theme.WarningAmber
 import ru.medeng.dicomtool.ui.theme.WarningAmberLight
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun MwlScuTab(
     viewModel: MwlViewModel,
@@ -112,6 +116,7 @@ fun MwlScuTab(
     Column(
         modifier = modifier
             .fillMaxSize()
+            .imePadding()
             .verticalScroll(scrollState)
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
@@ -123,7 +128,7 @@ fun MwlScuTab(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
+                Column(Modifier.weight(1f)) {
                     Text(
                         text = "Клиент Modality Worklist (SCU)",
                         fontSize = 16.sp,
@@ -158,7 +163,7 @@ fun MwlScuTab(
                 onExpandedChange = { profileExpanded = it }
             ) {
                 OutlinedTextField(
-                    value = selectedProfile?.let { "${it.name} (${it.host}:${it.port} · ${it.calledAet})" } ?: "Выберите профиль сервера",
+                    value = selectedProfile?.name ?: "Выберите профиль сервера",
                     onValueChange = {},
                     readOnly = true,
                     trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = profileExpanded) },
@@ -186,196 +191,48 @@ fun MwlScuTab(
                     }
                 }
             }
+            selectedProfile?.let { Text("${it.host}:${it.port} · Called AE: ${it.calledAet}", fontSize = 12.sp) }
         }
 
-        // Карточка 2: Параметры фильтрации (Query Filters)
+        // Filters wrap naturally; no intrinsic-height row of five date choices.
         WhiteDiagnosticCard {
-            Text(
-                text = "Критерии поиска Worklist",
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Bold,
-                color = TextPrimaryDark
-            )
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // Дата исследования
-            Text("Дата назначения", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = TextSecondarySlate)
-            Spacer(modifier = Modifier.height(4.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                MwlDateFilterOption.entries.forEach { opt ->
-                    FilterChip(
-                        selected = filter.dateOption == opt,
-                        onClick = { viewModel.scuFilter.value = filter.copy(dateOption = opt) },
-                        label = { Text(opt.labelRu, fontSize = 11.sp) }
-                    )
+            Text("Критерии поиска Worklist", fontWeight = FontWeight.Bold)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MwlDateFilterOption.entries.forEach { option ->
+                    FilterChip(selected = filter.dateOption == option,
+                        onClick = { viewModel.scuFilter.value = filter.copy(dateOption = option) },
+                        label = { Text(option.labelRu, maxLines = 1) })
                 }
             }
-
-            if (filter.dateOption == MwlDateFilterOption.CUSTOM_DATE) {
-                Spacer(modifier = Modifier.height(6.dp))
-                OutlinedTextField(
-                    value = filter.specificDate,
-                    onValueChange = { viewModel.scuFilter.value = filter.copy(specificDate = it.filter { c -> c.isDigit() }) },
-                    placeholder = { Text("Дата YYYYMMDD, например: 20261020") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            } else if (filter.dateOption == MwlDateFilterOption.DATE_RANGE) {
-                Spacer(modifier = Modifier.height(6.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    OutlinedTextField(
-                        value = filter.startDate,
-                        onValueChange = { viewModel.scuFilter.value = filter.copy(startDate = it.filter { c -> c.isDigit() }) },
-                        placeholder = { Text("С даты: 20261020") },
-                        singleLine = true,
-                        modifier = Modifier.weight(1f)
-                    )
-                    OutlinedTextField(
-                        value = filter.endDate,
-                        onValueChange = { viewModel.scuFilter.value = filter.copy(endDate = it.filter { c -> c.isDigit() }) },
-                        placeholder = { Text("По дату: 20261021") },
-                        singleLine = true,
-                        modifier = Modifier.weight(1f)
-                    )
-                }
+            when (filter.dateOption) {
+                MwlDateFilterOption.CUSTOM_DATE -> MwlCalendarField("Дата назначения", filter.specificDate,
+                    { viewModel.scuFilter.value = filter.copy(specificDate = it) })
+                MwlDateFilterOption.DATE_RANGE -> MwlAdaptiveFields(
+                    first = { MwlCalendarField("Начало диапазона", filter.startDate, { viewModel.scuFilter.value = filter.copy(startDate = it) }) },
+                    second = { MwlCalendarField("Окончание диапазона", filter.endDate, { viewModel.scuFilter.value = filter.copy(endDate = it) }) })
+                else -> Unit
             }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // Модальность и Station AE
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("Модальность", fontSize = 12.sp, color = TextSecondarySlate)
-                    OutlinedTextField(
-                        value = filter.modality,
-                        onValueChange = { viewModel.scuFilter.value = filter.copy(modality = it.uppercase()) },
-                        placeholder = { Text("CR, DX, CT, MG…") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("Station AE Title", fontSize = 12.sp, color = TextSecondarySlate)
-                    OutlinedTextField(
-                        value = filter.scheduledStationAe,
-                        onValueChange = { viewModel.scuFilter.value = filter.copy(scheduledStationAe = it.uppercase()) },
-                        placeholder = { Text("MWL_STATION") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
+            val dateError = filter.validateDateSelection() as? MwlValidation.Result.Invalid
+            dateError?.let { Text(it.messageRu, color = ErrorRed) }
+            MwlAdaptiveFields(first = {
+                OutlinedTextField(filter.modality, { viewModel.scuFilter.value = filter.copy(modality = it.uppercase(java.util.Locale.US)) }, label = { Text("Modality") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            }, second = {
+                OutlinedTextField(filter.scheduledStationAe, { viewModel.scuFilter.value = filter.copy(scheduledStationAe = it) }, label = { Text("AE Title аппарата") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            })
+            MwlAdaptiveFields(first = {
+                OutlinedTextField(filter.patientName, { viewModel.scuFilter.value = filter.copy(patientName = it) }, label = { Text("ФИО пациента") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            }, second = {
+                OutlinedTextField(filter.patientId, { viewModel.scuFilter.value = filter.copy(patientId = it) }, label = { Text("Patient ID") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            })
+            OutlinedTextField(filter.accessionNumber, { viewModel.scuFilter.value = filter.copy(accessionNumber = it) }, label = { Text("Accession Number") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            if (filter.isFilterEmpty()) Text("Запрос без фильтров может вернуть большой объём данных.", color = WarningAmber)
+            Button(onClick = { viewModel.queryWorklist() }, enabled = !isRunning && dateError == null,
+                modifier = Modifier.fillMaxWidth()) {
+                Text(if (isRunning) "Запрос ($queryCount)…" else "Получить Worklist")
             }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // ФИО и Patient ID
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("ФИО пациента", fontSize = 12.sp, color = TextSecondarySlate)
-                    OutlinedTextField(
-                        value = filter.patientName,
-                        onValueChange = { viewModel.scuFilter.value = filter.copy(patientName = it) },
-                        placeholder = { Text("ИВАНОВ* или DOE*") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("Patient ID / Accession", fontSize = 12.sp, color = TextSecondarySlate)
-                    OutlinedTextField(
-                        value = filter.patientId.ifEmpty { filter.accessionNumber },
-                        onValueChange = { viewModel.scuFilter.value = filter.copy(patientId = it) },
-                        placeholder = { Text("PAT-001 или ACC-001") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-            }
-
-            // Предупреждение о запросе без фильтров
-            if (filter.isFilterEmpty()) {
-                Spacer(modifier = Modifier.height(12.dp))
-                Surface(
-                    color = WarningAmberLight,
-                    shape = RoundedCornerShape(8.dp),
-                    border = BorderStroke(1.dp, WarningAmber.copy(alpha = 0.5f))
-                ) {
-                    Row(
-                        modifier = Modifier.padding(10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(Icons.Default.Warning, contentDescription = null, tint = WarningAmber, modifier = Modifier.size(20.dp))
-                        Text(
-                            text = "Внимание: запрос без фильтров может вернуть большой объём данных от удалённого PACS/RIS.",
-                            fontSize = 12.sp,
-                            color = WarningAmber
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Кнопка запроса и отмены
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Button(
-                    onClick = { viewModel.queryWorklist() },
-                    enabled = !isRunning,
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(48.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue)
-                ) {
-                    if (isRunning) {
-                        CircularProgressIndicator(color = Color.White, modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Запрос ($queryCount)…", fontSize = 14.sp)
-                    } else {
-                        Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Получить Worklist", fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                    }
-                }
-
-                if (isRunning) {
-                    OutlinedButton(
-                        onClick = { viewModel.cancelWorklistQuery() },
-                        modifier = Modifier.height(48.dp),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = StopButtonRed)
-                    ) {
-                        Icon(Icons.Default.Stop, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Отмена (C-CANCEL)", fontSize = 13.sp)
-                    }
-                }
-            }
-
-            if (!statusMsg.isNullOrBlank()) {
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = statusMsg.orEmpty(),
-                    fontSize = 12.sp,
-                    color = if (statusMsg?.contains("Ошибка", ignoreCase = true) == true) ErrorRed else TextSecondarySlate
-                )
-            }
+            if (isRunning) OutlinedButton(onClick = { viewModel.cancelWorklistQuery() }, modifier = Modifier.fillMaxWidth()) { Text("Отмена (C-CANCEL)") }
+            statusMsg?.let { Text(it, color = if (it.contains("Ошибка", true)) ErrorRed else TextSecondarySlate) }
         }
-
         // Карточка 3: Результаты запроса
         WhiteDiagnosticCard {
             Row(

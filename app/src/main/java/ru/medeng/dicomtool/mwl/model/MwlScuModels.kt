@@ -22,6 +22,21 @@ data class MwlScuFilter(
     val accessionNumber: String = "",
     val requestedProcedureId: String = ""
 ) {
+    fun validateDateSelection(): MwlValidation.Result {
+        val values = when (dateOption) {
+            MwlDateFilterOption.CUSTOM_DATE -> listOf(specificDate)
+            MwlDateFilterOption.DATE_RANGE -> listOf(startDate, endDate)
+            else -> return MwlValidation.Result.Valid
+        }
+        values.forEach { value ->
+            val result = MwlValidation.validateDate(value, required = true)
+            if (result is MwlValidation.Result.Invalid) return result
+        }
+        if (dateOption == MwlDateFilterOption.DATE_RANGE && startDate > endDate) {
+            return MwlValidation.Result.Invalid("dateRange", "Начало диапазона не может быть позже окончания")
+        }
+        return MwlValidation.Result.Valid
+    }
     /**
      * Преобразует фильтр даты в стандартную строку DICOM DA Range.
      */

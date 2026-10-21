@@ -10,6 +10,11 @@ import ru.medeng.dicomtool.mwl.scu.MwlScuClient
 import java.io.File
 
 object MwlRuntimeRegistry {
+    private var stationRepository: ru.medeng.dicomtool.mwl.repo.MwlStationProfileRepository? = null
+    @Synchronized fun getStationProfiles(context: Context): ru.medeng.dicomtool.mwl.repo.MwlStationProfileRepository =
+        stationRepository ?: ru.medeng.dicomtool.mwl.repo.MwlStationProfileRepository(
+            File(context.applicationContext.filesDir, "mwl_data")
+        ).also { stationRepository = it }
 
     @Volatile
     private var repositoryInstance: MwlRepository? = null

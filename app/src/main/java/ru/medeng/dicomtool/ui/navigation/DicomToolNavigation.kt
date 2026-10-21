@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.consumeWindowInsets
 import android.app.Activity
 import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.DisposableEffect
@@ -279,6 +280,7 @@ fun DicomToolAppRoot(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(if (isViewerFullScreen) androidx.compose.foundation.layout.PaddingValues(0.dp) else innerPadding)
+                    .then(if (currentTab == MainBottomTab.WORKLIST) Modifier.consumeWindowInsets(innerPadding) else Modifier)
             ) {
                 when (activeSubScreen) {
                     ActiveSubScreen.SETTINGS_AND_CLEANUP -> {

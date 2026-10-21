@@ -43,6 +43,15 @@ class MwlViewModel(application: Application) : AndroidViewModel(application) {
     val scpState: StateFlow<MwlScpState> = scpServer.state
     val patients: StateFlow<List<MwlPatient>> = repository.patientsFlow
     val studies: StateFlow<List<MwlScheduledStudy>> = repository.studiesFlow
+    private val stationRepository = MwlRuntimeRegistry.getStationProfiles(application)
+    val stationProfiles = stationRepository.profilesFlow
+    val stationProfileReadError = stationRepository.readError
+    fun saveStationProfile(profile: ru.medeng.dicomtool.mwl.model.MwlStationProfile): MwlValidation.Result {
+        val validation = profile.validate()
+        if (validation is MwlValidation.Result.Invalid) return validation
+        return try { stationRepository.save(profile); MwlValidation.Result.Valid }
+        catch (_: Exception) { MwlValidation.Result.Invalid("storage", "Не удалось сохранить профиль; прежние настройки сохранены") }
+    }
     val scuProfiles: StateFlow<List<MwlScuProfile>> = profileRepository.profilesFlow
     val logs: StateFlow<List<DicomLogEntry>> = logger.logsFlow
 
@@ -180,6 +189,10 @@ class MwlViewModel(application: Application) : AndroidViewModel(application) {
         val completeCheck = MwlValidation.validatePatient(patient)
         if (completeCheck is MwlValidation.Result.Invalid) return completeCheck
         try { repository.savePatient(patient) } catch (_: Exception) { return MwlValidation.Result.Invalid("storage", "Не удалось сохранить пациента; предыдущие данные сохранены") }
+        if (showStudyDialog.value) editingStudy.value = editingStudy.value?.copy(
+            patientInternalId = patient.id, patientName = patient.patientName, patientId = patient.patientId,
+            isSynthetic = patient.isSynthetic
+        )
         showPatientDialog.value = false
         editingPatient.value = null
         return MwlValidation.Result.Valid
@@ -196,25 +209,14 @@ class MwlViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openNewStudyDialog(patient: MwlPatient? = null) {
-        val defaultPatient = patient ?: patients.value.firstOrNull() ?: run {
-            // Если пациентов ещё нет, создаём базового
-            val newP = MwlPatient(
-                patientName = "ТЕСТОВ^ПАЦИЕНТ",
-                patientId = "PAT-0001",
-                isSynthetic = true
-            )
-            repository.savePatient(newP)
-            newP
-        }
-
         val today = MwlValidation.currentDateFormatted()
         val now = MwlValidation.currentTimeFormatted()
         val randomNum = (1000..9999).random()
 
         editingStudy.value = MwlScheduledStudy(
-            patientInternalId = defaultPatient.id,
-            patientName = defaultPatient.patientName,
-            patientId = defaultPatient.patientId,
+            patientInternalId = patient?.id.orEmpty(),
+            patientName = patient?.patientName.orEmpty(),
+            patientId = patient?.patientId.orEmpty(),
             accessionNumber = "ACC-$randomNum",
             studyInstanceUid = MwlValidation.generateStudyInstanceUid(),
             requestedProcedureId = "RP-$randomNum",
@@ -226,7 +228,7 @@ class MwlViewModel(application: Application) : AndroidViewModel(application) {
             scheduledStationAeTitle = "CR_STATION_01",
             scheduledStationName = "Кабинет 101",
             spsDescription = "Chest X-Ray PA",
-            isSynthetic = defaultPatient.isSynthetic
+            isSynthetic = patient?.isSynthetic ?: false
         )
         showStudyDialog.value = true
     }
@@ -237,6 +239,9 @@ class MwlViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun saveStudy(study: MwlScheduledStudy): MwlValidation.Result {
+        if (repository.getPatientById(study.patientInternalId) == null) {
+            return MwlValidation.Result.Invalid("patientInternalId", "Выберите пациента из локальной базы")
+        }
         val uidCheck = MwlValidation.validateStudyInstanceUid(study.studyInstanceUid)
         if (uidCheck is MwlValidation.Result.Invalid) return uidCheck
 
@@ -359,6 +364,12 @@ class MwlViewModel(application: Application) : AndroidViewModel(application) {
 
     fun queryWorklist() {
         if (_isQueryRunning.value) return
+        val queryFilter = scuFilter.value
+        val dateValidation = queryFilter.validateDateSelection()
+        if (dateValidation is MwlValidation.Result.Invalid) {
+            _queryStatusMessage.value = dateValidation.messageRu
+            return
+        }
         val prof = _selectedProfile.value ?: run {
             _queryStatusMessage.value = "Выберите профиль сервера"
             return
@@ -372,7 +383,7 @@ class MwlViewModel(application: Application) : AndroidViewModel(application) {
 
             val result = try {
                 withContext(Dispatchers.IO) {
-                    scuClient.queryWorklist(prof, scuFilter.value) { count -> _queryCount.value = count }
+                    scuClient.queryWorklist(prof, queryFilter) { count -> _queryCount.value = count }
                 }
             } finally { _isQueryRunning.value = false }
             val outcome = result.getOrNull()

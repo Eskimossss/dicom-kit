@@ -82,6 +82,7 @@ object DicomLogExportUtils {
             appendLine("\nПЕРЕДАННЫЕ / ПРИНЯТЫЕ ФАЙЛЫ:")
             session.filesTransferred.forEachIndexed { idx, f ->
                 appendLine("  ${idx + 1}. ${f.displayTitle} — ${f.statusText}")
+                appendLine("     Пациент: ${f.patientDisplayName}")
                 if (f.sopInstanceUid.isNotBlank()) appendLine("     SOP UID: ${f.sopInstanceUid}")
             }
         }

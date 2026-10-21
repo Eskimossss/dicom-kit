@@ -767,6 +767,7 @@ private fun DicomSessionSummaryCard(
                                                 color = badgeColor
                                             )
                                         }
+                                        Text("Пациент: ${file.patientDisplayName}", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                                         if (file.sopInstanceUid.isNotBlank()) {
                                             Text(
                                                 text = "SOP UID: ${file.sopInstanceUid}",
@@ -1050,177 +1051,35 @@ private fun TimelineEventItem(
 /**
  * Строка отдельного события в Подробном режиме.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun DicomDetailedLogRow(
-    entry: DicomLogEntry,
-    isExpanded: Boolean,
-    onToggleExpand: () -> Unit,
-    onCopyEvent: () -> Unit
-) {
-    val roleLabel = remember(entry.associationId, entry.technicalDetails) {
-        entry.technicalDetails["Роль"]
-            ?: when {
-                entry.associationId.startsWith("SCU", ignoreCase = true) -> "SCU"
-                entry.associationId.startsWith("ASSOC", ignoreCase = true) ||
-                    entry.associationId.startsWith("SCP", ignoreCase = true) -> "SCP"
-                else -> "SCP"
-            }
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onToggleExpand)
-            .padding(horizontal = 14.dp, vertical = 9.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.Top
-        ) {
-            // Левая колонка: Время, Направление, ID
-            Column(modifier = Modifier.width(115.dp)) {
-                Text(
-                    text = entry.timestampFormatted,
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
-                    color = TextSecondarySlate,
-                    maxLines = 1,
-                    softWrap = false
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Surface(
-                        shape = RoundedCornerShape(4.dp),
-                        color = if (roleLabel == "SCU") WarningAmber.copy(alpha = 0.16f) else PrimaryBlueLight
-                    ) {
-                        Text(
-                            text = roleLabel,
-                            fontSize = 9.sp,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold,
-                            color = if (roleLabel == "SCU") WarningAmber else PrimaryBlue,
-                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                        )
-                    }
-                    Surface(
-                        shape = RoundedCornerShape(4.dp),
-                        color = PrimaryBlueLight
-                    ) {
-                        Text(
-                            text = entry.direction.code,
-                            fontSize = 9.sp,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold,
-                            color = PrimaryBlue,
-                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                        )
-                    }
-                    Text(
-                        text = entry.associationId,
-                        fontSize = 9.sp,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.SemiBold,
-                        color = TextSecondarySlate,
-                        maxLines = 1
-                    )
-                }
-            }
-
-            // Иконка категории
-            LogCategoryIcon(category = entry.category, isError = entry.isError)
-
-            Spacer(modifier = Modifier.width(8.dp))
-
-            // Содержимое события
-            Column(modifier = Modifier.weight(1f)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.Top
-                ) {
-                    Text(
-                        text = entry.title,
-                        fontSize = 13.sp,
-                        lineHeight = 17.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = if (entry.isError) ErrorRed else TextPrimaryDark,
-                        softWrap = true,
-                        modifier = Modifier.weight(1f)
-                    )
-
-                    IconButton(
-                        onClick = onCopyEvent,
-                        modifier = Modifier.size(24.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.ContentCopy,
-                            contentDescription = "Копировать событие",
-                            tint = TextSecondarySlate,
-                            modifier = Modifier.size(14.dp)
-                        )
-                    }
-                }
-
-                entry.summaryLines.forEach { line ->
-                    Text(
-                        text = line,
-                        fontSize = 11.sp,
-                        lineHeight = 15.sp,
-                        color = TextSecondarySlate,
-                        softWrap = true
-                    )
-                }
-
-                // Раскрытые технические детали и диагностика
-                if (isExpanded) {
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    val rec = remember(entry) { DicomDiagnosticHandbook.analyzeEntry(entry) }
-                    if (rec != null) {
-                        DiagnosticRecommendationCard(rec = rec)
-                        Spacer(modifier = Modifier.height(6.dp))
-                    }
-
-                    if (entry.technicalDetails.isNotEmpty()) {
-                        Card(
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(8.dp),
-                            colors = CardDefaults.cardColors(containerColor = InputBackgroundGray),
-                            border = BorderStroke(1.dp, CardBorderGray)
-                        ) {
-                            SelectionContainer {
-                                Column(modifier = Modifier.padding(10.dp)) {
-                                    entry.technicalDetails.forEach { (k, v) ->
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .padding(vertical = 2.dp),
-                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                            verticalAlignment = Alignment.Top
-                                        ) {
-                                            Text(
-                                                text = "$k:",
-                                                fontSize = 11.sp,
-                                                lineHeight = 15.sp,
-                                                color = TextSecondarySlate,
-                                                modifier = Modifier.weight(0.4f)
-                                            )
-                                            Text(
-                                                text = v,
-                                                fontSize = 11.sp,
-                                                lineHeight = 15.sp,
-                                                fontFamily = FontFamily.Monospace,
-                                                fontWeight = FontWeight.Medium,
-                                                color = TextPrimaryDark,
-                                                modifier = Modifier.weight(0.6f),
-                                                softWrap = true
-                                            )
-                                        }
-                                    }
-                                }
+internal fun DicomDetailedLogRow(entry: DicomLogEntry, isExpanded: Boolean, onToggleExpand: () -> Unit, onCopyEvent: () -> Unit) {
+    Column(Modifier.fillMaxWidth().clickable(onClick = onToggleExpand).padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(entry.timestampFormatted, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+            Text(entry.direction.code, color = PrimaryBlue, fontSize = 11.sp)
+            Text(entry.technicalDetails["Роль"] ?: if (entry.associationId.startsWith("SCU")) "SCU" else "SCP", fontSize = 11.sp)
+            Text(entry.category.name, fontSize = 11.sp)
+            Text(entry.associationId, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+        }
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+            Text(entry.title, fontWeight = FontWeight.SemiBold, color = if (entry.isError) ErrorRed else TextPrimaryDark,
+                modifier = Modifier.weight(1f))
+            IconButton(onClick = onCopyEvent) { Icon(Icons.Default.ContentCopy, "Копировать событие", tint = TextSecondarySlate) }
+            Icon(if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                if (isExpanded) "Свернуть событие" else "Раскрыть событие", tint = TextSecondarySlate)
+        }
+        entry.summaryLines.forEach { Text(it, fontSize = 12.sp, color = TextSecondarySlate) }
+        if (isExpanded) {
+            val recommendation = remember(entry) { DicomDiagnosticHandbook.analyzeEntry(entry) }
+            recommendation?.let { DiagnosticRecommendationCard(it) }
+            Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = InputBackgroundGray)) {
+                SelectionContainer {
+                    Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        entry.technicalDetails.forEach { (key, value) ->
+                            Column {
+                                Text("$key:", fontSize = 12.sp, color = TextSecondarySlate)
+                                Text(value, fontSize = 12.sp, fontFamily = FontFamily.Monospace, softWrap = true)
                             }
                         }
                     }
@@ -1229,7 +1088,6 @@ private fun DicomDetailedLogRow(
         }
     }
 }
-
 @Composable
 private fun LogCategoryIcon(
     category: DicomLogCategory,
@@ -1341,7 +1199,7 @@ private fun EmptyStateView(
  * Диалог экспорта журнала с выбором обезличивания и предварительным просмотром.
  */
 @Composable
-private fun ExportJournalDialog(
+internal fun ExportJournalDialog(
     context: Context,
     sessions: List<DicomSessionSummary>,
     logs: List<DicomLogEntry>,

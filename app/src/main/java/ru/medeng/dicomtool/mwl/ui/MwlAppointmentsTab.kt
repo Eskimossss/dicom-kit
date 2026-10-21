@@ -1,5 +1,12 @@
 package ru.medeng.dicomtool.mwl.ui
 
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.listSaver
+import ru.medeng.dicomtool.mwl.model.MwlStationProfile
+
 import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -80,6 +87,7 @@ import ru.medeng.dicomtool.ui.theme.TextSecondarySlate
 import ru.medeng.dicomtool.ui.theme.WarningAmber
 import ru.medeng.dicomtool.ui.theme.WarningAmberLight
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun MwlAppointmentsTab(
     viewModel: MwlViewModel,
@@ -90,6 +98,8 @@ fun MwlAppointmentsTab(
     val clipboardManager = LocalClipboardManager.current
     val patients by viewModel.patients.collectAsStateWithLifecycle()
     val studies by viewModel.studies.collectAsStateWithLifecycle()
+    val stationProfiles by viewModel.stationProfiles.collectAsStateWithLifecycle()
+    var showPatients by rememberSaveable { mutableStateOf(false) }
     val searchQuery by viewModel.appointmentSearchQuery.collectAsStateWithLifecycle()
     val modalityFilter by viewModel.appointmentModalityFilter.collectAsStateWithLifecycle()
 
@@ -121,20 +131,22 @@ fun MwlAppointmentsTab(
         }
     }
 
-    Column(
+    LazyColumn(
         modifier = modifier
             .fillMaxSize()
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        item {
         // Панель управления и поиска
         WhiteDiagnosticCard {
+            viewModel.stationProfileReadError?.let { Text(it, color = ErrorRed) }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
+                Column(Modifier.weight(1f)) {
                     Text(
                         text = "Локальная база назначений (MWL)",
                         fontSize = 16.sp,
@@ -174,8 +186,8 @@ fun MwlAppointmentsTab(
 
             // Фильтр по модальностям
             val modalities = listOf("ALL", "CR", "DX", "MG", "CT", "US", "MR")
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(modalities) { mod ->
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                modalities.forEach { mod ->
                     FilterChip(
                         selected = modalityFilter == mod,
                         onClick = { viewModel.appointmentModalityFilter.value = mod },
@@ -187,13 +199,12 @@ fun MwlAppointmentsTab(
             Spacer(modifier = Modifier.height(12.dp))
 
             // Кнопки добавления
-            Row(
+            FlowRow(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Button(
                     onClick = { viewModel.openNewStudyDialog() },
-                    modifier = Modifier.weight(1f),
                     colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue)
                 ) {
                     Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -203,7 +214,6 @@ fun MwlAppointmentsTab(
 
                 OutlinedButton(
                     onClick = { viewModel.openNewPatientDialog() },
-                    modifier = Modifier.weight(1f)
                 ) {
                     Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(6.dp))
@@ -213,17 +223,31 @@ fun MwlAppointmentsTab(
                 Button(
                     onClick = { viewModel.showSyntheticDialog.value = true },
                     colors = ButtonDefaults.buttonColors(containerColor = SuccessGreen),
-                    modifier = Modifier.weight(1f)
                 ) {
                     Icon(Icons.Default.AutoMode, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(6.dp))
                     Text("Тестовые", fontSize = 13.sp)
                 }
             }
+            FilterChip(selected = showPatients, onClick = { showPatients = !showPatients },
+                label = { Text(if (showPatients) "Показать назначения" else "Пациенты (${patients.size})") })
+        }
         }
 
         // Список найденных исследований
-        if (filteredStudies.isEmpty()) {
+        if (showPatients) {
+            items(patients.filter { searchQuery.isBlank() || it.patientName.contains(searchQuery.trim(), true) || it.patientId.contains(searchQuery.trim(), true) }, key = { "patient:${it.id}" }) { patient ->
+                WhiteDiagnosticCard {
+                    Text(patient.patientName, fontWeight = FontWeight.Bold)
+                    Text("Patient ID: ${patient.patientId} · Назначений: ${studies.count { it.patientInternalId == patient.id }}")
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(onClick = { viewModel.openEditPatientDialog(patient) }) { Text("Редактировать пациента") }
+                        TextButton(onClick = { viewModel.openNewStudyDialog(patient) }) { Text("Назначить исследование") }
+                    }
+                }
+            }
+        } else if (filteredStudies.isEmpty()) {
+            item {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 color = CardSurfaceWhite,
@@ -247,11 +271,8 @@ fun MwlAppointmentsTab(
                     )
                 }
             }
+            }
         } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
                 items(filteredStudies, key = { it.id }) { study ->
                     StudyCardItem(
                         study = study,
@@ -260,7 +281,6 @@ fun MwlAppointmentsTab(
                         onDelete = { viewModel.confirmDeleteStudy(study) }
                     )
                 }
-            }
         }
     }
 
@@ -285,6 +305,9 @@ fun MwlAppointmentsTab(
         StudyEditorDialog(
             study = editingStudy!!,
             patients = patients,
+            stationProfiles = stationProfiles,
+            onNewPatient = viewModel::openNewPatientDialog,
+            onSaveStation = viewModel::saveStationProfile,
             onDismiss = { viewModel.showStudyDialog.value = false },
             onSave = { s ->
                 val result = viewModel.saveStudy(s)
@@ -409,332 +432,130 @@ fun MwlAppointmentsTab(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun StudyCardItem(
-    study: MwlScheduledStudy,
-    onEdit: () -> Unit,
-    onDuplicate: () -> Unit,
-    onDelete: () -> Unit
-) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = CardSurfaceWhite,
-        shape = RoundedCornerShape(10.dp),
-        border = BorderStroke(1.dp, CardBorderGray)
-    ) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    // Бейдж модальности
-                    Surface(
-                        color = PrimaryBlueLight,
-                        shape = RoundedCornerShape(4.dp),
-                        border = BorderStroke(1.dp, PrimaryBlue.copy(alpha = 0.5f))
-                    ) {
-                        Text(
-                            text = study.modality,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = PrimaryBlue,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                        )
-                    }
+internal fun StudyCardItem(study: MwlScheduledStudy, onEdit: () -> Unit, onDuplicate: () -> Unit, onDelete: () -> Unit) {
+    WhiteDiagnosticCard {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(study.modality, fontWeight = FontWeight.Bold, color = PrimaryBlue)
+            if (study.isSynthetic) Text("ТЕСТ", color = SuccessGreen)
+            Text(study.patientName, fontWeight = FontWeight.Bold)
+        }
+        Text(study.requestedProcedureDescription.ifEmpty { study.spsDescription }, color = TextSecondarySlate)
+        Text("ID: ${study.patientId} · ACC: ${study.accessionNumber}", fontSize = 12.sp)
+        Text("${study.spsStartDate} ${study.spsStartTime} · ${study.scheduledStationAeTitle}", fontSize = 12.sp)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            IconButton(onClick = onDuplicate) { Icon(Icons.Default.ContentCopy, "Дублировать", tint = TextSecondarySlate) }
+            IconButton(onClick = onEdit) { Icon(Icons.Default.Edit, "Редактировать", tint = PrimaryBlue) }
+            IconButton(onClick = onDelete) { Icon(Icons.Default.Delete, "Удалить", tint = ErrorRed) }
+        }
+    }
+}
 
-                    if (study.isSynthetic) {
-                        Surface(
-                            color = SuccessGreenBackground,
-                            shape = RoundedCornerShape(4.dp)
-                        ) {
-                            Text(
-                                text = "ТЕСТ",
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = SuccessGreen,
-                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
-                            )
-                        }
-                    }
-
-                    Text(
-                        text = study.patientName,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = TextPrimaryDark
-                    )
-                }
-
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    IconButton(onClick = onDuplicate, modifier = Modifier.size(32.dp)) {
-                        Icon(Icons.Default.ContentCopy, contentDescription = "Дублировать", tint = TextSecondarySlate, modifier = Modifier.size(16.dp))
-                    }
-                    IconButton(onClick = onEdit, modifier = Modifier.size(32.dp)) {
-                        Icon(Icons.Default.Edit, contentDescription = "Редактировать", tint = PrimaryBlue, modifier = Modifier.size(16.dp))
-                    }
-                    IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
-                        Icon(Icons.Default.Delete, contentDescription = "Удалить", tint = ErrorRed, modifier = Modifier.size(16.dp))
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(4.dp))
-
-            Text(
-                text = study.requestedProcedureDescription.ifEmpty { study.spsDescription },
-                fontSize = 13.sp,
-                color = TextSecondarySlate
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(
-                    text = "ID: ${study.patientId} · ACC: ${study.accessionNumber}",
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
-                    color = TextSecondarySlate
-                )
-                Text(
-                    text = "${study.spsStartDate} ${study.spsStartTime} · ${study.scheduledStationAeTitle}",
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
-                    color = TextSecondarySlate
-                )
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun PatientEditorDialog(patient: MwlPatient, onDismiss: () -> Unit, onSave: (MwlPatient) -> Unit) {
+    var name by rememberSaveable(patient.id) { mutableStateOf(patient.patientName) }
+    var id by rememberSaveable(patient.id) { mutableStateOf(patient.patientId) }
+    var birth by rememberSaveable(patient.id) { mutableStateOf(patient.patientBirthDate) }
+    var sex by rememberSaveable(patient.id) { mutableStateOf(patient.patientSex) }
+    MwlFormDialog(if (patient.patientName.isEmpty()) "Новый пациент" else "Редактирование пациента", onDismiss,
+        // Manual edits must never retain a synthetic provenance flag and enter the synthetic-only export.
+        onSave = { onSave(patient.copy(patientName = name.trim(), patientId = id.trim(), patientBirthDate = birth.trim(), patientSex = sex, isSynthetic = false)) }) {
+        OutlinedTextField(name, { name = it }, label = { Text("ФИО · PN: Фамилия^Имя^Отчество") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(id, { id = it }, label = { Text("Patient ID · LO, до 64 символов") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(birth, { birth = it.filter(Char::isDigit) }, label = { Text("Дата рождения YYYYMMDD (необязательно)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf("M" to "Муж (M)", "F" to "Жен (F)", "O" to "Другой (O)").forEach { (code, label) ->
+                FilterChip(selected = sex == code, onClick = { sex = code }, label = { Text(label) })
             }
         }
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun PatientEditorDialog(
-    patient: MwlPatient,
-    onDismiss: () -> Unit,
-    onSave: (MwlPatient) -> Unit
+internal fun StudyEditorDialog(
+    study: MwlScheduledStudy, patients: List<MwlPatient>, stationProfiles: List<MwlStationProfile>,
+    onNewPatient: () -> Unit, onSaveStation: (MwlStationProfile) -> MwlValidation.Result,
+    onDismiss: () -> Unit, onSave: (MwlScheduledStudy) -> Unit
 ) {
-    var name by remember { mutableStateOf(patient.patientName) }
-    var id by remember { mutableStateOf(patient.patientId) }
-    var birth by remember { mutableStateOf(patient.patientBirthDate) }
-    var sex by remember { mutableStateOf(patient.patientSex) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(if (patient.patientName.isEmpty()) "Новый пациент" else "Редактирование пациента") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("ФИО (формат PN: Фамилия^Имя^Отчество)", fontSize = 11.sp, color = TextSecondarySlate)
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    placeholder = { Text("ИВАНОВ^ИВАН^ИВАНОВИЧ") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                Text("Patient ID (VR: LO)", fontSize = 11.sp, color = TextSecondarySlate)
-                OutlinedTextField(
-                    value = id,
-                    onValueChange = { id = it },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                Text("Дата рождения (YYYYMMDD)", fontSize = 11.sp, color = TextSecondarySlate)
-                OutlinedTextField(
-                    value = birth,
-                    onValueChange = { birth = it.filter { c -> c.isDigit() } },
-                    placeholder = { Text("19850615") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                Text("Пол (M / F / O)", fontSize = 11.sp, color = TextSecondarySlate)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("M" to "Муж (M)", "F" to "Жен (F)", "O" to "Другой (O)").forEach { (code, label) ->
-                        FilterChip(
-                            selected = sex == code,
-                            onClick = { sex = code },
-                            label = { Text(label, fontSize = 12.sp) }
-                        )
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            Button(onClick = {
-                onSave(
-                    patient.copy(
-                        patientName = name.trim(),
-                        patientId = id.trim(),
-                        patientBirthDate = birth.trim(),
-                        patientSex = sex
-                    )
-                )
-            }) {
-                Text("Сохранить")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Отмена") }
+    var selectedId by rememberSaveable(study.id) { mutableStateOf(study.patientInternalId) }
+    LaunchedEffect(study.patientInternalId) { selectedId = study.patientInternalId }
+    val patient = patients.firstOrNull { it.id == selectedId }
+    var patientPicker by rememberSaveable(study.id) { mutableStateOf(false) }
+    var patientQuery by rememberSaveable { mutableStateOf("") }
+    val draftSaver = remember(study.id) { listSaver<MwlScheduledStudy, String>(save = {
+        listOf(it.modality, it.scheduledStationAeTitle, it.scheduledStationName, it.spsLocation,
+            it.requestedProcedureDescription, it.spsDescription, it.requestedProcedureId, it.spsId,
+            it.accessionNumber, it.spsStartDate, it.spsStartTime, it.studyInstanceUid)
+    }, restore = { study.copy(modality = it[0], scheduledStationAeTitle = it[1], scheduledStationName = it[2],
+        spsLocation = it[3], requestedProcedureDescription = it[4], spsDescription = it[5], requestedProcedureId = it[6],
+        spsId = it[7], accessionNumber = it[8], spsStartDate = it[9], spsStartTime = it[10], studyInstanceUid = it[11]) }) }
+    var draft by rememberSaveable(study.id, stateSaver = draftSaver) { mutableStateOf(study) }
+    var editingStation by remember { mutableStateOf<MwlStationProfile?>(null) }
+    var selectedStationId by rememberSaveable { mutableStateOf<String?>(null) }
+    MwlFormDialog(if (study.patientInternalId.isBlank()) "Новое назначение" else "Назначение", onDismiss,
+        saveEnabled = patient != null,
+        onSave = {
+            patient?.let { p -> onSave(draft.copy(patientInternalId = p.id, patientName = p.patientName,
+                patientId = p.patientId, isSynthetic = p.isSynthetic && study.isSynthetic,
+                modality = draft.modality.trim(), scheduledStationAeTitle = draft.scheduledStationAeTitle.trim(),
+                scheduledStationName = draft.scheduledStationName.trim(), spsLocation = draft.spsLocation.trim(),
+                requestedProcedureDescription = draft.requestedProcedureDescription.trim(), spsDescription = draft.spsDescription.trim(),
+                requestedProcedureId = draft.requestedProcedureId.trim(), spsId = draft.spsId.trim(),
+                accessionNumber = draft.accessionNumber.trim(), spsStartDate = draft.spsStartDate.trim(),
+                spsStartTime = draft.spsStartTime.trim(), studyInstanceUid = draft.studyInstanceUid.trim())) }
+        }) {
+        Text("Пациент (обязательно)", fontWeight = FontWeight.Bold)
+        Text(patient?.let { "${it.patientName} · ${it.patientId}" } ?: "Пациент не выбран")
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = { patientPicker = true }) { Text("Выбрать пациента") }
+            TextButton(onClick = onNewPatient) { Text("Создать пациента") }
         }
-    )
-}
-
-@Composable
-private fun StudyEditorDialog(
-    study: MwlScheduledStudy,
-    patients: List<MwlPatient>,
-    onDismiss: () -> Unit,
-    onSave: (MwlScheduledStudy) -> Unit
-) {
-    var selectedPatientInternalId by remember { mutableStateOf(study.patientInternalId) }
-    val currentSelectedPatient = patients.firstOrNull { it.id == selectedPatientInternalId }
-
-    var accessionNumber by remember { mutableStateOf(study.accessionNumber) }
-    var studyInstanceUid by remember { mutableStateOf(study.studyInstanceUid) }
-    var rpDescription by remember { mutableStateOf(study.requestedProcedureDescription) }
-    var modality by remember { mutableStateOf(study.modality) }
-    var spsStartDate by remember { mutableStateOf(study.spsStartDate) }
-    var spsStartTime by remember { mutableStateOf(study.spsStartTime) }
-    var stationAe by remember { mutableStateOf(study.scheduledStationAeTitle) }
-    var stationName by remember { mutableStateOf(study.scheduledStationName) }
-    var location by remember { mutableStateOf(study.spsLocation) }
-    var procedureId by remember { mutableStateOf(study.requestedProcedureId) }
-    var stepId by remember { mutableStateOf(study.spsId) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(if (study.accessionNumber.isEmpty()) "Новое назначение" else "Редактирование назначения") },
-        text = {
-            Column(
-                modifier = Modifier.fillMaxWidth().heightIn(max = 520.dp).verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Text("Пациент: ${currentSelectedPatient?.patientName ?: study.patientName} (${currentSelectedPatient?.patientId ?: study.patientId})", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-
-                Text("Модальность (CR, DX, MG, CT, US, MR)", fontSize = 11.sp, color = TextSecondarySlate)
-                OutlinedTextField(
-                    value = modality,
-                    onValueChange = { modality = it.uppercase() },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                OutlinedTextField(value = procedureId, onValueChange = { procedureId = it }, label = { Text("Requested Procedure ID (до 16 символов)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = stepId, onValueChange = { stepId = it }, label = { Text("SPS ID (до 16 символов)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = location, onValueChange = { location = it }, label = { Text("Место выполнения SPS (до 16 символов)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = stationName, onValueChange = { stationName = it }, label = { Text("Имя станции (до 16 символов)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                Text("Описание исследования (VR: LO)", fontSize = 11.sp, color = TextSecondarySlate)
-                OutlinedTextField(
-                    value = rpDescription,
-                    onValueChange = { rpDescription = it },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Accession No", fontSize = 11.sp, color = TextSecondarySlate)
-                        OutlinedTextField(
-                            value = accessionNumber,
-                            onValueChange = { accessionNumber = it },
-                            singleLine = true
-                        )
-                    }
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Station AE", fontSize = 11.sp, color = TextSecondarySlate)
-                        OutlinedTextField(
-                            value = stationAe,
-                            onValueChange = { stationAe = it.uppercase() },
-                            singleLine = true
-                        )
-                    }
+        Text("Изменение пациента применяется только кнопкой «Сохранить».", fontSize = 12.sp)
+        Text("Профиль аппарата (поля можно изменить вручную)", fontWeight = FontWeight.Bold)
+        stationProfiles.forEach { profile ->
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { draft = profile.applyTo(draft); selectedStationId = profile.id }, modifier = Modifier.weight(1f)) {
+                    Text("${if (selectedStationId == profile.id) "✓ " else ""}${profile.name} · ${profile.modality} · ${profile.scheduledStationAeTitle}")
                 }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Дата SPS (YYYYMMDD)", fontSize = 11.sp, color = TextSecondarySlate)
-                        OutlinedTextField(
-                            value = spsStartDate,
-                            onValueChange = { spsStartDate = it.filter { c -> c.isDigit() } },
-                            singleLine = true
-                        )
-                    }
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Время SPS (HHMMSS)", fontSize = 11.sp, color = TextSecondarySlate)
-                        OutlinedTextField(
-                            value = spsStartTime,
-                            onValueChange = { spsStartTime = it.filter { c -> c.isDigit() } },
-                            singleLine = true
-                        )
-                    }
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Study Instance UID", fontSize = 11.sp, color = TextSecondarySlate)
-                    TextButton(onClick = { studyInstanceUid = MwlValidation.generateStudyInstanceUid() }) {
-                        Text("Сгенерировать UID", fontSize = 11.sp)
-                    }
-                }
-                OutlinedTextField(
-                    value = studyInstanceUid,
-                    onValueChange = { studyInstanceUid = it.trim() },
-                    singleLine = true,
-                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp, fontFamily = FontFamily.Monospace),
-                    modifier = Modifier.fillMaxWidth()
-                )
+                IconButton(onClick = { editingStation = profile }) { Icon(Icons.Default.Edit, "Редактировать профиль ${profile.name}") }
             }
-        },
-        confirmButton = {
-            Button(onClick = {
-                val p = currentSelectedPatient
-                onSave(
-                    study.copy(
-                        patientInternalId = p?.id ?: study.patientInternalId,
-                        patientName = p?.patientName ?: study.patientName,
-                        patientId = p?.patientId ?: study.patientId,
-                        accessionNumber = accessionNumber.trim(),
-                        studyInstanceUid = studyInstanceUid.trim(),
-                        requestedProcedureDescription = rpDescription.trim(),
-                        spsDescription = rpDescription.trim(),
-                        modality = modality.trim(),
-                        spsStartDate = spsStartDate.trim(),
-                        spsStartTime = spsStartTime.trim(),
-                        scheduledStationAeTitle = stationAe.trim(),
-                        scheduledStationName = stationName.trim(),
-                        spsLocation = location.trim(),
-                        requestedProcedureId = procedureId.trim(),
-                        spsId = stepId.trim()
-                    )
-                )
-            }) {
-                Text("Сохранить")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Отмена") }
         }
-    )
+        TextButton(onClick = { editingStation = MwlStationProfile(name = "", modality = draft.modality,
+            scheduledStationAeTitle = draft.scheduledStationAeTitle, scheduledStationName = draft.scheduledStationName, location = draft.spsLocation) }) { Text("Новый профиль аппарата") }
+        OutlinedTextField(draft.modality, { draft = draft.copy(modality = it.uppercase(java.util.Locale.US)) }, label = { Text("Modality · CS, до 16 символов") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(draft.scheduledStationAeTitle, { draft = draft.copy(scheduledStationAeTitle = it) }, label = { Text("AE Title аппарата · AE, до 16 байт ASCII") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(draft.scheduledStationName, { draft = draft.copy(scheduledStationName = it) }, label = { Text("Название кабинета / станции · SH, до 16 символов") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(draft.spsLocation, { draft = draft.copy(spsLocation = it) }, label = { Text("Место проведения исследования · SH, до 16 символов") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(draft.requestedProcedureDescription, { draft = draft.copy(requestedProcedureDescription = it, spsDescription = it) }, label = { Text("Описание исследования · LO, до 64 символов") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(draft.requestedProcedureId, { draft = draft.copy(requestedProcedureId = it) }, label = { Text("Requested Procedure ID · SH, до 16 символов") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(draft.spsId, { draft = draft.copy(spsId = it) }, label = { Text("SPS ID · SH, до 16 символов") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(draft.accessionNumber, { draft = draft.copy(accessionNumber = it) }, label = { Text("Accession Number · SH, до 16 символов") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        MwlCalendarField("Дата назначения", draft.spsStartDate, { draft = draft.copy(spsStartDate = it) })
+        OutlinedTextField(draft.spsStartTime, { draft = draft.copy(spsStartTime = it) }, label = { Text("Время SPS · TM: HH[MM[SS[.FFFFFF]]]") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(draft.studyInstanceUid, { draft = draft.copy(studyInstanceUid = it.trim()) }, label = { Text("Study Instance UID") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        TextButton(onClick = { draft = draft.copy(studyInstanceUid = MwlValidation.generateStudyInstanceUid()) }) { Text("Сгенерировать UID") }
+    }
+    if (patientPicker) AlertDialog(onDismissRequest = { patientPicker = false }, title = { Text("Выбор пациента") }, text = {
+        Column {
+            OutlinedTextField(patientQuery, { patientQuery = it }, label = { Text("Поиск: Patient Name / Patient ID") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 280.dp)) {
+                items(patients.filter { patientQuery.isBlank() || it.patientName.contains(patientQuery.trim(), true) || it.patientId.contains(patientQuery.trim(), true) }, key = { it.id }) { p ->
+                    TextButton(onClick = { selectedId = p.id; patientPicker = false }, modifier = Modifier.fillMaxWidth()) { Text("${p.patientName} · ${p.patientId}") }
+                }
+            }
+        }
+    }, confirmButton = { TextButton(onClick = { patientPicker = false }) { Text("Закрыть") } })
+    editingStation?.let { profile ->
+        MwlStationEditor(profile, onDismiss = { editingStation = null }, onSave = { edited ->
+            val result = onSaveStation(edited)
+            if (result is MwlValidation.Result.Valid) { draft = edited.applyTo(draft); selectedStationId = edited.id }
+            result
+        })
+    }
 }
-
 @Composable
 private fun SyntheticGeneratorDialog(
     onDismiss: () -> Unit,

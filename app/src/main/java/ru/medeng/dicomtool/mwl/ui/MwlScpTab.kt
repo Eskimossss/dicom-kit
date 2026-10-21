@@ -1,5 +1,8 @@
 package ru.medeng.dicomtool.mwl.ui
 
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
+
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -96,6 +99,7 @@ fun MwlScpTab(
     Column(
         modifier = modifier
             .fillMaxSize()
+            .imePadding()
             .verticalScroll(scrollState)
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
@@ -107,7 +111,7 @@ fun MwlScpTab(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
+                Column(Modifier.weight(1f).padding(end = 8.dp)) {
                     Text(
                         text = "Сервер Modality Worklist (SCP)",
                         fontSize = 17.sp,
@@ -148,6 +152,8 @@ fun MwlScpTab(
                         )
                         Text(
                             text = statusText,
+                            maxLines = 1,
+                            softWrap = false,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
                             color = statusColor
@@ -173,6 +179,7 @@ fun MwlScpTab(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Row(
+                        modifier = Modifier.weight(1f),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
@@ -182,7 +189,7 @@ fun MwlScpTab(
                             tint = PrimaryBlue,
                             modifier = Modifier.size(24.dp)
                         )
-                        Column {
+                        Column(Modifier.weight(1f)) {
                             Text(
                                 text = "IP для подключения оборудования",
                                 fontSize = 11.sp,
@@ -245,7 +252,7 @@ fun MwlScpTab(
                 onClick = { viewModel.toggleScpServer() },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(48.dp),
+                    .heightIn(min = 48.dp),
                 enabled = !isTransition,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = if (isRunning) StopButtonRed else PrimaryBlue,
@@ -380,11 +387,12 @@ fun MwlScpTab(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(
+                    modifier = Modifier.weight(1f).padding(end = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Icon(Icons.Outlined.Security, contentDescription = null, tint = PrimaryBlue)
-                    Column {
+                    Column(Modifier.weight(1f)) {
                         Text(
                             text = "Ограничения подключений (Белый список)",
                             fontSize = 14.sp,

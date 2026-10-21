@@ -50,8 +50,8 @@ android {
         applicationId = "ru.medeng.dicomtool"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10502
-        versionName = "1.5.0-alpha.2"
+        versionCode = 10503
+        versionName = "1.5.0-alpha.3"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         buildConfigField("String", "GIT_BRANCH", "\"$gitBranch\"")

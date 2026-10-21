@@ -1,5 +1,12 @@
 package ru.medeng.dicomtool.mwl.ui
 
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.runtime.saveable.rememberSaveable
+import ru.medeng.dicomtool.ui.screens.log.DicomDetailedLogRow
+import ru.medeng.dicomtool.ui.screens.log.ExportJournalDialog
+import ru.medeng.dicomtool.data.logging.DicomLogExportUtils
+
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -68,6 +75,7 @@ import ru.medeng.dicomtool.ui.theme.TextPrimaryDark
 import ru.medeng.dicomtool.ui.theme.TextSecondarySlate
 import ru.medeng.dicomtool.ui.theme.WarningAmber
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun MwlJournalTab(
     viewModel: MwlViewModel,
@@ -81,7 +89,8 @@ fun MwlJournalTab(
     var filterDirection by remember { mutableStateOf<String>("ALL") } // "ALL", "SCP", "SCU"
     var filterErrorsOnly by remember { mutableStateOf(false) }
 
-    var selectedEntryDetail by remember { mutableStateOf<DicomLogEntry?>(null) }
+    var expandedIds by rememberSaveable { mutableStateOf(emptyList<String>()) }
+    var copyEntry by remember { mutableStateOf<DicomLogEntry?>(null) }
     var showExportDialog by remember { mutableStateOf(false) }
     var showClearConfirm by remember { mutableStateOf(false) }
 
@@ -103,12 +112,13 @@ fun MwlJournalTab(
         }
     }
 
-    Column(
+    LazyColumn(
         modifier = modifier
             .fillMaxSize()
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        item {
         // Панель управления и фильтрации журнала
         WhiteDiagnosticCard {
             Row(
@@ -116,7 +126,7 @@ fun MwlJournalTab(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
+                Column(Modifier.weight(1f)) {
                     Text(
                         text = "Журнал операций Worklist (MWL)",
                         fontSize = 16.sp,
@@ -187,8 +197,10 @@ fun MwlJournalTab(
             }
         }
 
+        }
         // Список записей журнала
         if (filteredLogs.isEmpty()) {
+            item {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 color = CardSurfaceWhite,
@@ -202,80 +214,29 @@ fun MwlJournalTab(
                     modifier = Modifier.padding(24.dp)
                 )
             }
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(filteredLogs, key = { it.id }) { entry ->
-                    MwlLogEntryItem(
-                        entry = entry,
-                        onClick = { selectedEntryDetail = entry }
-                    )
-                }
             }
+        } else {
+                items(filteredLogs, key = { it.id }) { entry ->
+                    Surface(color = CardSurfaceWhite, shape = RoundedCornerShape(8.dp), border = BorderStroke(1.dp, CardBorderGray)) {
+                    DicomDetailedLogRow(
+                        entry = entry,
+                        isExpanded = entry.id in expandedIds,
+                        onToggleExpand = { expandedIds = if (entry.id in expandedIds) expandedIds - entry.id else expandedIds + entry.id },
+                        onCopyEvent = { copyEntry = entry }
+                    )
+                    }
+                }
         }
     }
 
-    // Диалог деталей записи журнала
-    if (selectedEntryDetail != null) {
-        val entry = selectedEntryDetail!!
-        AlertDialog(
-            onDismissRequest = { selectedEntryDetail = null },
-            title = {
-                Text(entry.title, fontWeight = FontWeight.Bold, fontSize = 15.sp)
-            },
-            text = {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text("Время: ${entry.timestampFormatted} · Сессия: ${entry.associationId}", fontSize = 11.sp, color = TextSecondarySlate)
-
-                    if (entry.summaryLines.isNotEmpty()) {
-                        Text("Сводка:", fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                        entry.summaryLines.forEach { line ->
-                            Text("• $line", fontSize = 12.sp, color = TextPrimaryDark)
-                        }
-                    }
-
-                    if (entry.technicalDetails.isNotEmpty()) {
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text("Технические параметры:", fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                        entry.technicalDetails.forEach { (k, v) ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text(k, fontSize = 11.sp, color = TextSecondarySlate)
-                                Text(v, fontSize = 11.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.SemiBold, color = TextPrimaryDark)
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                Button(onClick = {
-                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    val textToCopy = buildString {
-                        appendLine("${entry.timestampFormatted} | ${entry.associationId} | ${entry.title}")
-                        entry.summaryLines.forEach { appendLine("• $it") }
-                        entry.technicalDetails.forEach { (k, v) -> appendLine("$k: $v") }
-                    }
-                    cm.setPrimaryClip(ClipData.newPlainText("MWL Log Entry", textToCopy))
-                    Toast.makeText(context, "Скопировано в буфер обмена", Toast.LENGTH_SHORT).show()
-                }) {
-                    Text("Скопировать")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { selectedEntryDetail = null }) { Text("Закрыть") }
-            }
-        )
+    copyEntry?.let { entry ->
+        ExportJournalDialog(context, emptyList(), listOf(entry), false, onDismiss = { copyEntry = null },
+            onCopy = { text, _ ->
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("MWL event", text))
+                copyEntry = null
+            })
     }
-
     // Диалог экспорта отчёта
     if (showExportDialog) {
         var includePhi by remember { mutableStateOf(false) }
@@ -345,86 +306,5 @@ fun MwlJournalTab(
                 TextButton(onClick = { showClearConfirm = false }) { Text("Отмена") }
             }
         )
-    }
-}
-
-@Composable
-private fun MwlLogEntryItem(
-    entry: DicomLogEntry,
-    onClick: () -> Unit
-) {
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable { onClick() },
-        color = CardSurfaceWhite,
-        shape = RoundedCornerShape(8.dp),
-        border = BorderStroke(1.dp, if (entry.isError) ErrorRed.copy(alpha = 0.5f) else CardBorderGray)
-    ) {
-        Column(modifier = Modifier.padding(10.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    // Бейдж направления
-                    val dirColor = when (entry.direction) {
-                        DicomTrafficDirection.INBOUND -> PrimaryBlue
-                        DicomTrafficDirection.OUTBOUND -> WarningAmber
-                        DicomTrafficDirection.LOCAL -> TextSecondarySlate
-                    }
-                    Surface(
-                        color = dirColor.copy(alpha = 0.1f),
-                        shape = RoundedCornerShape(4.dp)
-                    ) {
-                        Text(
-                            text = entry.direction.code,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = dirColor,
-                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
-                        )
-                    }
-
-                    Text(
-                        text = entry.associationId,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace,
-                        color = TextPrimaryDark
-                    )
-                }
-
-                Text(
-                    text = entry.timestampFormatted,
-                    fontSize = 10.sp,
-                    fontFamily = FontFamily.Monospace,
-                    color = TextSecondarySlate
-                )
-            }
-
-            Spacer(modifier = Modifier.height(4.dp))
-
-            Text(
-                text = entry.title,
-                fontSize = 13.sp,
-                fontWeight = if (entry.isError) FontWeight.Bold else FontWeight.Normal,
-                color = if (entry.isError) ErrorRed else TextPrimaryDark
-            )
-
-            if (entry.summaryLines.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = entry.summaryLines.first(),
-                    fontSize = 11.sp,
-                    color = TextSecondarySlate,
-                    maxLines = 1
-                )
-            }
-        }
     }
 }

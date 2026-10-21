@@ -128,6 +128,9 @@ object MwlValidation {
         if (trimmed.length > 16) {
             return Result.Invalid("modality", "Код модальности превышает 16 символов")
         }
+        if (!Regex("[A-Z0-9 _]{1,16}").matches(modality)) {
+            return Result.Invalid("modality", "Модальность: допустимы A–Z, 0–9, пробел и подчёркивание (VR: CS)")
+        }
         return Result.Valid
     }
 
@@ -136,6 +139,7 @@ object MwlValidation {
         value.length > max || value.any { it < ' ' || it == '\\' } -> Result.Invalid(field, "$field: недопустимое значение или длина VR")
         else -> Result.Valid
     }
+    fun validateShortString(value: String, field: String): Result = text(value, field, 16)
     private fun pn(value: String, field: String, required: Boolean = false): Result {
         if (required && value.isBlank()) return Result.Invalid(field, "Обязательное имя не заполнено")
         if (value.split('=').size > 3 || value.split('=').any { it.length > 64 || it.split('^').size > 5 } || value.any { it < ' ' || it == '\\' }) return Result.Invalid(field, "Некорректное DICOM PN")

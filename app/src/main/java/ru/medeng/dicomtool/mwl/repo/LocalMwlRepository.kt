@@ -105,8 +105,10 @@ class LocalMwlRepository(
         commit(ps, ss); saved
     }
     override fun saveStudy(study: MwlScheduledStudy): MwlScheduledStudy = synchronized(lock) {
-        MwlValidation.requireValid(MwlValidation.validateStudy(study))
-        val saved = study.copy(updatedAt = System.currentTimeMillis())
+        val patient = requireNotNull(getPatientById(study.patientInternalId)) { "Appointment patient does not exist" }
+        val saved = study.copy(patientName = patient.patientName, patientId = patient.patientId,
+            isSynthetic = study.isSynthetic && patient.isSynthetic, updatedAt = System.currentTimeMillis())
+        MwlValidation.requireValid(MwlValidation.validateStudy(saved))
         commit(getAllPatients(), getAllStudies().filterNot { it.id == saved.id } + saved); saved
     }
     override fun deletePatient(patientInternalId: String, cascadeStudies: Boolean): Boolean = synchronized(lock) {

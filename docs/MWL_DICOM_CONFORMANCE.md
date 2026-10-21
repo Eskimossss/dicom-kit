@@ -1,6 +1,23 @@
-# DICOM Kit — MWL conformance notes, 1.5.0-alpha.2
+# DICOM Kit — MWL conformance notes, 1.5.0-alpha.3
 
 This describes the implemented subset and measured behavior; it is not a claim of certification on all modalities. See [audit fixes and evidence](STAGE_7_AUDIT_FIXES.md).
+
+## Alpha.3 scheduling UI and persistence
+
+An appointment explicitly selects a local patient by internal identity. Selecting an existing patient does not create a copy. Patients without appointments are editable from the patient list. Creating a patient inside the appointment editor selects that patient; only saving the appointment changes its link. The repository validates existence and refreshes its denormalized PN/ID from the authoritative patient in the same atomic snapshot. Existing snapshots and legacy links are retained on load; there is no destructive migration or automatic reassignment.
+
+Station profiles are independent local settings in `mwl_station_profiles.json`. They contain a display name, Modality, Scheduled Station AE Title, Scheduled Station Name and optional Location. Applying/saving a profile copies values to the current draft; existing appointments are not rewritten. IP and port are not required. Profiles do not introduce Calling AE based routing; the existing Matching Keys and optional association whitelist retain their behavior. A corrupt settings file is preserved and further writes are blocked with a visible error.
+
+| UI field | Tag in SPS Item | VR / value limit |
+|---|---|---|
+| AE Title аппарата | (0040,0001) | AE: 16 bytes, allowed ASCII repertoire |
+| Название кабинета / станции | (0040,0010) | SH: 16 characters |
+| Место проведения исследования | (0040,0011) | SH: 16 characters |
+| Description | (0040,0007), (0032,1060) | LO: 64 characters |
+
+The UI represents one station value per appointment. Limits and meanings were checked against [PS3.5 VR](https://dicom.nema.org/medical/dicom/current/output/chtml/part05/sect_6.2.html) and [PS3.3 SPS module](https://dicom.nema.org/medical/dicom/current/output/chtml/part03/sect_C.4.10.html). PN retains its component/group validation rather than using a universal 16-character limit.
+
+The SCU calendar selects Today, Tomorrow, one explicit date, a closed ordered range or Any. Calendar dates are converted to DA without timezone shifts (`YYYYMMDD` or `YYYYMMDD-YYYYMMDD`). Empty custom dates and incomplete/reversed UI ranges block query submission. The DA/TM Matching Engine, open range support for protocol clients and continuous DA/TM interval semantics described below are unchanged.
 
 ## Network and association
 

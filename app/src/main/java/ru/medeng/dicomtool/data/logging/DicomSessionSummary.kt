@@ -64,8 +64,10 @@ data class TransferredFileItem(
     val transferSyntaxUid: String = "",
     val storageResult: String? = null,
     val responseWrite: String? = null,
-    val dimseStatus: Int? = null
+    val dimseStatus: Int? = null,
+    val patientName: String = ""
 ) {
+    val patientDisplayName: String get() = ru.medeng.dicomtool.dicom.charset.DicomPersonName.display(patientName).ifBlank { "Не указано" }
     val displayTitle: String
         get() {
             if (fileName.isBlank() || fileName == "Имя файла неизвестно" || fileName == "DICOM Object") {
@@ -382,12 +384,20 @@ object DicomSessionGrouper {
         if (outcomes.isNotEmpty()) return outcomes.map { entry ->
             val d = entry.technicalDetails
             val outcome = d.getValue("SCU File Result")
+            val objectPatient = entry.patients.singleOrNull() ?: d["File ID"]?.takeIf { it.isNotBlank() }?.let { fileId ->
+                // Older terminal SCU entries lacked patient metadata; recover only from the same file request.
+                events.filter { request -> request.category == DicomLogCategory.C_STORE_RQ &&
+                    request.technicalDetails["File ID"] == fileId &&
+                    (request.technicalDetails["SOP Instance UID"] ?: request.technicalDetails["Affected SOP Instance UID"]) == d["SOP Instance UID"]
+                }.flatMap { it.patients }.distinct().singleOrNull()
+            }
             TransferredFileItem(fileName = d["Имя файла"] ?: "Имя файла неизвестно",
                 sopInstanceUid = d["SOP Instance UID"] ?: "", sopClassUid = d["SOP Class UID"] ?: "",
                 statusText = d["Причина"] ?: outcome, isSuccess = outcome == "SUCCESS",
                 isWarning = outcome == "WARNING" || outcome == "UNCONFIRMED",
                 isError = outcome == "FAILED" || outcome == "SKIPPED", scuOutcome = outcome,
-                transferSyntaxUid = d["Transfer Syntax UID"] ?: "")
+                transferSyntaxUid = d["Transfer Syntax UID"] ?: "",
+                patientName = objectPatient?.name.orEmpty())
         }
         val result = mutableListOf<TransferredFileItem>()
         val fileRqs = events.filter { it.category == DicomLogCategory.C_STORE_RQ }
@@ -417,6 +427,16 @@ object DicomSessionGrouper {
 
             fun matchesRequest(entry: DicomLogEntry): Boolean = requestId != null &&
                 (entry.technicalDetails["Message ID Being Responded To"] ?: entry.technicalDetails["Message ID"]) == requestId
+            // Private metadata belongs to this request, never to the study or the association as a whole.
+            // Bound the search when a peer reuses a Message ID later in the same association.
+            val start = events.indexOf(rq)
+            val end = events.withIndex().firstOrNull { (index, event) -> index > start &&
+                event.category == DicomLogCategory.C_STORE_RQ && event.technicalDetails["Message ID"] == requestId
+            }?.index ?: events.size
+            val objectPatient = rq.patients.singleOrNull() ?: events.subList(start + 1, end).firstOrNull { event ->
+                matchesRequest(event) && (event.technicalDetails["SOP Instance UID"] ?: event.technicalDetails["Affected SOP Instance UID"]) == sopInstanceUid &&
+                    event.patients.size == 1
+            }?.patients?.singleOrNull()
             val storage = events.lastOrNull { matchesRequest(it) && it.technicalDetails["Storage Result"] != null }
                 ?.technicalDetails?.get("Storage Result")
             val write = events.lastOrNull { matchesRequest(it) && it.technicalDetails["Response Write"] in setOf("FAILED", "LOCAL_COMPLETED") }
@@ -495,7 +515,8 @@ object DicomSessionGrouper {
                     isError = isError,
                     scuOutcome = if (statusText.contains("не получен") || statusText.contains("не содержит") || statusText.contains("не подтверждена")) "UNCONFIRMED" else null,
                     storageResult = storage, responseWrite = write,
-                    dimseStatus = pairRsp?.let { DicomDiagnosticHandbook.extractStatusCode(it) }
+                    dimseStatus = pairRsp?.let { DicomDiagnosticHandbook.extractStatusCode(it) },
+                    patientName = objectPatient?.name.orEmpty()
                 )
             )
         }
@@ -915,4 +936,3 @@ fun DicomLogEntry.matches(
         k.lowercase(Locale.US).contains(q) || v.lowercase(Locale.US).contains(q)
     }
 }
-

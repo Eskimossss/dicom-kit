@@ -81,8 +81,8 @@ class StorageSafetyInstrumentedTest {
             }
             val a = ae.connect(local, org.dcm4che3.net.Connection("remote", "127.0.0.1", port), rq)
             association = a
-            fun send(pixel: Int = 1): Int {
-                val ds = org.dcm4che3.io.DicomInputStream(dicom(pixel)).use { it.readFileMetaInformation(); it.readDataset() }
+            fun send(pixel: Int = 1, patientName: String = "SYNTHETIC^STAGE51"): Int {
+                val ds = org.dcm4che3.io.DicomInputStream(dicom(pixel, patientName = patientName)).use { it.readFileMetaInformation(); it.readDataset() }
                 val rsp = a.cstore(UID.SecondaryCaptureImageStorage, sop, 0, org.dcm4che3.net.DataWriterAdapter(ds), UID.ExplicitVRLittleEndian)
                 assertTrue(rsp.next()); return rsp.command.getInt(Tag.Status, -1)
             }
@@ -93,7 +93,13 @@ class StorageSafetyInstrumentedTest {
             manager.setReceptionOptions(ReceptionStorageOptions(IncomingDuplicatePolicy.REJECT_IDENTICAL))
             assertEquals(org.dcm4che3.net.Status.ProcessingFailure, send())
             assertEquals(3, repo.getTotalSavedFilesCount())
-            assertEquals(0, send(2)); assertEquals(4, repo.getTotalSavedFilesCount())
+            assertEquals(0, send(2, "SYNTHETIC^SECOND")); assertEquals(4, repo.getTotalSavedFilesCount())
+            val transferred = ru.medeng.dicomtool.data.logging.DicomSessionGrouper.groupEvents(logger.logsFlow.value).flatMap { it.filesTransferred }
+            assertEquals(6, transferred.size)
+            assertEquals("SYNTHETIC^SECOND", transferred.last().patientName)
+            val failedFiles = transferred.filter { it.dimseStatus == org.dcm4che3.net.Status.ProcessingFailure }
+            assertEquals(1, failedFiles.size)
+            assertEquals("SYNTHETIC^STAGE51", failedFiles.single().patientName)
             val dispositions = logger.logsFlow.value.mapNotNull { it.technicalDetails["Storage Disposition"] }.toSet()
             assertTrue(dispositions.containsAll(setOf("NEW_COPY", "REPEAT_COPY", "DUPLICATE_CONFIRMED", "CONTENT_COLLISION")))
             assertTrue(File(manager.internalStorageDir, ".incoming_tmp").listFiles().orEmpty().isEmpty())

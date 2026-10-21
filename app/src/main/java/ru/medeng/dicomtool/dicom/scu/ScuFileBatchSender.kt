@@ -66,7 +66,8 @@ internal class ScuFileBatchSender(private val logger: PersistentDicomTechnicalLo
                     "SOP Class UID" to (file.sopClassUid ?: ""), "Transfer Syntax UID" to (file.transferSyntaxUid ?: ""),
                     "Message ID" to (messageId?.toString() ?: ""), "Причина" to message,
                     "Dataset Bytes" to bytes.toString(), "Status" to (result.responseStatus?.let { "0x%04X".format(it) } ?: "")),
-                error = status == FileSendStatus.FAILED || status == FileSendStatus.UNCONFIRMED)
+                error = status == FileSendStatus.FAILED || status == FileSendStatus.UNCONFIRMED,
+                patients = listOf(ru.medeng.dicomtool.data.logging.DicomLogPatient.from(file.patientName, file.patientId)))
             runCatching { progress(index, file, status, message) }.onFailure {
                 event(DicomLogCategory.SERVER_LIFECYCLE, "[SCU] Ошибка уведомления UI: ${it.message}", error = true)
             }

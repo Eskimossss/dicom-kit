@@ -235,8 +235,9 @@ fun ReceivedStudiesScreen(
 }
 
 
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
-private fun StudyListItemCard(
+internal fun StudyListItemCard(
     study: DicomStudyItem,
     isHighlighted: Boolean,
     onClick: () -> Unit,
@@ -299,54 +300,20 @@ private fun StudyListItemCard(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Строгий технический бейдж модальности и разрешения (без демонстрационной картинки)
-                DicomModalityResolutionBadge(
-                    modality = study.modality,
-                    columns = study.columns,
-                    rows = study.rows,
-                    bitsStored = study.bitsStored,
-                    modifier = Modifier
-                        .size(68.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(DicomViewerCanvasBlack)
-                )
-                Spacer(modifier = Modifier.width(12.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = study.patientName,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = TextPrimaryDark,
-                        softWrap = true
-                    )
-                    Text(
-                        text = "${study.modality} | ID: ${study.patientId} | ${study.columns}×${study.rows}",
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = TextSecondarySlate,
-                        softWrap = true
-                    )
-                    Text(
-                        text = study.studyDateFormatted,
-                        fontSize = 12.sp,
-                        color = TextSecondarySlate,
-                        softWrap = true
-                    )
-                    Text(
-                        text = "Study UID: ${study.studyInstanceUid}",
-                        fontSize = 11.sp,
-                        fontFamily = FontFamily.Monospace,
-                        color = TextMutedSlate,
-                        softWrap = true
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = "Серий: ${study.seriesCount}   Изображений: ${study.instancesCount}   (${formatSizeMb(study.totalBytes)})",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = TextPrimaryDark,
-                        softWrap = true
-                    )
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text(study.patientName, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = TextPrimaryDark,
+                        maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                    androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(study.modality, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        Text("ID: ${study.patientId}", fontSize = 13.sp)
+                        Text("${study.columns}×${study.rows}", fontSize = 13.sp)
+                    }
+                    Text(study.studyDateFormatted, fontSize = 13.sp, color = TextSecondarySlate)
+                    androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("Серий: ${study.seriesCount}", fontSize = 12.sp)
+                        Text("Изображений: ${study.instancesCount}", fontSize = 12.sp)
+                        Text(formatSizeMb(study.totalBytes), fontSize = 12.sp)
+                    }
                 }
                 IconButton(onClick = { confirmDelete = true }, modifier = Modifier.size(32.dp)) {
                     Icon(
@@ -511,7 +478,7 @@ fun DicomViewerAndTagsScreen(
         ru.medeng.dicomtool.ui.components.DicomViewerWorkspace(
             sourceKey = study.studyInstanceUid, diagnosticNoticeId = study.diagnosticNoticeId, metadata = listOf("Пациент" to study.patientName,
                 "ID пациента" to study.patientId, "Дата исследования" to study.studyDateFormatted,
-                "Описание исследования" to study.studyDescription), tags = tags, query = tagSearchQuery,
+                "Описание исследования" to study.studyDescription, "Study Instance UID" to study.studyInstanceUid), tags = tags, query = tagSearchQuery,
             renderState = renderState, zoom = zoom, pan = pan, inverted = inverted, ww = windowWidth, wl = windowCenter,
             frame = currentFrame, frames = totalFramesInInstance, instance = safeInstanceIdx, instances = instancesInActiveSeries,
             fullScreen = isFullScreen, initialTab = initialTab, encodingWarning = activeInstance?.encodingWarning ?: study.encodingWarning,
