@@ -1,6 +1,8 @@
 <# Run after installing the APKs built with -Pstage51Isolated=true. Emulator display/settings are restored. #>
 [CmdletBinding()]
-param([string]$Serial = 'emulator-5554', [string]$Adb = "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe")
+param([string]$Serial = 'emulator-5554', [string]$Adb = "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe",
+    [ValidateSet('Alpha3','Alpha4')][string]$Suite = 'Alpha3',
+    [ValidateSet('360-portrait','360-landscape','393-portrait','393-landscape','412-portrait','412-landscape','tablet-landscape','tablet-portrait')][string[]]$OnlyConfiguration)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 function Invoke-Adb([string[]]$Arguments) {
@@ -16,7 +18,10 @@ $oldDensity = [regex]::Match($density, 'Override density:\s*(\d+)').Groups[1].Va
 $settings = @(@('global','window_animation_scale'),@('global','transition_animation_scale'),@('global','animator_duration_scale'),@('secure','show_ime_with_hard_keyboard'))
 $previous = @{}
 foreach ($setting in $settings) { $previous[$setting[1]] = (Invoke-Adb @('shell','settings','get',$setting[0],$setting[1])).Trim() }
-$evidence = Join-Path $repo ('builds\alpha3-evidence\matrix-' + [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss'))
+$evidence = Join-Path $repo ("builds\$($Suite.ToLowerInvariant())-evidence\matrix-" + [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss'))
+$classes = 'ru.medeng.dicomtool.Alpha3AcceptanceUiTest,ru.medeng.dicomtool.Alpha3NavigationUiTest'
+$testCount = 9
+if ($Suite -eq 'Alpha4') { $classes += ',ru.medeng.dicomtool.Alpha4UxUiTest,ru.medeng.dicomtool.Alpha4AppAuditUiTest'; $testCount = 19 }
 New-Item -ItemType Directory $evidence -Force | Out-Null
 $configurations = @(
     @('360-portrait','720x1280','320'), @('360-landscape','1280x720','320'),
@@ -24,6 +29,7 @@ $configurations = @(
     @('412-portrait','824x1460','320'), @('412-landscape','1460x824','320'),
     @('tablet-landscape','1280x800','160'), @('tablet-portrait','800x1280','160')
 )
+if ($OnlyConfiguration) { $configurations = @($configurations | Where-Object { $_[0] -in $OnlyConfiguration }) }
 $results = @()
 try {
     foreach ($setting in $settings) {
@@ -36,14 +42,15 @@ try {
         Invoke-Adb @('shell','wm','density',$configuration[2]) | Out-Null
         Start-Sleep -Seconds 1
         $log = Invoke-Adb @('shell','am','instrument','-w','-r','-e','class',
-            'ru.medeng.dicomtool.Alpha3AcceptanceUiTest,ru.medeng.dicomtool.Alpha3NavigationUiTest',
+            $classes,
             'ru.medeng.dicomtool.storagesafetytest.test/androidx.test.runner.AndroidJUnitRunner')
         $log | Set-Content (Join-Path $evidence "$name.log") -Encoding UTF8
-        $passed = $log -match '(?m)^OK \(9 tests\)' -and $log -notmatch 'FAILURES!!!|Process crashed'
-        $results += [pscustomobject]@{Configuration=$name;Size=$configuration[1];Density=$configuration[2];Passed=$passed}
+        $passed = $log -match "(?m)^OK \($testCount tests\)" -and $log -notmatch 'FAILURES!!!|Process crashed'
+        $results += [pscustomobject]@{Configuration=$name;Size=$configuration[1];Density=$configuration[2];Tests=$testCount;Passed=$passed}
         $destination = Join-Path $evidence $name
         New-Item -ItemType Directory $destination -Force | Out-Null
         Invoke-Adb @('pull','/sdcard/Android/data/ru.medeng.dicomtool.storagesafetytest/files/alpha3-ui',$destination) | Out-Null
+        if ($Suite -eq 'Alpha4') { Invoke-Adb @('pull','/sdcard/Android/data/ru.medeng.dicomtool.storagesafetytest/files/alpha4-ui',$destination) | Out-Null }
         Write-Host "$name passed: $passed"
         $results | ConvertTo-Json | Set-Content (Join-Path $evidence 'results.json') -Encoding UTF8
     }

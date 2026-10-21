@@ -16,6 +16,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -112,6 +114,7 @@ import java.util.Locale
  * - Диалог подробностей тега с полным значением без обрезания, переносом строк и копированием кода и значения.
  * - Адаптивная верстка, устойчивая к длинным значениям и альбомной ориентации.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun DicomTagsBrowserComponent(
     tags: List<DicomTagEntry>,
@@ -220,7 +223,7 @@ fun DicomTagsBrowserComponent(
                     onClick = { isSearchExpanded = false },
                     modifier = Modifier
                         .padding(start = 4.dp)
-                        .size(36.dp)
+                        .size(48.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.Close,
@@ -232,17 +235,17 @@ fun DicomTagsBrowserComponent(
             }
         }
 
-        // 3. Компактная панель инструментов (Фильтры + Кнопка поиска)
-        Row(
+        // Tools wrap on phones instead of compressing the search action.
+        FlowRow(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 14.dp, vertical = 3.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            Row(
+            FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically
+                verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 FilterChip(
                     selected = onlyFilled,
@@ -276,7 +279,7 @@ fun DicomTagsBrowserComponent(
                         borderColor = if (onlyFilled) PrimaryBlue else CardBorderGray,
                         selectedBorderColor = PrimaryBlue
                     ),
-                    modifier = Modifier.height(30.dp)
+                    modifier = Modifier.heightIn(min = 48.dp)
                 )
 
                 if (showEncodingSelector && onEncodingOverrideChange != null) {
@@ -286,7 +289,7 @@ fun DicomTagsBrowserComponent(
                             shape = RoundedCornerShape(8.dp),
                             contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                             border = BorderStroke(1.dp, if (currentEncodingOverride != DicomEncodingOverride.AUTO) PrimaryBlue else CardBorderGray),
-                            modifier = Modifier.height(30.dp)
+                            modifier = Modifier.heightIn(min = 48.dp)
                         ) {
                             Icon(
                                 imageVector = Icons.Outlined.Translate,
@@ -364,7 +367,7 @@ fun DicomTagsBrowserComponent(
                     }
                     IconButton(
                         onClick = { isSearchExpanded = true },
-                        modifier = Modifier.size(32.dp)
+                        modifier = Modifier.size(48.dp)
                     ) {
                         Surface(
                             shape = RoundedCornerShape(6.dp),

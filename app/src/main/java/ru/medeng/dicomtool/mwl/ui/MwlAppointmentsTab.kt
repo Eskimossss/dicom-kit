@@ -6,6 +6,14 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.listSaver
 import ru.medeng.dicomtool.mwl.model.MwlStationProfile
+import ru.medeng.dicomtool.dicom.charset.DicomPersonName
+import ru.medeng.dicomtool.ui.components.*
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 
 import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
@@ -238,8 +246,8 @@ fun MwlAppointmentsTab(
         if (showPatients) {
             items(patients.filter { searchQuery.isBlank() || it.patientName.contains(searchQuery.trim(), true) || it.patientId.contains(searchQuery.trim(), true) }, key = { "patient:${it.id}" }) { patient ->
                 WhiteDiagnosticCard {
-                    Text(patient.patientName, fontWeight = FontWeight.Bold)
-                    Text("Patient ID: ${patient.patientId} · Назначений: ${studies.count { it.patientInternalId == patient.id }}")
+                    MwlPatientIdentity(patient)
+                    Text("Назначений: ${studies.count { it.patientInternalId == patient.id }}")
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         TextButton(onClick = { viewModel.openEditPatientDialog(patient) }) { Text("Редактировать пациента") }
                         TextButton(onClick = { viewModel.openNewStudyDialog(patient) }) { Text("Назначить исследование") }
@@ -439,7 +447,7 @@ internal fun StudyCardItem(study: MwlScheduledStudy, onEdit: () -> Unit, onDupli
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(study.modality, fontWeight = FontWeight.Bold, color = PrimaryBlue)
             if (study.isSynthetic) Text("ТЕСТ", color = SuccessGreen)
-            Text(study.patientName, fontWeight = FontWeight.Bold)
+            Text(DicomPersonName.display(study.patientName, false).ifEmpty { "ФИО не указано" }, fontWeight = FontWeight.Bold)
         }
         Text(study.requestedProcedureDescription.ifEmpty { study.spsDescription }, color = TextSecondarySlate)
         Text("ID: ${study.patientId} · ACC: ${study.accessionNumber}", fontSize = 12.sp)
@@ -452,23 +460,13 @@ internal fun StudyCardItem(study: MwlScheduledStudy, onEdit: () -> Unit, onDupli
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun PatientEditorDialog(patient: MwlPatient, onDismiss: () -> Unit, onSave: (MwlPatient) -> Unit) {
-    var name by rememberSaveable(patient.id) { mutableStateOf(patient.patientName) }
-    var id by rememberSaveable(patient.id) { mutableStateOf(patient.patientId) }
-    var birth by rememberSaveable(patient.id) { mutableStateOf(patient.patientBirthDate) }
-    var sex by rememberSaveable(patient.id) { mutableStateOf(patient.patientSex) }
-    MwlFormDialog(if (patient.patientName.isEmpty()) "Новый пациент" else "Редактирование пациента", onDismiss,
-        // Manual edits must never retain a synthetic provenance flag and enter the synthetic-only export.
-        onSave = { onSave(patient.copy(patientName = name.trim(), patientId = id.trim(), patientBirthDate = birth.trim(), patientSex = sex, isSynthetic = false)) }) {
-        OutlinedTextField(name, { name = it }, label = { Text("ФИО · PN: Фамилия^Имя^Отчество") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(id, { id = it }, label = { Text("Patient ID · LO, до 64 символов") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(birth, { birth = it.filter(Char::isDigit) }, label = { Text("Дата рождения YYYYMMDD (необязательно)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf("M" to "Муж (M)", "F" to "Жен (F)", "O" to "Другой (O)").forEach { (code, label) ->
-                FilterChip(selected = sex == code, onClick = { sex = code }, label = { Text(label) })
-            }
+internal fun MwlPatientIdentity(patient: MwlPatient) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(DicomPersonName.display(patient.patientName, false).ifEmpty { "ФИО не указано" }, fontWeight = FontWeight.Bold)
+        Text("Patient ID: ${patient.patientId}", style = MaterialTheme.typography.bodyMedium)
+        if (patient.isSynthetic) Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = MaterialTheme.shapes.small) {
+            Text("Тестовый", color = MaterialTheme.colorScheme.onPrimaryContainer, style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp))
         }
     }
 }
@@ -508,13 +506,13 @@ internal fun StudyEditorDialog(
                 spsStartTime = draft.spsStartTime.trim(), studyInstanceUid = draft.studyInstanceUid.trim())) }
         }) {
         Text("Пациент (обязательно)", fontWeight = FontWeight.Bold)
-        Text(patient?.let { "${it.patientName} · ${it.patientId}" } ?: "Пациент не выбран")
+        if (patient != null) MwlPatientIdentity(patient) else Text("Пациент не выбран")
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = { patientPicker = true }) { Text("Выбрать пациента") }
             TextButton(onClick = onNewPatient) { Text("Создать пациента") }
         }
         Text("Изменение пациента применяется только кнопкой «Сохранить».", fontSize = 12.sp)
-        Text("Профиль аппарата (поля можно изменить вручную)", fontWeight = FontWeight.Bold)
+        Text("Аппарат", fontWeight = FontWeight.Bold)
         stationProfiles.forEach { profile ->
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = { draft = profile.applyTo(draft); selectedStationId = profile.id }, modifier = Modifier.weight(1f)) {
@@ -525,29 +523,35 @@ internal fun StudyEditorDialog(
         }
         TextButton(onClick = { editingStation = MwlStationProfile(name = "", modality = draft.modality,
             scheduledStationAeTitle = draft.scheduledStationAeTitle, scheduledStationName = draft.scheduledStationName, location = draft.spsLocation) }) { Text("Новый профиль аппарата") }
-        OutlinedTextField(draft.modality, { draft = draft.copy(modality = it.uppercase(java.util.Locale.US)) }, label = { Text("Modality · CS, до 16 символов") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(draft.scheduledStationAeTitle, { draft = draft.copy(scheduledStationAeTitle = it) }, label = { Text("AE Title аппарата · AE, до 16 байт ASCII") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(draft.scheduledStationName, { draft = draft.copy(scheduledStationName = it) }, label = { Text("Название кабинета / станции · SH, до 16 символов") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(draft.spsLocation, { draft = draft.copy(spsLocation = it) }, label = { Text("Место проведения исследования · SH, до 16 символов") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(draft.requestedProcedureDescription, { draft = draft.copy(requestedProcedureDescription = it, spsDescription = it) }, label = { Text("Описание исследования · LO, до 64 символов") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(draft.requestedProcedureId, { draft = draft.copy(requestedProcedureId = it) }, label = { Text("Requested Procedure ID · SH, до 16 символов") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(draft.spsId, { draft = draft.copy(spsId = it) }, label = { Text("SPS ID · SH, до 16 символов") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(draft.accessionNumber, { draft = draft.copy(accessionNumber = it) }, label = { Text("Accession Number · SH, до 16 символов") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        MwlCalendarField("Дата назначения", draft.spsStartDate, { draft = draft.copy(spsStartDate = it) })
-        OutlinedTextField(draft.spsStartTime, { draft = draft.copy(spsStartTime = it) }, label = { Text("Время SPS · TM: HH[MM[SS[.FFFFFF]]]") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(draft.studyInstanceUid, { draft = draft.copy(studyInstanceUid = it.trim()) }, label = { Text("Study Instance UID") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        MwlModalityField(draft.modality, { draft = draft.copy(modality = it) })
+        DicomHelpField(draft.scheduledStationAeTitle, { draft = draft.copy(scheduledStationAeTitle = it) }, "AE Title аппарата", DicomFieldHelp.StationAe)
+        DicomHelpField(draft.scheduledStationName, { draft = draft.copy(scheduledStationName = it) }, "Название станции", DicomFieldHelp.StationName)
+        DicomHelpField(draft.spsLocation, { draft = draft.copy(spsLocation = it) }, "Место проведения", DicomFieldHelp.StepLocation)
+        DicomHelpField(draft.requestedProcedureDescription, { draft = draft.copy(requestedProcedureDescription = it, spsDescription = it) }, "Описание исследования", DicomFieldHelp.Description)
+        DicomHelpField(draft.requestedProcedureId, { draft = draft.copy(requestedProcedureId = it) }, "Requested Procedure ID", DicomFieldHelp.ProcedureId)
+        DicomHelpField(draft.spsId, { draft = draft.copy(spsId = it) }, "Scheduled Procedure Step ID", DicomFieldHelp.StepId)
+        DicomHelpField(draft.accessionNumber, { draft = draft.copy(accessionNumber = it) }, "Accession Number", DicomFieldHelp.Accession)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.weight(1f)) { MwlCalendarField("Дата назначения", draft.spsStartDate, { draft = draft.copy(spsStartDate = it) }) }
+            DicomHelpButton(DicomFieldHelp.StepDate)
+        }
+        DicomHelpField(draft.spsStartTime, { draft = draft.copy(spsStartTime = it) }, "Время начала этапа", DicomFieldHelp.StepTime)
+        DicomHelpField(draft.studyInstanceUid, { draft = draft.copy(studyInstanceUid = it) }, "Study Instance UID", DicomFieldHelp.StudyUid)
         TextButton(onClick = { draft = draft.copy(studyInstanceUid = MwlValidation.generateStudyInstanceUid()) }) { Text("Сгенерировать UID") }
     }
-    if (patientPicker) AlertDialog(onDismissRequest = { patientPicker = false }, title = { Text("Выбор пациента") }, text = {
-        Column {
-            OutlinedTextField(patientQuery, { patientQuery = it }, label = { Text("Поиск: Patient Name / Patient ID") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+    if (patientPicker) MwlFormDialog("Выбор пациента", onDismiss = { patientPicker = false }, onSave = { patientPicker = false }, saveLabel = "Закрыть") {
+            val pickerFocus = LocalFocusManager.current
+            val keyboard = LocalSoftwareKeyboardController.current
+            OutlinedTextField(patientQuery, { patientQuery = it }, label = { Text("Поиск: Patient Name / Patient ID") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions(onSearch = { pickerFocus.clearFocus(); keyboard?.hide() }))
             LazyColumn(Modifier.fillMaxWidth().heightIn(max = 280.dp)) {
                 items(patients.filter { patientQuery.isBlank() || it.patientName.contains(patientQuery.trim(), true) || it.patientId.contains(patientQuery.trim(), true) }, key = { it.id }) { p ->
-                    TextButton(onClick = { selectedId = p.id; patientPicker = false }, modifier = Modifier.fillMaxWidth()) { Text("${p.patientName} · ${p.patientId}") }
+                    Surface(onClick = { pickerFocus.clearFocus(); keyboard?.hide(); selectedId = p.id; patientPicker = false }, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), shape = MaterialTheme.shapes.medium) {
+                        Column(Modifier.padding(12.dp)) { MwlPatientIdentity(p) }
+                    }
                 }
             }
-        }
-    }, confirmButton = { TextButton(onClick = { patientPicker = false }) { Text("Закрыть") } })
+    }
     editingStation?.let { profile ->
         MwlStationEditor(profile, onDismiss = { editingStation = null }, onSave = { edited ->
             val result = onSaveStation(edited)

@@ -91,12 +91,13 @@ class Alpha3AcceptanceUiTest {
         compose.onNodeWithText("Сохранить").assertIsNotEnabled()
         compose.onNodeWithText("Выбрать пациента").performScrollTo().performClick()
         compose.onNodeWithText("Поиск: Patient Name / Patient ID").performTextInput(p.patientId)
-        compose.onNodeWithText("${p.patientName} · ${p.patientId}").performClick()
+        compose.onNodeWithText("Поиск: Patient Name / Patient ID").performImeAction()
+        compose.onNodeWithText("Patient ID: ${p.patientId}").performScrollTo().performClick()
         compose.onNodeWithText("Сохранить").assertIsEnabled()
         assertEquals(count, repo.getAllPatients().size)
         screenshot("patient-selected")
         compose.runOnIdle { vm.openEditPatientDialog(p) }
-        compose.onNodeWithText("ФИО · PN: Фамилия^Имя^Отчество").performTextReplacement("СИНТЕТИЧЕСКИЙ^РУЧНОЙ")
+        compose.onNodeWithText("Имя", substring = false).performTextReplacement("РУЧНОЙ")
         compose.onNode(hasText("Сохранить") and hasAnyAncestor(hasTestTag("mwl-form:Редактирование пациента"))).performClick()
         assertFalse(repo.getPatientById(p.id)!!.isSynthetic)
         assertFalse(repo.exportSyntheticJson().contains("СИНТЕТИЧЕСКИЙ^РУЧНОЙ"))
@@ -112,7 +113,7 @@ class Alpha3AcceptanceUiTest {
         compose.onNodeWithText("SYNTHETIC APPARATUS", substring = true).performScrollTo().performClick()
         compose.onNodeWithText("SYNTHETIC_CT").assertExists()
         compose.onNodeWithText("ROOM-TEST").assertExists()
-        compose.onNodeWithText("Место проведения исследования · SH, до 16 символов").performScrollTo().performTextReplacement(" MANUAL-ROOM ")
+        compose.onNodeWithText("Место проведения").performScrollTo().performTextReplacement(" MANUAL-ROOM ")
         screenshot("station-fields")
         compose.onNodeWithText("Сохранить").performClick()
         assertEquals("MANUAL-ROOM", saved.get().spsLocation)
@@ -123,18 +124,19 @@ class Alpha3AcceptanceUiTest {
         compose.setContent { DicomToolTheme { MwlAppointmentsTab(vm, false) } }
         compose.onNodeWithText("Назначение").performScrollTo().performClick()
         compose.onNodeWithText("Создать пациента").performScrollTo().performClick()
-        compose.onNodeWithText("ФИО · PN: Фамилия^Имя^Отчество").performTextInput("СИНТЕТИЧЕСКИЙ^НОВЫЙАЛЬФА3")
+        compose.onNodeWithText("Фамилия").performTextInput("СИНТЕТИЧЕСКИЙ")
+        compose.onNodeWithText("Имя", substring = false).performTextInput("НОВЫЙАЛЬФА3")
         compose.onNode(hasText("Сохранить") and hasAnyAncestor(hasTestTag("mwl-form:Новый пациент"))).performClick()
         val patient = repo.getAllPatients().single { it.patientName == "СИНТЕТИЧЕСКИЙ^НОВЫЙАЛЬФА3" }
         createdPatients += patient.id
-        compose.onNodeWithText("${patient.patientName} · ${patient.patientId}").assertExists()
+        compose.onNodeWithText("Patient ID: ${patient.patientId}").assertExists()
         compose.onNodeWithText("Сохранить").assertIsEnabled()
         compose.onNodeWithText("Отмена").performClick()
         assertTrue(repo.getStudiesForPatient(patient.id).isEmpty())
         compose.onNodeWithText("Пациенты (${repo.getAllPatients().size})").performScrollTo().performClick()
         compose.onNodeWithText("Поиск по ФИО, ID, Accession, SPS…").performTextInput(patient.patientId)
         compose.onNodeWithText("Редактировать пациента").performScrollTo().performClick()
-        compose.onNode(hasText(patient.patientName) and hasSetTextAction()).assertExists()
+        compose.onNode(hasText("СИНТЕТИЧЕСКИЙ") and hasSetTextAction()).assertExists()
         screenshot("patient-without-appointments")
     }
     @Test fun mwlJournalUsesInlineExpansionAndSafeCopyPreview() {

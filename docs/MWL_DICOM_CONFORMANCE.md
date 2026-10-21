@@ -1,6 +1,16 @@
-# DICOM Kit — MWL conformance notes, 1.5.0-alpha.3
+# DICOM Kit — MWL conformance notes, 1.5.0-alpha.4
 
 This describes the implemented subset and measured behavior; it is not a claim of certification on all modalities. See [audit fixes and evidence](STAGE_7_AUDIT_FIXES.md).
+
+## Alpha.4 patient-name and UI boundaries
+
+The local patientName remains the same raw DICOM PN string in the version-1 atomic snapshot. There is no migration or data rewrite on load. Three basic inputs represent family, given and middle name in that order, separated by `^`. Existing values with a fourth/fifth component, any `=` representation group or an ambiguous unseparated name containing spaces open in the raw editor. No automatic space-to-component conversion occurs. Merely opening, switching modes and saving an existing name retains its exact string, including empty/trailing components and whitespace. Explicit edits in the basic inputs form a new PN; explicit raw edits remain subject to the existing PN validation (up to three groups, five components per group and 64 characters per group). Lists use display-only PN formatting; raw values remain available in the editor and result details.
+
+Tests cover exact JSON/repository round trips, linked appointments and Patient ID `SYNTH-PAT-0001`, all five components/three groups, Cyrillic/Latin/mixed names, UTF-8 `ISO_IR 192` and Cyrillic `ISO_IR 144` DICOM encoding. The DICOM library removes insignificant outer space padding when decoding a wire PN; local storage does not. ISO_IR 144 cannot represent Japanese characters; the existing lossless charset safeguards are retained. Invalid historical entities are preserved for correction, with no silent truncation or automatic repair.
+
+Birth-date UI saves empty or Gregorian DA `YYYYMMDD`, uses UTC calendar-day conversion and rejects newly entered future dates. A pre-existing date is not silently cleared or rewritten by opening the patient editor; unchanged historical values still pass through the existing repository validation. Year and month can be selected directly; an exact DA input is also available.
+
+The Modality picker contains common standard Defined Terms from [PS3.3 C.7.3.1.1.1](https://dicom.nema.org/medical/dicom/current/output/chtml/part03/sect_C.7.3.html#sect_C.7.3.1.1.1). Manual codes retain the same CS validation. This picker does not declare or add SOP Class support. Context help uses the existing [PS3.5 VR definitions](https://dicom.nema.org/medical/dicom/current/output/chtml/part05/sect_6.2.html). The wire query, matching engine, charset negotiation and Dataset are unchanged. Result summaries show selected fields; details retain the raw PN, other model fields and the existing recursive Dataset inspector with Sequence/Items (its existing display depth limit is unchanged).
 
 ## Alpha.3 scheduling UI and persistence
 

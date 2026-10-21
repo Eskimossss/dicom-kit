@@ -78,7 +78,7 @@ fun DicomToolMainTopBar(
             )
             IconButton(
                 onClick = onOpenSettings,
-                modifier = Modifier.size(36.dp)
+                modifier = Modifier.size(48.dp)
             ) {
                 Icon(
                     imageVector = Icons.Outlined.Settings,

@@ -53,6 +53,11 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import ru.medeng.dicomtool.ui.components.*
+import ru.medeng.dicomtool.dicom.charset.DicomPersonName
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.platform.testTag
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -215,16 +220,16 @@ fun MwlScuTab(
             val dateError = filter.validateDateSelection() as? MwlValidation.Result.Invalid
             dateError?.let { Text(it.messageRu, color = ErrorRed) }
             MwlAdaptiveFields(first = {
-                OutlinedTextField(filter.modality, { viewModel.scuFilter.value = filter.copy(modality = it.uppercase(java.util.Locale.US)) }, label = { Text("Modality") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                DicomHelpField(filter.modality, { viewModel.scuFilter.value = filter.copy(modality = it.uppercase(java.util.Locale.US)) }, "Modality", DicomFieldHelp.Modality)
             }, second = {
-                OutlinedTextField(filter.scheduledStationAe, { viewModel.scuFilter.value = filter.copy(scheduledStationAe = it) }, label = { Text("AE Title аппарата") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                DicomHelpField(filter.scheduledStationAe, { viewModel.scuFilter.value = filter.copy(scheduledStationAe = it) }, "AE Title аппарата", DicomFieldHelp.StationAe)
             })
             MwlAdaptiveFields(first = {
                 OutlinedTextField(filter.patientName, { viewModel.scuFilter.value = filter.copy(patientName = it) }, label = { Text("ФИО пациента") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             }, second = {
-                OutlinedTextField(filter.patientId, { viewModel.scuFilter.value = filter.copy(patientId = it) }, label = { Text("Patient ID") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                DicomHelpField(filter.patientId, { viewModel.scuFilter.value = filter.copy(patientId = it) }, "Patient ID", DicomFieldHelp.PatientId)
             })
-            OutlinedTextField(filter.accessionNumber, { viewModel.scuFilter.value = filter.copy(accessionNumber = it) }, label = { Text("Accession Number") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            DicomHelpField(filter.accessionNumber, { viewModel.scuFilter.value = filter.copy(accessionNumber = it) }, "Accession Number", DicomFieldHelp.Accession)
             if (filter.isFilterEmpty()) Text("Запрос без фильтров может вернуть большой объём данных.", color = WarningAmber)
             Button(onClick = { viewModel.queryWorklist() }, enabled = !isRunning && dateError == null,
                 modifier = Modifier.fillMaxWidth()) {
@@ -235,11 +240,7 @@ fun MwlScuTab(
         }
         // Карточка 3: Результаты запроса
         WhiteDiagnosticCard {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            Column(modifier = Modifier.fillMaxWidth()) {
                 Text(
                     text = "Результаты Worklist (${results.size})",
                     fontSize = 15.sp,
@@ -300,234 +301,97 @@ fun MwlScuTab(
 }
 
 @Composable
-private fun MwlResultCardItem(
-    item: MwlQueryResultItem,
-    onClick: () -> Unit
-) {
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable { onClick() },
-        color = InputBackgroundGray,
-        shape = RoundedCornerShape(8.dp),
-        border = BorderStroke(1.dp, CardBorderGray)
-    ) {
-        Column(modifier = Modifier.padding(10.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Surface(
-                        color = PrimaryBlueLight,
-                        shape = RoundedCornerShape(4.dp),
-                        border = BorderStroke(1.dp, PrimaryBlue.copy(alpha = 0.5f))
-                    ) {
-                        Text(
-                            text = item.modality.ifEmpty { "OT" },
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = PrimaryBlue,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                        )
-                    }
+internal fun MwlResultCardItem(item: MwlQueryResultItem, onClick: () -> Unit) {
+    Surface(onClick = onClick, modifier = Modifier.fillMaxWidth().testTag("mwl-result:${item.id}"),
+        color = InputBackgroundGray, shape = RoundedCornerShape(8.dp), border = BorderStroke(1.dp, CardBorderGray)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(item.modality.ifEmpty { "OT" }, color = PrimaryBlue, fontWeight = FontWeight.Bold)
+            Text(DicomPersonName.display(item.patientName, false).ifEmpty { "ФИО не указано" },
+                fontWeight = FontWeight.Bold, color = TextPrimaryDark)
+            Text("Patient ID: ${item.patientId}", color = TextSecondarySlate)
+            Text(item.requestedProcedureDescription.ifEmpty { item.spsDescription.ifEmpty { "Без описания" } })
+            MwlAdaptiveFields(first = {
+                DetailItem("Дата и время", "${item.spsStartDate} ${item.spsStartTime}".trim())
+            }, second = {
+                DetailItem("Станция", listOf(item.scheduledStationName, item.scheduledStationAeTitle).filter { it.isNotEmpty() }.joinToString(" · "))
+            })
+            Text("Подробности и DICOM Dataset", color = PrimaryBlue, fontSize = 12.sp)
+        }
+    }
+}
 
-                    Text(
-                        text = item.patientName.ifEmpty { "ФИО не указано" },
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = TextPrimaryDark
-                    )
+@Composable
+internal fun ProfileEditorDialog(profile: MwlScuProfile, onDismiss: () -> Unit, onSave: (MwlScuProfile) -> Unit) {
+    var name by rememberSaveable(profile.id) { mutableStateOf(profile.name) }
+    var host by rememberSaveable(profile.id) { mutableStateOf(profile.host) }
+    var port by rememberSaveable(profile.id) { mutableStateOf(profile.port.toString()) }
+    var calledAet by rememberSaveable(profile.id) { mutableStateOf(profile.calledAet) }
+    var callingAet by rememberSaveable(profile.id) { mutableStateOf(profile.callingAet) }
+    MwlFormDialog(if (profile.name.isEmpty()) "Новый профиль MWL SCP" else "Редактирование профиля", onDismiss,
+        onSave = { onSave(profile.copy(name = name.trim(), host = host.trim(), port = port.toIntOrNull() ?: 11112,
+            calledAet = calledAet.trim(), callingAet = callingAet.trim())) }) {
+        OutlinedTextField(name, { name = it }, label = { Text("Название профиля") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        MwlAdaptiveFields(first = {
+            OutlinedTextField(host, { host = it }, label = { Text("IP / Hostname") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        }, second = {
+            OutlinedTextField(port, { port = it.filter(Char::isDigit) }, label = { Text("Порт") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        })
+        MwlAdaptiveFields(first = {
+            OutlinedTextField(calledAet, { calledAet = it.uppercase(java.util.Locale.US) }, label = { Text("Called AE Title") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        }, second = {
+            OutlinedTextField(callingAet, { callingAet = it.uppercase(java.util.Locale.US) }, label = { Text("Calling AE Title") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        })
+    }
+}
+
+@Composable
+internal fun MwlResultDetailDialog(item: MwlQueryResultItem, onDismiss: () -> Unit) {
+    var activeTab by rememberSaveable(item.id) { mutableIntStateOf(0) }
+    MwlFormDialog("Назначение Worklist", onDismiss, onSave = onDismiss, saveLabel = "Закрыть") {
+        TabRow(selectedTabIndex = activeTab) {
+            Tab(selected = activeTab == 0, onClick = { activeTab = 0 }, text = { Text("Назначение") })
+            Tab(selected = activeTab == 1, onClick = { activeTab = 1 }, text = { Text("DICOM Dataset") })
+        }
+        SelectionContainer {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (activeTab == 0) {
+                    DetailItem("ФИО пациента", DicomPersonName.display(item.patientName, false))
+                    DetailItem("Исходный Patient Name (PN)", item.patientName)
+                    DetailItem("Patient ID", item.patientId)
+                    DetailItem("Дата рождения", item.patientBirthDate)
+                    DetailItem("Пол", item.patientSex)
+                    DetailItem("Accession Number", item.accessionNumber)
+                    DetailItem("Модальность", item.modality)
+                    DetailItem("Study Instance UID", item.studyInstanceUid)
+                    DetailItem("Requested Procedure ID", item.requestedProcedureId)
+                    DetailItem("Описание процедуры", item.requestedProcedureDescription)
+                    DetailItem("SPS ID", item.spsId)
+                    DetailItem("Описание SPS", item.spsDescription)
+                    DetailItem("Дата и время SPS", "${item.spsStartDate} ${item.spsStartTime}")
+                    DetailItem("Station AE Title", item.scheduledStationAeTitle)
+                    DetailItem("Станция", item.scheduledStationName)
+                    DetailItem("Место проведения", item.spsLocation)
+                    DetailItem("Направивший врач", item.referringPhysicianName)
+                    DetailItem("Исполнитель", item.scheduledPerformingPhysician)
+                    DetailItem("Кодировка (0008,0005)", item.specificCharacterSet)
+                } else {
+                    val attrs = item.rawAttributes
+                    if (attrs != null) {
+                        for (line in ru.medeng.dicomtool.mwl.engine.MwlDatasetInspector.lines(attrs)) {
+                            Text(line, fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = TextPrimaryDark)
+                        }
+                    } else Text("Сырые DICOM-атрибуты недоступны")
                 }
-
-                Text(
-                    text = "ACC: ${item.accessionNumber}",
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
-                    color = TextSecondarySlate
-                )
-            }
-
-            Spacer(modifier = Modifier.height(4.dp))
-
-            Text(
-                text = item.requestedProcedureDescription.ifEmpty { item.spsDescription.ifEmpty { "Без описания" } },
-                fontSize = 12.sp,
-                color = TextSecondarySlate
-            )
-
-            Spacer(modifier = Modifier.height(6.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(
-                    text = "ID: ${item.patientId} · Пол: ${item.patientSex}",
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
-                    color = TextSecondarySlate
-                )
-                Text(
-                    text = "${item.spsStartDate} ${item.spsStartTime} · ${item.scheduledStationAeTitle}",
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
-                    color = TextSecondarySlate
-                )
             }
         }
     }
 }
 
 @Composable
-private fun ProfileEditorDialog(
-    profile: MwlScuProfile,
-    onDismiss: () -> Unit,
-    onSave: (MwlScuProfile) -> Unit
-) {
-    var name by remember { mutableStateOf(profile.name) }
-    var host by remember { mutableStateOf(profile.host) }
-    var port by remember { mutableStateOf(profile.port.toString()) }
-    var calledAet by remember { mutableStateOf(profile.calledAet) }
-    var callingAet by remember { mutableStateOf(profile.callingAet) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(if (profile.name.isEmpty()) "Новый профиль MWL SCP" else "Редактирование профиля") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Название профиля", fontSize = 11.sp, color = TextSecondarySlate)
-                OutlinedTextField(value = name, onValueChange = { name = it }, singleLine = true, modifier = Modifier.fillMaxWidth())
-
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Column(modifier = Modifier.weight(1.5f)) {
-                        Text("IP / Hostname", fontSize = 11.sp, color = TextSecondarySlate)
-                        OutlinedTextField(value = host, onValueChange = { host = it }, singleLine = true)
-                    }
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Порт", fontSize = 11.sp, color = TextSecondarySlate)
-                        OutlinedTextField(value = port, onValueChange = { port = it.filter { c -> c.isDigit() } }, singleLine = true)
-                    }
-                }
-
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Called AE Title", fontSize = 11.sp, color = TextSecondarySlate)
-                        OutlinedTextField(value = calledAet, onValueChange = { calledAet = it.uppercase() }, singleLine = true)
-                    }
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Calling AE Title", fontSize = 11.sp, color = TextSecondarySlate)
-                        OutlinedTextField(value = callingAet, onValueChange = { callingAet = it.uppercase() }, singleLine = true)
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            Button(onClick = {
-                onSave(
-                    profile.copy(
-                        name = name.trim(),
-                        host = host.trim(),
-                        port = port.toIntOrNull() ?: 11112,
-                        calledAet = calledAet.trim(),
-                        callingAet = callingAet.trim()
-                    )
-                )
-            }) {
-                Text("Сохранить")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Отмена") }
-        }
-    )
-}
-
-@Composable
-private fun MwlResultDetailDialog(
-    item: MwlQueryResultItem,
-    onDismiss: () -> Unit
-) {
-    var activeTab by remember { mutableIntStateOf(0) } // 0: Карточка, 1: Технические теги DICOM
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = {
-            Column {
-                Text("Назначение Worklist", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                Text("${item.modality} · ${item.patientName}", fontSize = 12.sp, color = TextSecondarySlate)
-            }
-        },
-        text = {
-            Column(modifier = Modifier.fillMaxWidth()) {
-                TabRow(selectedTabIndex = activeTab) {
-                    Tab(selected = activeTab == 0, onClick = { activeTab = 0 }, text = { Text("Назначение", fontSize = 12.sp) })
-                    Tab(selected = activeTab == 1, onClick = { activeTab = 1 }, text = { Text("DICOM Dataset", fontSize = 12.sp) })
-                }
-                Spacer(modifier = Modifier.height(10.dp))
-
-                if (activeTab == 0) {
-                    // Карточка клинических данных
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        DetailItem("ФИО пациента", item.patientName)
-                        DetailItem("Patient ID", item.patientId)
-                        DetailItem("Дата рождения", item.patientBirthDate)
-                        DetailItem("Пол", item.patientSex)
-                        DetailItem("Accession Number", item.accessionNumber)
-                        DetailItem("Модальность", item.modality)
-                        DetailItem("Study Instance UID", item.studyInstanceUid)
-                        DetailItem("Описание процедуры", item.requestedProcedureDescription)
-                        DetailItem("SPS ID", item.spsId)
-                        DetailItem("Дата и время SPS", "${item.spsStartDate} ${item.spsStartTime}")
-                        DetailItem("Station AE Title", item.scheduledStationAeTitle)
-                        DetailItem("Станция", item.scheduledStationName)
-                        DetailItem("Исполнитель", item.scheduledPerformingPhysician)
-                        DetailItem("Кодировка (0008,0005)", item.specificCharacterSet)
-                    }
-                } else {
-                    // Техническое представление DICOM Attributes
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(340.dp)
-                            .verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        val attrs = item.rawAttributes
-                        if (attrs != null) {
-                            for (line in ru.medeng.dicomtool.mwl.engine.MwlDatasetInspector.lines(attrs)) {
-                                Text(text = line, fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = TextPrimaryDark)
-                            }
-                        } else {
-                            Text("Сырые DICOM-атрибуты недоступны", fontSize = 12.sp, color = TextSecondarySlate)
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            Button(onClick = onDismiss) { Text("Закрыть") }
-        }
-    )
-}
-
-@Composable
 private fun DetailItem(label: String, value: String) {
     if (value.isBlank()) return
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        Text(text = label, fontSize = 11.sp, color = TextSecondarySlate)
-        Text(text = value, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = TextPrimaryDark)
+    Column(Modifier.fillMaxWidth()) {
+        Text(label, fontSize = 12.sp, color = TextSecondarySlate)
+        Text(value, fontWeight = FontWeight.Medium, color = TextPrimaryDark)
     }
 }

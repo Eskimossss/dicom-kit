@@ -59,7 +59,10 @@ class ArchiveStage56Test {
         try {
             val work = (1..30).map { n ->
                 val incoming = synthetic(File(temp.root, "incoming$n"), n)
-                executor.submit { assertTrue(repo.saveIncomingInstance(incoming, study, series, "$series.$n") is DicomSaveResult.Success) }
+                executor.submit {
+                    val result = repo.saveIncomingInstance(incoming, study, series, "$series.$n")
+                    assertTrue("Synthetic concurrent receive: $result", result is DicomSaveResult.Success)
+                }
             } + (1..5).map { executor.submit { repo.refreshFromDisk() } }
             work.forEach { it.get(15, TimeUnit.SECONDS) }
             assertEquals(30, repo.getTotalSavedFilesCount())
