@@ -13,7 +13,7 @@ class BuildMetadataAndAboutTest {
 
     @Test
     fun testVersionNamingAndCodeConstraints() {
-        // Проверка соответствия versionName схеме 1.5.0-alpha.4
+        // Проверка соответствия versionName текущей тестовой версии Worklist.
         assertEquals("1.5.0-alpha.5", BuildConfig.VERSION_NAME)
 
         // Version code должен быть строго больше максимального ранее использованного (10502)
