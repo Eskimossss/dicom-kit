@@ -2,6 +2,12 @@
 
 This describes the implemented subset and measured behavior; it is not a claim of certification on all modalities. See [audit fixes and evidence](STAGE_7_AUDIT_FIXES.md).
 
+## Alpha.5 publication and Storage interoperability
+
+This is a testing Pre-release, not stable or fully accepted MWL support. Primary manual testing on Xiaomi Pad 6 was reported complete by the user; the existing MWL acceptance matrix and physical-device performance comparison remain applicable. The publication retains the current Worklist SCP/SCU implementation.
+
+Storage SCP additionally accepts digit-and-dot Study/Series/SOP Instance UIDs of 1–64 characters with leading-zero components as an interoperability exception, logs the affected tag and preserves the literal UID, Dataset and Pixel Data. This does not declare those UIDs standard-conformant. Unsafe or missing identifiers fail; a command/Dataset SOP mismatch returns A900. Distinct literal UIDs remain separate, verified storage and collision protection are retained. See [Storage policy](../README.md) and [acceptance checks](ANDROID_ACCEPTANCE_TEST_PLAN.md). These changes do not alter MWL matching, UID generation, character-set negotiation or persistent snapshot formats.
+
 ## Final audit corrections (alpha.5)
 
 For MWL SPS Date/Time, the special continuous interval rule of [PS3.4 K.6, Table K.6-1](https://dicom.nema.org/medical/dicom/current/output/chtml/part04/sect_K.6.html) applies when both keys specify ranges. Endpoint syntax is checked independently, but their order is checked as combined date-time boundaries. Thus `20261021-20261022` / `230000-010000` includes `20261022 003000`. A descending standalone TM range and a descending combined interval on the same date remain invalid (A900), consistent with the standalone TM limits in [C.2.2.2.5](https://dicom.nema.org/medical/dicom/current/output/chtml/part04/sect_C.2.2.2.5.html). Open date boundaries remain unbounded; an omitted time at a finite date boundary retains the existing beginning/end-of-day behavior. Partial TM precision, local time interpretation and lack of timezone negotiation are unchanged. No rule for ordinary Query/Retrieve combined matching is newly negotiated or claimed.

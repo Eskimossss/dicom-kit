@@ -973,6 +973,7 @@ class DicomStorageScpServer(
 
             var payloadComplete = false
             var patients: List<ru.medeng.dicomtool.data.logging.DicomLogPatient> = emptyList()
+            val uidWarnings = mutableListOf<String>()
             try {
                 // 1. Потоковая запись DICOM Part 10 (File Meta Information + PDV поток) без чтения Pixel Data в ОЗУ
                 val fmi = asAssoc.createFileMetaInformation(iuid, cuid, tsuid)
@@ -997,9 +998,24 @@ class DicomStorageScpServer(
                     dis.readFileMetaInformation()
                     val headerAttrs = dis.readDatasetUntilPixelData()
                     patients = listOf(ru.medeng.dicomtool.data.logging.DicomLogPatient.from(headerAttrs))
-                    studyUid = headerAttrs.getString(Tag.StudyInstanceUID)?.takeIf { it.isNotBlank() } ?: "UNKNOWN_STUDY"
-                    seriesUid = headerAttrs.getString(Tag.SeriesInstanceUID)?.takeIf { it.isNotBlank() } ?: "UNKNOWN_SERIES"
-                    datasetSopUid = headerAttrs.getString(Tag.SOPInstanceUID)?.takeIf { it.isNotBlank() } ?: iuid
+                    fun requiredUid(tag: Int, label: String): String {
+                        val value = headerAttrs.getString(tag)?.takeIf { it.isNotBlank() }
+                            ?: throw DicomServiceException(Status.MissingAttributeValue, "Missing $label")
+                        try { ru.medeng.dicomtool.data.storage.StoragePaths.uid(value) }
+                        catch (e: IllegalArgumentException) {
+                            throw DicomServiceException(Status.ProcessingFailure, "Invalid $label: $value")
+                        }
+                        if (ru.medeng.dicomtool.data.storage.StoragePaths.hasLeadingZero(value)) {
+                            uidWarnings.add("$label: non-conformant UID (leading zero), preserved verbatim: $value")
+                        }
+                        return value
+                    }
+                    studyUid = requiredUid(Tag.StudyInstanceUID, "Study Instance UID (0020,000D)")
+                    seriesUid = requiredUid(Tag.SeriesInstanceUID, "Series Instance UID (0020,000E)")
+                    datasetSopUid = requiredUid(Tag.SOPInstanceUID, "SOP Instance UID (0008,0018)")
+                    if (datasetSopUid != iuid || headerAttrs.getString(Tag.SOPClassUID) != cuid) {
+                        throw DicomServiceException(Status.IdentifierDoesNotMatchSOPClass, "Command/dataset SOP identifiers differ")
+                    }
                 }
 
                 // 3. Сохранение файла через репозиторий хранилища (Internal или SAF)
@@ -1025,7 +1041,7 @@ class DicomStorageScpServer(
                                 "Status: 0x0000 (Success) | Время: ${String.format(Locale.US, "%.3f s", elapsedSec)}",
                                 "SOP Instance UID: $datasetSopUid",
                                 saveResult.disposition.label
-                            ),
+                            ) + uidWarnings.map { "Предупреждение UID: $it" },
                             technicalDetails = mapOf(
                                 "Association ID" to assocId,
                                 "DIMSE Command" to "8001H (C-STORE-RSP)",
@@ -1042,7 +1058,7 @@ class DicomStorageScpServer(
                                 "Duplicate Policy" to saveResult.duplicateActionNote,
                                 "Storage Disposition" to saveResult.disposition.name,
                                 "Storage Result" to "VERIFIED"
-                            ),
+                            ) + if (uidWarnings.isEmpty()) emptyMap() else mapOf("UID Warning" to uidWarnings.joinToString("\n")),
                             sessionUid = sessionUid, patients = patients
                         )
                     }
@@ -1068,7 +1084,7 @@ class DicomStorageScpServer(
                                 "SOP Instance UID" to datasetSopUid,
                                 "Duration" to String.format(Locale.US, "%.4f s", elapsedSec),
                                 "Reason" to saveResult.errorReason
-                            ),
+                            ) + if (uidWarnings.isEmpty()) emptyMap() else mapOf("UID Warning" to uidWarnings.joinToString("\n")),
                             isError = true,
                             sessionUid = sessionUid, patients = patients
                         )
@@ -1098,7 +1114,7 @@ class DicomStorageScpServer(
                         "Duration" to String.format(Locale.US, "%.4f s", elapsedSec),
                         "Exception" to "${e.javaClass.name}: ${e.message}",
                         "Storage Result" to "FAILED"
-                    ),
+                    ) + if (uidWarnings.isEmpty()) emptyMap() else mapOf("UID Warning" to uidWarnings.joinToString("\n")),
                     isError = true,
                     sessionUid = sessionUid, patients = patients
                 )
