@@ -117,7 +117,7 @@ class ViewerSafetyInstrumentedTest {
         }
         val uri = source(ds).first; val model = vm()
         val original = context.contentResolver.openInputStream(uri)!!.use { it.readBytes() }
-        compose.onNodeWithContentDescription("Теги и просмотр", useUnmergedTree = true).performClick()
+        compose.onNodeWithTag("main-tab:TAGS").performClick()
         compose.runOnIdle { model.loadExternalDicomFile(uri) }; await { ready(model, uri) }
         val warning = model.externalFileSummary.value!!.encodingWarning
         assertFalse(warning.isNullOrEmpty())
@@ -145,7 +145,7 @@ class ViewerSafetyInstrumentedTest {
             while (true) { val n = input.read(buffer); if (n < 0) break; digest.update(buffer, 0, n) }; digest.digest()
         }
         val original = hash()
-        compose.onNodeWithContentDescription("Теги и просмотр", useUnmergedTree = true).performClick()
+        compose.onNodeWithTag("main-tab:TAGS").performClick()
         compose.runOnIdle { model.loadExternalDicomFile(uri) }; await { ready(model, uri) }
         val before = (model.viewerRenderState.value as DicomViewerRenderState.Ready).bitmap
         val beforePixel = before.getPixel(0,0) and 255
@@ -205,7 +205,7 @@ class ViewerSafetyInstrumentedTest {
         }).first
         val original = context.contentResolver.openInputStream(uri)!!.use { it.readBytes() }
         val model = vm()
-        compose.onNodeWithText("Теги и просмотр").performClick()
+        compose.onNodeWithTag("main-tab:TAGS").performClick()
         compose.runOnIdle { model.loadExternalDicomFile(uri) }; await { ready(model, uri) }
         compose.onNodeWithText("Просмотр и WW/WL").performClick()
         compose.runOnIdle { model.setWindowWidthLevel(20000, 10000); model.setViewerFullScreen(true) }
@@ -304,7 +304,7 @@ class ViewerSafetyInstrumentedTest {
     @Test fun externalFullscreenUsesSharedViewportAndReturnsToSameObject() {
         val model = vm(); val uri = source(dataset("SYNTHETIC^FULLSCREEN")).first
         compose.runOnIdle { model.loadExternalDicomFile(uri) }; await { ready(model, uri) }
-        compose.onNodeWithContentDescription("Теги и просмотр", useUnmergedTree = true).performClick()
+        compose.onNodeWithTag("main-tab:TAGS").performClick()
         compose.onNodeWithText("Просмотр и WW/WL", useUnmergedTree = true).performClick()
         compose.onNodeWithContentDescription("DICOM изображение").assertExists()
         compose.onNodeWithContentDescription("На весь экран").performClick()
@@ -367,7 +367,7 @@ class ViewerSafetyInstrumentedTest {
         val ds = dataset("SYNTHETIC^COPY").apply { setString(0x00110010, VR.LO, "SYNTHETIC"); setString(0x00111001, VR.LO, "PRIVATE SYNTHETIC VALUE") }
         val model = vm(); val uri = source(ds).first
         compose.runOnIdle { model.loadExternalDicomFile(uri) }; await { ready(model, uri) }
-        compose.onNodeWithContentDescription("Теги и просмотр", useUnmergedTree = true).performClick()
+        compose.onNodeWithTag("main-tab:TAGS").performClick()
         compose.onNodeWithText("DICOM-теги").performClick()
         compose.runOnIdle { model.updateExternalTagSearchQuery("PRIVATE SYNTHETIC") }
         compose.onNodeWithText("PRIVATE SYNTHETIC VALUE", substring = true).performClick()

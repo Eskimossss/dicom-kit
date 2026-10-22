@@ -37,6 +37,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -237,6 +238,7 @@ fun DicomToolAppRoot(
                             MainBottomTab.entries.forEach { tab ->
                                 val isSelected = currentTab == tab
                                 NavigationBarItem(
+                                    modifier = Modifier.testTag("main-tab:${tab.name}"),
                                     selected = isSelected,
                                     onClick = {
                                         currentTab = tab
