@@ -41,6 +41,9 @@ val buildTimestamp: String = SimpleDateFormat("yyyy-MM-dd HH:mm:ss 'UTC'", Local
     timeZone = TimeZone.getTimeZone("UTC")
 }.format(Date())
 
+// Opt-in local performance comparison. Never participates in the normal release build.
+val journalPerfReleaseEnabled = providers.gradleProperty("journalPerfRelease").orNull == "true"
+
 android {
     namespace = "ru.medeng.dicomtool"
     compileSdk = 35
@@ -109,6 +112,15 @@ android {
                 signingConfig = releaseSigning
             }
         }
+        if (journalPerfReleaseEnabled) {
+            create("journalPerfRelease") {
+                initWith(getByName("release"))
+                isDebuggable = false
+                applicationIdSuffix = ".journalperf"
+                signingConfig = signingConfigs.getByName("debug")
+                matchingFallbacks += "release"
+            }
+        }
     }
 
     compileOptions {
@@ -139,7 +151,8 @@ android {
 // Public fingerprint verified against the preserved Dicom-Kit-v1.3.1.apk.
 // A different key requires an explicit signing/migration decision, never an automatic fallback.
 val releaseCertificateSha256 = "4690b671b00bdda65c9740a27dbd2250dc8ccbdd95797e112c3c4763aa6c1a8d"
-listOf("debug", "release").forEach { variant ->
+(listOf("debug", "release") + if (journalPerfReleaseEnabled) listOf("journalPerfRelease") else emptyList()).forEach { variant ->
+    val isJournalPerf = variant == "journalPerfRelease"
     val capitalized = variant.replaceFirstChar { it.uppercaseChar() }
     val assetDirectory = layout.buildDirectory.dir("generated/apkMetadata/$variant/assets")
     android.sourceSets.getByName(variant).assets.srcDir(assetDirectory)
@@ -147,7 +160,8 @@ listOf("debug", "release").forEach { variant ->
         outputs.dir(assetDirectory)
         outputs.upToDateWhen { false }
         doLast {
-            val signing = android.signingConfigs.getByName(variant)
+            val signing = if (isJournalPerf) android.buildTypes.getByName(variant).signingConfig!!
+                else android.signingConfigs.getByName(variant)
             val certificate = try {
                 val store = signing.storeFile ?: error("missing store")
                 require(store.isFile && !signing.storePassword.isNullOrBlank() &&
@@ -167,7 +181,8 @@ listOf("debug", "release").forEach { variant ->
                 throw GradleException("$capitalized signing unavailable or certificate mismatch. Check ignored keystore.properties / signing environment and existing key. No key is created or replaced; expected release certificate: $releaseCertificateSha256")
             }
             val metadata = linkedMapOf(
-                "applicationId" to android.defaultConfig.applicationId,
+                "applicationId" to android.defaultConfig.applicationId +
+                    (android.buildTypes.getByName(variant).applicationIdSuffix ?: ""),
                 "versionName" to android.defaultConfig.versionName,
                 "versionCode" to android.defaultConfig.versionCode,
                 "buildType" to variant,
@@ -185,10 +200,14 @@ listOf("debug", "release").forEach { variant ->
     }
     // AGP creates the standard debug keystore in validateSigningDebug on a fresh machine.
     // That task already depends on preDebugBuild, so avoid a dependency cycle here.
-    if (variant == "debug") {
-        metadataTask.configure { dependsOn("validateSigningDebug") }
+    if (variant == "debug" || isJournalPerf) {
+        metadataTask.configure { dependsOn("validateSigning$capitalized") }
     }
-    tasks.matching { it.name == if (variant == "debug") "mergeDebugAssets" else "preReleaseBuild" }.configureEach {
+    tasks.matching { it.name == if (variant == "debug" || isJournalPerf) "merge${capitalized}Assets" else "preReleaseBuild" }.configureEach {
+        dependsOn(metadataTask)
+    }
+    // Generated assets are also inputs to lint models and analysis for each variant.
+    tasks.matching { it.name.contains(capitalized) && it.name.contains("lint", ignoreCase = true) }.configureEach {
         dependsOn(metadataTask)
     }
 }
