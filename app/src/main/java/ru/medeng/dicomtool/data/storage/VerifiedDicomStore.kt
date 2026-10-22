@@ -114,11 +114,13 @@ internal class DocumentOwnership(private val file: File) {
 }
 
 internal object StoragePaths {
+    /** Storage safety is separate from PS3.5 conformity. Keep digit/dot identifiers verbatim:
+     *  1.03 and 1.3 must never share a path. No separators, controls or empty components. */
     fun uid(value: String): String {
-        require(value.length in 1..64 && value.matches(Regex("[0-9]+(\\.[0-9]+)*")) &&
-            value.split('.').none { it.length > 1 && it.startsWith('0') }) { "Invalid DICOM UID: $value" }
+        require(value.length in 1..64 && value.matches(Regex("[0-9]+(\\.[0-9]+)*"))) { "Invalid DICOM UID: $value" }
         return value
     }
+    fun hasLeadingZero(value: String): Boolean = value.split('.').any { it.length > 1 && it.startsWith('0') }
     fun contained(root: File, file: File): File {
         val base = root.canonicalFile.toPath()
         val candidate = file.canonicalFile

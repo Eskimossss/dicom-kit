@@ -39,6 +39,8 @@ class ScpLifecycleStage55Test {
             callingAET = "SYNTHETIC"; calledAET = "STAGE55"
             addPresentationContext(PresentationContext(1, UID.Verification, UID.ImplicitVRLittleEndian))
             addPresentationContext(PresentationContext(3, UID.SecondaryCaptureImageStorage, UID.ExplicitVRLittleEndian))
+            addPresentationContext(PresentationContext(5, UID.DigitalMammographyXRayImageStorageForPresentation, UID.ExplicitVRLittleEndian))
+            addPresentationContext(PresentationContext(7, UID.DigitalXRayImageStorageForPresentation, UID.ExplicitVRLittleEndian))
         }
         return ae.connect(local, remote, rq).also { clients.add(it) }
     }
@@ -63,7 +65,7 @@ class ScpLifecycleStage55Test {
         setBytes(Tag.PixelData, VR.OB, byteArrayOf(12, 34))
     }
     private fun store(a: Association, ds: Attributes = data()): Int {
-        val rsp = a.cstore(UID.SecondaryCaptureImageStorage, ds.getString(Tag.SOPInstanceUID), 0,
+        val rsp = a.cstore(ds.getString(Tag.SOPClassUID), ds.getString(Tag.SOPInstanceUID), 0,
             DataWriterAdapter(ds), UID.ExplicitVRLittleEndian)
         assertTrue(rsp.next()); return rsp.command.getInt(Tag.Status, -1)
     }
@@ -71,6 +73,94 @@ class ScpLifecycleStage55Test {
         clients.forEach { runCatching { it.socket.close() } }
         server.stopServer(); exec.shutdownNow(); sched.shutdownNow(); logger.shutdown()
         root.deleteRecursively()
+    }
+    @Test fun mgLeadingZeroUidsRemainDistinctAndPreserveDatasetAndPixels() {
+        start(); val a = connect()
+        val nonstandard = "1.2.238.03.127.0.2907.20261022090340"
+        val standard = nonstandard.replace(".03.", ".3.")
+        for (uid in listOf(nonstandard, standard)) {
+            val ds = data().apply {
+                setString(Tag.SOPClassUID, VR.UI, UID.DigitalMammographyXRayImageStorageForPresentation)
+                setString(Tag.StudyInstanceUID, VR.UI, "$uid.1")
+                setString(Tag.SeriesInstanceUID, VR.UI, "$uid.2")
+                setString(Tag.SOPInstanceUID, VR.UI, uid)
+            }
+            assertEquals(Status.Success, store(a, ds))
+            assertEquals(Status.Success, store(a, ds)) // Real retransmission, default repository deduplication.
+            val file = File(repo.storageRootDir, "$uid.1/$uid.2/$uid.dcm")
+            org.dcm4che3.io.DicomInputStream(file).use { input ->
+                val fmi = input.readFileMetaInformation()
+                assertEquals(uid, fmi.getString(Tag.MediaStorageSOPInstanceUID))
+                assertEquals(ds, input.readDataset())
+            }
+        }
+        assertEquals(2, repo.getTotalSavedFilesCount())
+        assertTrue(logger.logsFlow.value.any { it.technicalDetails["UID Warning"]?.contains("(0020,000D)") == true })
+        echo(a)
+    }
+    @Test fun commandDatasetSopMismatchFailsAndRetainsCompletePayload() {
+        start(); val a = connect()
+        val rsp = a.cstore(UID.SecondaryCaptureImageStorage, "1.2.826.0.1.55.999", 0,
+            DataWriterAdapter(data()), UID.ExplicitVRLittleEndian)
+        assertTrue(rsp.next())
+        assertEquals(Status.IdentifierDoesNotMatchSOPClass, rsp.command.getInt(Tag.Status, -1))
+        assertEquals(0, repo.getTotalSavedFilesCount())
+        assertEquals(1, File(repo.storageRootDir, ".incoming_tmp").listFiles()!!.size)
+        echo(a)
+    }
+    @Test fun dcmtkStorescuAcceptsSyntheticMgWithLeadingZeroWithoutChangingDataset() {
+        val storescu = File("C:/DCMTK/bin/storescu.exe")
+        Assume.assumeTrue("DCMTK storescu unavailable", storescu.isFile)
+        start()
+        val uid = "1.2.238.03.127.0.2907.20261022090340"
+        val ds = data().apply {
+            setString(Tag.SOPClassUID, VR.UI, UID.DigitalMammographyXRayImageStorageForPresentation)
+            setString(Tag.StudyInstanceUID, VR.UI, "$uid.1")
+            setString(Tag.SeriesInstanceUID, VR.UI, "$uid.2")
+            setString(Tag.SOPInstanceUID, VR.UI, uid)
+        }
+        val source = File(root, "synthetic-mg.dcm")
+        org.dcm4che3.io.DicomOutputStream(source).use {
+            it.writeDataset(ds.createFileMetaInformation(UID.ExplicitVRLittleEndian), ds)
+        }
+        val output = File(root, "storescu.log")
+        val process = ProcessBuilder(storescu.path, "-v", "-xe", "-aec", "STAGE55", "-aet", "SYNTHETIC",
+            "127.0.0.1", port.toString(), source.path).redirectErrorStream(true).redirectOutput(output).start()
+        try {
+            assertTrue("storescu timeout", process.waitFor(15, TimeUnit.SECONDS))
+            val log = output.readText()
+            println("DCMTK storescu: $log")
+            assertEquals(log, 0, process.exitValue())
+            assertTrue(log, log.contains("Success"))
+            val file = File(repo.storageRootDir, "$uid.1/$uid.2/$uid.dcm")
+            org.dcm4che3.io.DicomInputStream(file).use {
+                assertEquals(uid, it.readFileMetaInformation().getString(Tag.MediaStorageSOPInstanceUID))
+                assertEquals(ds, it.readDataset())
+            }
+        } finally { if (process.isAlive) process.destroyForcibly() }
+    }
+    @Test fun standardDxAndMgAreAccepted() {
+        start(); val a = connect()
+        for (cuid in listOf(UID.DigitalXRayImageStorageForPresentation, UID.DigitalMammographyXRayImageStorageForPresentation)) {
+            assertEquals(Status.Success, store(a, data().apply { setString(Tag.SOPClassUID, VR.UI, cuid) }))
+        }
+        assertEquals(2, repo.getTotalSavedFilesCount())
+        echo(a)
+    }
+    @Test fun missingOrUnsafeDatasetIdentifiersNeverReturnSuccess() {
+        start(); val a = connect()
+        for (tag in listOf(Tag.StudyInstanceUID, Tag.SeriesInstanceUID, Tag.SOPInstanceUID)) {
+            // Keep a command SOP UID even when the dataset omits it.
+            val ds = data().apply { remove(tag) }
+            val rsp = a.cstore(UID.SecondaryCaptureImageStorage, "1.2.826.0.1.55.3", 0,
+                DataWriterAdapter(ds), UID.ExplicitVRLittleEndian)
+            assertTrue(rsp.next()); assertEquals(Status.MissingAttributeValue, rsp.command.getInt(Tag.Status, -1))
+        }
+        for (uid in listOf("1..2", "1/2", "1.2.", "1.A.2", "1.\u0001.2")) {
+            assertEquals(uid, Status.ProcessingFailure, store(a, data().apply { setString(Tag.StudyInstanceUID, VR.UI, uid) }))
+        }
+        assertEquals(0, repo.getTotalSavedFilesCount())
+        echo(a)
     }
     @Test fun nodeHistorySurvivesDisconnectUpdatesTimeAndResetsOnRestart() {
         start(); val first = connect(); echo(first); first.release()
@@ -221,13 +311,16 @@ class ScpLifecycleStage55Test {
             override fun saveIncomingInstance(tempIncomingFile: File, studyInstanceUid: String, seriesInstanceUid: String, sopInstanceUid: String) =
                 DicomSaveResult.Failure("Synthetic disk full", isOutOfSpace = true)
         }, logger)
-        start(); val a = connect(); assertEquals(Status.OutOfResources, store(a))
+        start(); val a = connect(); assertEquals(Status.OutOfResources, store(a, data().apply {
+            setString(Tag.StudyInstanceUID, VR.UI, "1.02.840.55")
+        }))
         a.release(); await { server.state.value.activeConnectionsCount == 0 }
         assertEquals(1, File(repo.storageRootDir, ".incoming_tmp").listFiles()!!.size)
         val rsp = logger.logsFlow.value.single { it.category == DicomLogCategory.C_STORE_RSP }
         assertEquals("0xA700", rsp.technicalDetails["DICOM Status"])
         assertTrue(rsp.isError)
         assertFalse(logger.logsFlow.value.any { it.technicalDetails["DICOM Status"]?.startsWith("0x0110") == true })
+        assertTrue(logger.logsFlow.value.any { it.technicalDetails["UID Warning"]?.contains("(0020,000D)") == true })
     }
     @Test fun stoppingDuringStorageWaitsForActualCleanupAndKeepsPayload() {
         val entered = CountDownLatch(1); val finish = CountDownLatch(1)

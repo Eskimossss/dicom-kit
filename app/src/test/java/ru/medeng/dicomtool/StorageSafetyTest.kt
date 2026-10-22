@@ -177,13 +177,27 @@ class StorageSafetyTest {
     }
     @Test fun unsafeUidsAndPathsRejectedWithoutChangingSource() {
         val access = MemoryAccess()
-        for (uid in listOf("..", ".", "", "1/../../x", "1\\2", "1..2", "01.2", "1.02", "1.2 ", "1.")) {
+        for (uid in listOf("..", ".", "", "1/../../x", "1\\2", "1..2", "1.A", "1\u00002", "1.2 ", "1.", "1".repeat(65))) {
             var removed = false
             assertTrue(engine(access).save(source(dicom()) { removed = true; true }, uid, series, sop) is DicomSaveResult.Failure)
             assertFalse(removed)
         }
         assertTrue(access.files().isEmpty())
         assertThrows(IllegalArgumentException::class.java) { StoragePaths.contained(temp.root, File(temp.root, "../outside.dcm")) }
+    }
+    @Test fun leadingZeroStoragePreservesBytesAndDoesNotCollideWithStandardUid() {
+        for (access in listOf(MemoryAccess(), FileStorageAccess(temp.newFolder("leading-zero")))) {
+            val store = engine(access)
+            val original = dicom()
+            for (uid in listOf("1.03", "1.3", "01.2", "1.02")) {
+                val saved = store.save(source(original), uid, uid, uid) as DicomSaveResult.Success
+                val node = access.children(access.children(access.root).single { it.name == uid }).single()
+                assertArrayEquals(original, access.read(access.children(node).single()).readBytes())
+                val retry = store.save(source(original), uid, uid, uid) as DicomSaveResult.Success
+                assertEquals(saved.destinationDescription, retry.destinationDescription)
+            }
+            assertEquals(4, access.children(access.root).count { it.directory })
+        }
     }
     @Test fun parallelSameUidDifferentObjectsAllSurvive() {
         val access = MemoryAccess(); val store = engine(access)
