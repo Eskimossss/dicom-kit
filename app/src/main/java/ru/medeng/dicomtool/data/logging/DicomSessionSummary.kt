@@ -863,7 +863,7 @@ fun DicomSessionSummary.matches(
     }
 
     return events.any { e ->
-        e.title.lowercase(Locale.US).contains(q) ||
+        DicomEventPresentation.present(e).contains(q) || e.title.lowercase(Locale.US).contains(q) ||
             e.category.name.lowercase(Locale.US).contains(q) ||
             e.summaryLines.any { it.lowercase(Locale.US).contains(q) } ||
             e.technicalDetails.any { (k, v) ->
@@ -931,6 +931,8 @@ fun DicomLogEntry.matches(
     }
 
     if (summaryLines.any { it.lowercase(Locale.US).contains(q) }) return true
+
+    if (DicomEventPresentation.present(this).contains(q)) return true
 
     return technicalDetails.any { (k, v) ->
         k.lowercase(Locale.US).contains(q) || v.lowercase(Locale.US).contains(q)

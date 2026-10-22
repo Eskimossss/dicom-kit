@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -75,6 +76,7 @@ import kotlinx.coroutines.Dispatchers
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -107,6 +109,9 @@ import ru.medeng.dicomtool.ui.theme.SuccessGreen
 import ru.medeng.dicomtool.ui.theme.TextPrimaryDark
 import ru.medeng.dicomtool.ui.theme.TextSecondarySlate
 import ru.medeng.dicomtool.ui.theme.WarningAmber
+import ru.medeng.dicomtool.R
+import ru.medeng.dicomtool.data.logging.DicomEventPresentation
+import ru.medeng.dicomtool.data.logging.EventOutcome
 
 /**
  * Экран «Журнал DICOM» (Этап 4.3.2):
@@ -210,13 +215,7 @@ fun DicomLogScreen(
             Toast.makeText(context, if (safe) "Техническая сводка скопирована" else "Полный текст скопирован; возможны персональные данные", Toast.LENGTH_SHORT).show()
         })
 
-    if (showLoggerDetails) AlertDialog(onDismissRequest = { showLoggerDetails = false }, containerColor = CardSurfaceWhite,
-        title = { Text("Состояние журнала", color = TextPrimaryDark) }, text = {
-            Text("Состояние: ${loggerHealth.state}\nПринято: ${loggerHealth.accepted}; записано: ${loggerHealth.persisted}; в очереди: ${loggerHealth.queueDepth}\n" +
-                "${loggerHealth.warning}\nОшибки чтения: ${loggerHealth.readFailures}; отклонено после остановки: ${loggerHealth.rejectedAfterStop}; управляющих команд отклонено: ${loggerHealth.controlRejected}, ошибок: ${loggerHealth.controlFailures}, тайм-аутов: ${loggerHealth.controlTimeouts}\n" +
-                "Незавершённая ротация: ${loggerHealth.rotationPending}\nПоследняя ошибка (может содержать персональные данные): ${loggerHealth.lastError ?: "нет"}\nПри аварийном завершении сохранение очереди не гарантируется.",
-                color = TextSecondarySlate, modifier = Modifier.verticalScroll(rememberScrollState()))
-        }, confirmButton = { TextButton(onClick = { showLoggerDetails = false }) { Text("Закрыть") } })
+    if (showLoggerDetails) LoggerHealthDialog(loggerHealth, onDismiss = { showLoggerDetails = false })
 
     Column(
         modifier = Modifier
@@ -484,7 +483,9 @@ fun DicomLogScreen(
             } else {
                 LazyColumn(
                     state = listState,
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(5.dp)
                 ) {
                     items(logs, key = { it.id }) { entry ->
                         val isExpanded = expandedLogIds.contains(entry.id)
@@ -496,7 +497,6 @@ fun DicomLogScreen(
                                 copyEvent = entry
                             }
                         )
-                        HorizontalDivider(color = CardBorderGray.copy(alpha = 0.5f), thickness = 0.5.dp)
                     }
                 }
             }
@@ -1054,32 +1054,62 @@ private fun TimelineEventItem(
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun DicomDetailedLogRow(entry: DicomLogEntry, isExpanded: Boolean, onToggleExpand: () -> Unit, onCopyEvent: () -> Unit) {
-    Column(Modifier.fillMaxWidth().clickable(onClick = onToggleExpand).padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(entry.timestampFormatted, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-            Text(entry.direction.code, color = PrimaryBlue, fontSize = 11.sp)
-            Text(entry.technicalDetails["Роль"] ?: if (entry.associationId.startsWith("SCU")) "SCU" else "SCP", fontSize = 11.sp)
-            Text(entry.category.name, fontSize = 11.sp)
-            Text(entry.associationId, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-        }
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
-            Text(entry.title, fontWeight = FontWeight.SemiBold, color = if (entry.isError) ErrorRed else TextPrimaryDark,
-                modifier = Modifier.weight(1f))
-            IconButton(onClick = onCopyEvent) { Icon(Icons.Default.ContentCopy, "Копировать событие", tint = TextSecondarySlate) }
-            Icon(if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                if (isExpanded) "Свернуть событие" else "Раскрыть событие", tint = TextSecondarySlate)
-        }
-        entry.summaryLines.forEach { Text(it, fontSize = 12.sp, color = TextSecondarySlate) }
-        if (isExpanded) {
-            val recommendation = remember(entry) { DicomDiagnosticHandbook.analyzeEntry(entry) }
-            recommendation?.let { DiagnosticRecommendationCard(it) }
-            Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = InputBackgroundGray)) {
-                SelectionContainer {
-                    Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        entry.technicalDetails.forEach { (key, value) ->
-                            Column {
-                                Text("$key:", fontSize = 12.sp, color = TextSecondarySlate)
-                                Text(value, fontSize = 12.sp, fontFamily = FontFamily.Monospace, softWrap = true)
+    val presentation = remember(entry) { DicomEventPresentation.present(entry) }
+    val accent = when (presentation.outcome) {
+        EventOutcome.ERROR -> ErrorRed
+        EventOutcome.WARNING, EventOutcome.SUCCESS_WITH_WARNINGS -> WarningAmber
+        EventOutcome.SUCCESS -> SuccessGreen
+        EventOutcome.INFO -> PrimaryBlue
+    }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(10.dp),
+        colors = CardDefaults.cardColors(containerColor = CardSurfaceWhite),
+        border = BorderStroke(1.dp, accent.copy(alpha = 0.65f))
+    ) {
+        Column(Modifier.fillMaxWidth().clickable(onClick = onToggleExpand).padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(presentation.outcome.labelRu, color = accent, fontSize = 11.sp, lineHeight = 14.sp, fontWeight = FontWeight.SemiBold)
+                Text(entry.timestampFormatted, fontSize = 11.sp, lineHeight = 14.sp, fontFamily = FontFamily.Monospace)
+                Text(entry.direction.code, color = PrimaryBlue, fontSize = 11.sp, lineHeight = 14.sp)
+                Text(entry.technicalDetails["Роль"] ?: if (entry.associationId.startsWith("SCU")) "SCU" else "SCP", fontSize = 11.sp, lineHeight = 14.sp)
+                Text(entry.category.name, fontSize = 11.sp, lineHeight = 14.sp)
+                Text(entry.associationId, fontSize = 11.sp, lineHeight = 14.sp, fontFamily = FontFamily.Monospace)
+            }
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(presentation.title, fontSize = 14.sp, lineHeight = 18.sp, fontWeight = FontWeight.SemiBold,
+                        color = if (presentation.outcome == EventOutcome.ERROR) ErrorRed else TextPrimaryDark)
+                    // Full summaries and source text remain available when expanded, never ellipsized.
+                    val summary = if (isExpanded) presentation.summary else presentation.summary.take(2)
+                    summary.forEach { Text(it, fontSize = 12.sp, lineHeight = 16.sp, color = TextSecondarySlate) }
+                }
+                IconButton(onClick = onCopyEvent, modifier = Modifier.size(48.dp)) {
+                    Icon(Icons.Default.ContentCopy, stringResource(R.string.journal_copy_event), tint = TextSecondarySlate)
+                }
+                IconButton(onClick = onToggleExpand, modifier = Modifier.size(48.dp)) {
+                    Icon(if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                        stringResource(if (isExpanded) R.string.journal_collapse_event else R.string.journal_expand_event), tint = TextSecondarySlate)
+                }
+            }
+            if (isExpanded) {
+                val recommendation = remember(entry) { DicomDiagnosticHandbook.analyzeEntry(entry) }
+                recommendation?.let { DiagnosticRecommendationCard(it) }
+                Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = InputBackgroundGray)) {
+                    SelectionContainer {
+                        Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            presentation.details.forEach { (key, value) ->
+                                Column {
+                                    Text("$key:", fontSize = 12.sp, lineHeight = 16.sp, color = TextSecondarySlate)
+                                    Text(value, fontSize = 12.sp, lineHeight = 16.sp, fontFamily = FontFamily.Monospace, softWrap = true)
+                                }
+                            }
+                            HorizontalDivider(color = CardBorderGray)
+                            Text(stringResource(R.string.journal_original_text), fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.SemiBold)
+                            Text(entry.title, fontSize = 12.sp, lineHeight = 16.sp, fontFamily = FontFamily.Monospace)
+                            entry.summaryLines.forEach { Text(it, fontSize = 12.sp, lineHeight = 16.sp, fontFamily = FontFamily.Monospace) }
+                            entry.technicalDetails.forEach { (key, value) ->
+                                Text("$key: $value", fontSize = 12.sp, lineHeight = 16.sp, fontFamily = FontFamily.Monospace, softWrap = true)
                             }
                         }
                     }
