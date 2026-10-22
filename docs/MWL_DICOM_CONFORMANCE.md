@@ -1,6 +1,18 @@
-# DICOM Kit — MWL conformance notes, 1.5.0-alpha.4
+# DICOM Kit — MWL conformance notes, 1.5.0-alpha.5
 
 This describes the implemented subset and measured behavior; it is not a claim of certification on all modalities. See [audit fixes and evidence](STAGE_7_AUDIT_FIXES.md).
+
+## Final audit corrections (alpha.5)
+
+For MWL SPS Date/Time, the special continuous interval rule of [PS3.4 K.6, Table K.6-1](https://dicom.nema.org/medical/dicom/current/output/chtml/part04/sect_K.6.html) applies when both keys specify ranges. Endpoint syntax is checked independently, but their order is checked as combined date-time boundaries. Thus `20261021-20261022` / `230000-010000` includes `20261022 003000`. A descending standalone TM range and a descending combined interval on the same date remain invalid (A900), consistent with the standalone TM limits in [C.2.2.2.5](https://dicom.nema.org/medical/dicom/current/output/chtml/part04/sect_C.2.2.2.5.html). Open date boundaries remain unbounded; an omitted time at a finite date boundary retains the existing beginning/end-of-day behavior. Partial TM precision, local time interpretation and lack of timezone negotiation are unchanged. No rule for ordinary Query/Retrieve combined matching is newly negotiated or claimed.
+
+Accession Number (0008,0050) is a single SH value. Validation rejects a literal value separator (`\`), control characters and more than 16 characters before persistence or Dataset construction; empty Type 2 values and valid Unicode identifiers are retained without rewriting. DICOM code-extension escapes are produced by the charset encoder, not accepted as literal control characters in an entered identifier. Invalid historical values are not automatically truncated or rewritten; they must be corrected before transmission.
+
+Patient records own PN and Patient ID. Import synchronizes those denormalized fields in every linked appointment, including appointments absent from the import, in the same atomic snapshot commit. Other appointment fields and omitted appointments remain intact; a failed replacement leaves both published memory and disk unchanged.
+
+Version-1 snapshot loading validates the version, required array types and record identities before publishing either collection. An unreadable/incomplete/unsupported snapshot is never substituted with empty arrays or legacy files. The original files and last readable collections remain intact; writes and JSON export are blocked, the Worklist UI displays a diagnostic, and an SCP snapshot attempt fails (C000), never an empty successful worklist. An explicitly restored valid file can be reloaded; no automatic repair, deletion or destructive migration is performed. Clinical validation of historical fields is still deferred to edit/transmission rather than rewriting records on load.
+
+SCU profile write I/O failures leave the committed profile, selection and editor draft intact. The UI displays the error and permits retry. These changes do not change applicationId, signing, Storage behavior, the network whitelist or character-set policy. Test evidence, initial failures and remaining acceptance limits are recorded in the existing [acceptance document](STAGE_7_WORKLIST_ACCEPTANCE.md).
 
 ## Alpha.4 patient-name and UI boundaries
 

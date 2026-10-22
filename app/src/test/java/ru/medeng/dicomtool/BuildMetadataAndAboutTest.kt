@@ -14,14 +14,14 @@ class BuildMetadataAndAboutTest {
     @Test
     fun testVersionNamingAndCodeConstraints() {
         // Проверка соответствия versionName схеме 1.5.0-alpha.4
-        assertEquals("1.5.0-alpha.4", BuildConfig.VERSION_NAME)
+        assertEquals("1.5.0-alpha.5", BuildConfig.VERSION_NAME)
 
         // Version code должен быть строго больше максимального ранее использованного (10502)
         assertTrue(
             "Version code (${BuildConfig.VERSION_CODE}) должен быть строго больше 10502",
             BuildConfig.VERSION_CODE > 10502
         )
-        assertEquals(10504, BuildConfig.VERSION_CODE)
+        assertEquals(10505, BuildConfig.VERSION_CODE)
     }
 
     @Test
