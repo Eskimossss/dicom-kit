@@ -112,6 +112,7 @@ fun MwlScuTab(
     val statusMsg by viewModel.queryStatusMessage.collectAsStateWithLifecycle()
 
     val showProfileDialog by viewModel.showProfileDialog.collectAsStateWithLifecycle()
+    val profileSaveError by viewModel.profileSaveError.collectAsStateWithLifecycle()
     val editingProfile by viewModel.editingProfile.collectAsStateWithLifecycle()
     val profileToDelete by viewModel.profileToDelete.collectAsStateWithLifecycle()
     val selectedDetail by viewModel.selectedResultDetail.collectAsStateWithLifecycle()
@@ -281,6 +282,7 @@ fun MwlScuTab(
     if (showProfileDialog && editingProfile != null) {
         ProfileEditorDialog(
             profile = editingProfile!!,
+            errorText = profileSaveError,
             onDismiss = { viewModel.showProfileDialog.value = false },
             onSave = { p ->
                 val res = viewModel.saveProfile(p)
@@ -321,7 +323,7 @@ internal fun MwlResultCardItem(item: MwlQueryResultItem, onClick: () -> Unit) {
 }
 
 @Composable
-internal fun ProfileEditorDialog(profile: MwlScuProfile, onDismiss: () -> Unit, onSave: (MwlScuProfile) -> Unit) {
+internal fun ProfileEditorDialog(profile: MwlScuProfile, onDismiss: () -> Unit, onSave: (MwlScuProfile) -> Unit, errorText: String? = null) {
     var name by rememberSaveable(profile.id) { mutableStateOf(profile.name) }
     var host by rememberSaveable(profile.id) { mutableStateOf(profile.host) }
     var port by rememberSaveable(profile.id) { mutableStateOf(profile.port.toString()) }
@@ -330,6 +332,7 @@ internal fun ProfileEditorDialog(profile: MwlScuProfile, onDismiss: () -> Unit, 
     MwlFormDialog(if (profile.name.isEmpty()) "Новый профиль MWL SCP" else "Редактирование профиля", onDismiss,
         onSave = { onSave(profile.copy(name = name.trim(), host = host.trim(), port = port.toIntOrNull() ?: 11112,
             calledAet = calledAet.trim(), callingAet = callingAet.trim())) }) {
+        errorText?.let { Text(it, color = ErrorRed) }
         OutlinedTextField(name, { name = it }, label = { Text("Название профиля") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         MwlAdaptiveFields(first = {
             OutlinedTextField(host, { host = it }, label = { Text("IP / Hostname") }, singleLine = true, modifier = Modifier.fillMaxWidth())

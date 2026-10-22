@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Tab
@@ -27,6 +28,7 @@ import ru.medeng.dicomtool.ui.theme.CardSurfaceWhite
 import ru.medeng.dicomtool.ui.theme.PrimaryBlue
 import ru.medeng.dicomtool.ui.theme.TextPrimaryDark
 import ru.medeng.dicomtool.ui.theme.TextSecondarySlate
+import ru.medeng.dicomtool.ui.theme.ErrorRed
 
 @Composable
 fun WorklistMainScreen(
@@ -35,6 +37,7 @@ fun WorklistMainScreen(
     modifier: Modifier = Modifier
 ) {
     val selectedTab by viewModel.selectedTab.collectAsStateWithLifecycle()
+    val readError by viewModel.repositoryReadError.collectAsStateWithLifecycle()
     val tabs = MwlSubTab.entries
 
     Column(
@@ -104,11 +107,12 @@ fun WorklistMainScreen(
             }
         }
 
+        readError?.let { Text(it, color = ErrorRed, modifier = Modifier.fillMaxWidth().padding(12.dp)) }
         // Содержимое выбранной подвкладки
         Box(modifier = Modifier.weight(1f)) {
             when (selectedTab) {
                 MwlSubTab.SCP_SERVER -> MwlScpTab(viewModel = viewModel, isExpandedWidth = isExpandedWidth)
-                MwlSubTab.APPOINTMENTS -> MwlAppointmentsTab(viewModel = viewModel, isExpandedWidth = isExpandedWidth)
+                MwlSubTab.APPOINTMENTS -> if (readError == null) MwlAppointmentsTab(viewModel = viewModel, isExpandedWidth = isExpandedWidth)
                 MwlSubTab.SCU_CLIENT -> MwlScuTab(viewModel = viewModel, isExpandedWidth = isExpandedWidth)
                 MwlSubTab.JOURNAL -> MwlJournalTab(viewModel = viewModel, isExpandedWidth = isExpandedWidth)
             }

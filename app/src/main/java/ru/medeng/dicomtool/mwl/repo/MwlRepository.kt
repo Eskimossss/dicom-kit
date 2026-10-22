@@ -1,12 +1,19 @@
 package ru.medeng.dicomtool.mwl.repo
 
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import ru.medeng.dicomtool.mwl.model.MwlPatient
 import ru.medeng.dicomtool.mwl.model.MwlScheduledStudy
 
 data class MwlSnapshot(val patients: List<MwlPatient>, val studies: List<MwlScheduledStudy>)
 
 interface MwlRepository {
+    /** A failed load preserves the last readable state but blocks snapshots/commits. */
+    val readErrorFlow: StateFlow<String?> get() = NO_READ_ERROR
+    companion object {
+        private val NO_READ_ERROR = MutableStateFlow<String?>(null).asStateFlow()
+    }
     fun snapshot(): MwlSnapshot = MwlSnapshot(getAllPatients(), getAllStudies())
     val patientsFlow: StateFlow<List<MwlPatient>>
     val studiesFlow: StateFlow<List<MwlScheduledStudy>>

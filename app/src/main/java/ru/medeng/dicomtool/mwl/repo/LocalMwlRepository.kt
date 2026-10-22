@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import ru.medeng.dicomtool.mwl.model.*
 import java.io.File
+import java.io.IOException
 import java.util.UUID
 
 /** Patients and appointments are committed together in one atomically replaced snapshot. */
@@ -21,11 +22,13 @@ class LocalMwlRepository(
     override val patientsFlow: StateFlow<List<MwlPatient>> = _patientsFlow.asStateFlow()
     private val _studiesFlow = MutableStateFlow<List<MwlScheduledStudy>>(emptyList())
     override val studiesFlow: StateFlow<List<MwlScheduledStudy>> = _studiesFlow.asStateFlow()
+    private val _readErrorFlow = MutableStateFlow<String?>(null)
+    override val readErrorFlow: StateFlow<String?> = _readErrorFlow.asStateFlow()
 
     init {
         check(rootDir.isDirectory || rootDir.mkdirs()) { "Cannot create MWL data directory" }
         reload()
-        if (autoSeedIfEmpty && !snapshotFile.exists() && !patientsFile.exists() && !studiesFile.exists()) {
+        if (autoSeedIfEmpty && _readErrorFlow.value == null && !snapshotFile.exists() && !patientsFile.exists() && !studiesFile.exists()) {
             addSyntheticBatch(SyntheticMwlGenerator.createMultipleSyntheticPatients(count = 5))
         }
     }
@@ -72,25 +75,43 @@ class LocalMwlRepository(
         )
     }
     override fun reload() = synchronized(lock) {
-        val root = if (snapshotFile.exists()) MwlJsonUtils.parseObject(snapshotFile.readText(Charsets.UTF_8)) else null
-        val ps = root?.get("patients") ?: if (patientsFile.exists()) patientsFile.readText(Charsets.UTF_8) else "[]"
-        val ss = root?.get("studies") ?: if (studiesFile.exists()) studiesFile.readText(Charsets.UTF_8) else "[]"
-        val patients = MwlJsonUtils.parseArrayOfObjects(ps).map(::patient)
-        val studies = MwlJsonUtils.parseArrayOfObjects(ss).map(::study)
-        _patientsFlow.value = patients
-        _studiesFlow.value = studies
+        try {
+            val root = if (snapshotFile.exists()) MwlJsonUtils.parseRawObject(snapshotFile.readText(Charsets.UTF_8)).also {
+                require(it["version"] == "1") { "Unsupported MWL snapshot version" }
+                require(it.containsKey("patients") && it.containsKey("studies")) { "Incomplete MWL snapshot" }
+            } else null
+            // A present snapshot never falls back to obsolete legacy files, even if it is damaged.
+            val ps = root?.getValue("patients") ?: if (patientsFile.exists()) patientsFile.readText(Charsets.UTF_8) else "[]"
+            val ss = root?.getValue("studies") ?: if (studiesFile.exists()) studiesFile.readText(Charsets.UTF_8) else "[]"
+            val patientRecords = MwlJsonUtils.parseArrayOfObjects(ps)
+            val studyRecords = MwlJsonUtils.parseArrayOfObjects(ss)
+            if (root != null) {
+                require(patientRecords.all { !it["id"].isNullOrBlank() } && studyRecords.all { !it["id"].isNullOrBlank() && it.containsKey("patientInternalId") }) { "Invalid MWL snapshot identity" }
+            }
+            val patients = patientRecords.map(::patient)
+            val studies = studyRecords.map(::study)
+            require(patients.map { it.id }.distinct().size == patients.size && studies.map { it.id }.distinct().size == studies.size) { "Duplicate MWL snapshot identifiers" }
+            _patientsFlow.value = patients
+            _studiesFlow.value = studies
+            _readErrorFlow.value = null
+        } catch (_: Exception) {
+            // Do not publish half a load, reseed, migrate, or overwrite a file we could not read.
+            _readErrorFlow.value = "Не удалось прочитать базу MWL: файл повреждён, недоступен или имеет неподдерживаемую структуру/версию. Исходные файлы сохранены; запись, экспорт и выдача назначений заблокированы до восстановления базы."
+        }
     }
+    private fun requireReadable() { _readErrorFlow.value?.let { throw IOException(it) } }
     private fun json(ps: List<MwlPatient>, ss: List<MwlScheduledStudy>) =
         "{\"version\":1,\"patients\":" + encodePatients(ps) + ",\"studies\":" + encodeStudies(ss) + "}"
 
     private fun commit(ps: List<MwlPatient>, ss: List<MwlScheduledStudy>) {
+        requireReadable()
         snapshotWriter(snapshotFile, json(ps, ss))
         _patientsFlow.value = ps.toList()
         _studiesFlow.value = ss.toList()
         // Legacy files are obsolete only after the complete snapshot has been committed.
         listOf(patientsFile, studiesFile).forEach { if (it.isFile) it.delete() }
     }
-    override fun snapshot(): MwlSnapshot = synchronized(lock) { MwlSnapshot(_patientsFlow.value, _studiesFlow.value) }
+    override fun snapshot(): MwlSnapshot = synchronized(lock) { requireReadable(); MwlSnapshot(_patientsFlow.value, _studiesFlow.value) }
     override fun getAllPatients() = _patientsFlow.value
     override fun getPatientById(id: String) = getAllPatients().firstOrNull { it.id == id }
     override fun getAllStudies() = _studiesFlow.value
@@ -135,6 +156,7 @@ class LocalMwlRepository(
     }
     override fun clearAll() = synchronized(lock) { commit(emptyList(), emptyList()) }
     override fun exportSyntheticJson(): String = synchronized(lock) {
+        requireReadable()
         val ps = getAllPatients().filter { it.isSynthetic }
         val ids = ps.map { it.id }.toSet()
         json(ps, getAllStudies().filter { it.isSynthetic && it.patientInternalId in ids })
@@ -154,7 +176,15 @@ class LocalMwlRepository(
         val mergedStudies = getAllStudies().associateBy { it.id }.toMutableMap()
         require(ps.none { p -> mergedPatients[p.id]?.isSynthetic == false } && ss.none { s -> mergedStudies[s.id]?.isSynthetic == false }) { "Import cannot replace real records" }
         ps.forEach { mergedPatients[it.id] = it }; ss.forEach { mergedStudies[it.id] = it }
-        commit(mergedPatients.values.toList(), mergedStudies.values.toList()); ss.size
+        // Patient records own PN/Patient ID; appointment copies serve cards/search/export.
+        // Refresh even appointments absent from the incoming batch, in the same disk commit.
+        val consistentStudies = mergedStudies.values.map { study ->
+            if (study.patientInternalId in ids) {
+                val patient = mergedPatients.getValue(study.patientInternalId)
+                study.copy(patientName = patient.patientName, patientId = patient.patientId)
+            } else study
+        }
+        commit(mergedPatients.values.toList(), consistentStudies); ss.size
     }
     private fun encodePatients(list: List<MwlPatient>): String {
         val sb = StringBuilder()

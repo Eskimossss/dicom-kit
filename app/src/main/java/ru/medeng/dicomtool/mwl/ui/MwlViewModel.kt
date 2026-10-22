@@ -24,6 +24,7 @@ import ru.medeng.dicomtool.mwl.model.MwlValidation
 import ru.medeng.dicomtool.mwl.model.SyntheticMwlGenerator
 import ru.medeng.dicomtool.mwl.scp.MwlScpForegroundService
 import ru.medeng.dicomtool.mwl.scp.MwlScpState
+import java.io.IOException
 
 enum class MwlSubTab(val titleRu: String) {
     SCP_SERVER("Сервер (SCP)"),
@@ -43,6 +44,7 @@ class MwlViewModel(application: Application) : AndroidViewModel(application) {
     val scpState: StateFlow<MwlScpState> = scpServer.state
     val patients: StateFlow<List<MwlPatient>> = repository.patientsFlow
     val studies: StateFlow<List<MwlScheduledStudy>> = repository.studiesFlow
+    val repositoryReadError = repository.readErrorFlow
     private val stationRepository = MwlRuntimeRegistry.getStationProfiles(application)
     val stationProfiles = stationRepository.profilesFlow
     val stationProfileReadError = stationRepository.readError
@@ -101,6 +103,7 @@ class MwlViewModel(application: Application) : AndroidViewModel(application) {
 
     val editingProfile = MutableStateFlow<MwlScuProfile?>(null)
     val showProfileDialog = MutableStateFlow(false)
+    val profileSaveError = MutableStateFlow<String?>(null)
     val profileToDelete = MutableStateFlow<MwlScuProfile?>(null)
 
     val showExportReportDialog = MutableStateFlow(false)
@@ -324,6 +327,7 @@ class MwlViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openNewProfileDialog() {
+        profileSaveError.value = null
         editingProfile.value = MwlScuProfile(
             name = "Новый MWL сервер",
             host = "192.168.1.100",
@@ -335,11 +339,13 @@ class MwlViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openEditProfileDialog(profile: MwlScuProfile) {
+        profileSaveError.value = null
         editingProfile.value = profile
         showProfileDialog.value = true
     }
 
     fun saveProfile(profile: MwlScuProfile): MwlValidation.Result {
+        profileSaveError.value = null
         if (profile.name.isBlank()) return MwlValidation.Result.Invalid("name", "Название профиля не может быть пустым")
         if (profile.host.isBlank()) return MwlValidation.Result.Invalid("host", "Хост/IP адрес не может быть пустым")
         val portCheck = DicomValidationUtils.validateScpPort(profile.port)
@@ -349,7 +355,11 @@ class MwlViewModel(application: Application) : AndroidViewModel(application) {
         val callingCheck = MwlValidation.validateAeTitle(profile.callingAet, "callingAet")
         if (callingCheck is MwlValidation.Result.Invalid) return callingCheck
 
-        val saved = profileRepository.saveProfile(profile)
+        val saved = try { profileRepository.saveProfile(profile) } catch (_: IOException) {
+            val message = "Не удалось сохранить профиль MWL SCU. Прежние настройки сохранены; проверьте доступное место и повторите попытку."
+            profileSaveError.value = message
+            return MwlValidation.Result.Invalid("storage", message)
+        }
         _selectedProfile.value = saved
         showProfileDialog.value = false
         editingProfile.value = null

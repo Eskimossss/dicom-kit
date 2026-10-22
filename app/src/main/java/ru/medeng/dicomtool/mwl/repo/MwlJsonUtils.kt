@@ -70,6 +70,10 @@ object MwlJsonUtils {
     fun parseObject(json: String): Map<String, String> = Reader(json).let { r ->
         val result = r.obj(); r.end(); result
     }
+    /** Preserve JSON types at a versioned snapshot's boundary (an array is not a quoted array). */
+    fun parseRawObject(json: String): Map<String, String> = Reader(json).let { r ->
+        val result = r.obj(decodeStrings = false); r.end(); result
+    }
     fun parseArrayOfObjects(json: String): List<Map<String, String>> = Reader(json).let { r ->
         val result = r.array().map { parseObject(it) }; r.end(); result
     }
@@ -109,12 +113,12 @@ object MwlJsonUtils {
             }
             return text.substring(start, i)
         }
-        fun obj(): Map<String, String> {
+        fun obj(decodeStrings: Boolean = true): Map<String, String> {
             require(++depth <= 64); take('{'); val result = linkedMapOf<String, String>()
             if (!at('}')) do {
                 val key = string(); take(':'); val raw = value()
                 require(!result.containsKey(key)) { "Duplicate JSON key" }
-                result[key] = if (raw.startsWith('"')) unescape(raw.substring(1, raw.length - 1)) else raw
+                result[key] = if (decodeStrings && raw.startsWith('"')) unescape(raw.substring(1, raw.length - 1)) else raw
                 if (!at(',')) break
                 take(',')
             } while (true)
