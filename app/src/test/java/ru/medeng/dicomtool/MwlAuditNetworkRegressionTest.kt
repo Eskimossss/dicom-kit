@@ -222,4 +222,71 @@ class MwlAuditNetworkRegressionTest {
         server.stopServer()
         ServerSocket(port).close()
     }
+
+    @Test fun alpha5_dcmtkChecksOvernightOrdinaryOpenAndInvalidRangesThroughTheScp() {
+        val executable = File("C:\\DCMTK\\bin\\findscu.exe")
+        Assume.assumeTrue("DCMTK is unavailable", executable.isFile)
+        val study = repo.getAllStudies().single()
+        repo.saveStudy(study.copy(spsStartDate = "20261022", spsStartTime = "003000"))
+        val (_, port) = start()
+        val cases = listOf(
+            Triple("20261021-20261022", "230000-010000", true),
+            Triple("20261021-20261023", "090000-170000", true),
+            Triple("-20261022", "-010000", true),
+            Triple("20261021-", "230000-", true),
+            Triple("20261022-20261022", "230000-010000", false),
+            Triple("", "230000-010000", false),
+            Triple("20260230-20260301", "230000-010000", false),
+            Triple("20261021-20261022", "250000-010000", false))
+        cases.forEachIndexed { index, (dates, times, valid) ->
+            val output = File(dir, "alpha5-range-$index.txt")
+            val process = ProcessBuilder(executable.path, "-v", "-W", "-ta", "3", "-td", "3", "-aec", "AUDIT_SCP",
+                "-k", "0010,0020", "-k", "0040,0100[0].0040,0002=$dates", "-k", "0040,0100[0].0040,0003=$times",
+                "127.0.0.1", port.toString()).redirectErrorStream(true).redirectOutput(output).start()
+            try {
+                assertTrue("DCMTK timeout: $dates/$times", process.waitFor(10, TimeUnit.SECONDS))
+                val text = output.readText(); println("alpha5 $dates/$times\n$text")
+                assertEquals(0, process.exitValue()) // DCMTK can exit 0 even on A900: assert DIMSE below.
+                if (valid) {
+                    assertTrue(text, text.contains("Received Final Find Response (Success"))
+                    assertTrue(text, text.contains(study.patientId))
+                    assertEquals(1, Regex("Find Response: [0-9]+ \\(Pending").findAll(text).count())
+                } else {
+                    assertTrue(text, text.contains("DataSetDoesNotMatchSOPClass"))
+                    assertFalse(text, text.contains("(Pending"))
+                }
+            } finally { if (process.isAlive) process.destroyForcibly() }
+        }
+    }
+
+    @Test fun alpha5_unreadableSnapshotReturnsFailureWithoutPendingOrEmptySuccess() {
+        val broken = File(dir, "broken").apply { mkdirs() }
+        val file = File(broken, "mwl_snapshot.json").apply { writeText("{\"version\":1,\"patients\":[]}") }
+        val original = file.readBytes()
+        val protected = LocalMwlRepository(broken, true)
+        assertNotNull(protected.readErrorFlow.value)
+        val (_, port) = start(protected)
+        assertEquals(listOf(Status.UnableToProcess), statuses(Peer(port).find()))
+        assertArrayEquals(original, file.readBytes())
+    }
+
+    @Test fun alpha5_importedPatientAndBothAppointmentsAreConsistentAfterRestartAndFind() {
+        val p = repo.getAllPatients().single(); val s = repo.getAllStudies().single()
+        repo.duplicateStudy(s.id)
+        val incoming = LocalMwlRepository(File(dir, "incoming"), false)
+        val updated = p.copy(patientName = "UPDATED^SYNTHETIC", patientId = "UPDATED-ID")
+        incoming.savePatient(updated); incoming.saveStudy(s)
+        repo.importSyntheticJson(incoming.exportSyntheticJson())
+        val (_, port) = start(LocalMwlRepository(File(dir, "data"), false))
+        val rsp = Peer(port).find(MwlDatasetBuilder.buildMwlScuQueryDataset(patientId = updated.patientId))
+        var count = 0; var finalStatus = -1
+        while (rsp.next()) {
+            val status = rsp.command.getInt(Tag.Status, -1)
+            if (Status.isPending(status)) {
+                count++; assertEquals(updated.patientName, rsp.dataset.getString(Tag.PatientName))
+                assertEquals(updated.patientId, rsp.dataset.getString(Tag.PatientID))
+            } else finalStatus = status
+        }
+        assertEquals(2, count); assertEquals(Status.Success, finalStatus)
+    }
 }

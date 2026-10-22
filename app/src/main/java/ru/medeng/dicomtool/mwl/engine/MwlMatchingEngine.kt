@@ -75,8 +75,15 @@ object MwlMatchingEngine {
             spsStation = item.getString(Tag.ScheduledStationName)?.trim()?.ifEmpty { null }
         }
 
+        val combined = spsDateRange?.contains('-') == true && spsTimeRange?.contains('-') == true
         validateRange(spsDateRange, false)
-        validateRange(spsTimeRange, true)
+        validateRange(spsTimeRange, true, checkOrder = !combined)
+        if (combined) {
+            // PS3.4 K.6-1: MWL's two ranges form one interval, not a daily TM window.
+            // A descending clock is valid across different days, but not on the same day.
+            val (from, to) = dateTimeBounds(spsDateRange!!, spsTimeRange!!)
+            require(from == null || to == null || from <= to) { "Reversed combined DA/TM range" }
+        }
         return MatchingQuery(
             patientName = pName,
             patientId = pId,
@@ -94,7 +101,7 @@ object MwlMatchingEngine {
         )
     }
 
-    private fun validateRange(pattern: String?, time: Boolean) {
+    private fun validateRange(pattern: String?, time: Boolean, checkOrder: Boolean = true) {
         if (pattern == null) return
         val parts = pattern.split('-')
         require(parts.size <= 2 && parts.any(String::isNotEmpty)) { "Invalid query range" }
@@ -103,7 +110,11 @@ object MwlMatchingEngine {
                 else ru.medeng.dicomtool.mwl.model.MwlValidation.validateDate(part, required = true)
             require(valid is ru.medeng.dicomtool.mwl.model.MwlValidation.Result.Valid) { "Invalid query DA/TM" }
         }
-        if (parts.size == 2 && parts.all(String::isNotEmpty)) require(parts[0] <= parts[1]) { "Reversed query range" }
+        if (checkOrder && parts.size == 2 && parts.all(String::isNotEmpty)) {
+            val from = if (time) normalizedTime(parts[0], false) else parts[0]
+            val to = if (time) normalizedTime(parts[1], true) else parts[1]
+            require(from <= to) { "Reversed query range" }
+        }
     }
 
     /**
@@ -238,12 +249,17 @@ object MwlMatchingEngine {
 
     fun matchDateTimeRange(dates: String, times: String, date: String, time: String): Boolean {
         if (date.isEmpty() || time.isEmpty()) return false
+        val (from, to) = dateTimeBounds(dates, times)
+        val actual = date + normalizedTime(time, false)
+        return (from == null || actual >= from) && (to == null || actual <= to)
+    }
+    private fun dateTimeBounds(dates: String, times: String): Pair<String?, String?> {
         val ds = dates.split('-', limit = 2)
         val ts = times.split('-', limit = 2)
-        val actual = date + normalizedTime(time, false)
+        // An open date boundary is unbounded; an open time uses the finite boundary day's edge.
         val from = ds[0].takeIf { it.isNotEmpty() }?.let { it + ts[0].takeIf(String::isNotEmpty).let { t -> if (t == null) "000000000000" else normalizedTime(t, false) } }
         val to = ds[1].takeIf { it.isNotEmpty() }?.let { it + ts[1].takeIf(String::isNotEmpty).let { t -> if (t == null) "235960999999" else normalizedTime(t, true) } }
-        return (from == null || actual >= from) && (to == null || actual <= to)
+        return Pair(from, to)
     }
     private fun normalizedTime(time: String, upper: Boolean): String {
         val parts = time.split('.', limit = 2)

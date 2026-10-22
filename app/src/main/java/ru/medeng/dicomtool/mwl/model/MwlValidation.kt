@@ -99,9 +99,8 @@ object MwlValidation {
      * Валидация Accession Number (VR: SH, max 16 chars).
      */
     fun validateAccessionNumber(accession: String): Result {
-        val trimmed = accession.trim()
-        if (trimmed.length > 16) {
-            return Result.Invalid("accessionNumber", "Accession Number не может превышать 16 символов (VR: SH)")
+        if (accession.length > 16 || accession.any { it == '\\' || it.isISOControl() }) {
+            return Result.Invalid("accessionNumber", "Accession Number: одно значение SH до 16 символов, без обратной косой черты и управляющих символов")
         }
         return Result.Valid
     }
