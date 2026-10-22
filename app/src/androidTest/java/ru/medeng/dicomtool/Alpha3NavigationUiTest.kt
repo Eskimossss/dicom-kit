@@ -44,6 +44,9 @@ class Alpha3NavigationUiTest {
         compose.onNodeWithContentDescription("Worklist", useUnmergedTree = true).performClick()
         tab("Клиент (SCU)")
         compose.onNodeWithText("ФИО пациента").performScrollTo().performTextInput("SYNTHETIC*")
+        // Compose idleness does not include the native IME's opening/viewport animation.
+        // Scroll against the settled native viewport, retaining the visibility/bounds assertions.
+        instrumentation.uiAutomation.waitForIdle(300, 5000)
         compose.onNodeWithText("Получить Worklist").performScrollTo().assertIsDisplayed()
         assertTrue(compose.onNodeWithText("Получить Worklist").fetchSemanticsNode().boundsInRoot.bottom <=
             compose.onNodeWithContentDescription("Worklist", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot.top)
