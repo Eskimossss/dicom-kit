@@ -22,10 +22,13 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.heightIn
@@ -39,6 +42,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.AutoMode
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
@@ -49,6 +53,8 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -73,6 +79,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -107,9 +114,9 @@ fun MwlAppointmentsTab(
     val patients by viewModel.patients.collectAsStateWithLifecycle()
     val studies by viewModel.studies.collectAsStateWithLifecycle()
     val stationProfiles by viewModel.stationProfiles.collectAsStateWithLifecycle()
-    var showPatients by rememberSaveable { mutableStateOf(false) }
     val searchQuery by viewModel.appointmentSearchQuery.collectAsStateWithLifecycle()
     val modalityFilter by viewModel.appointmentModalityFilter.collectAsStateWithLifecycle()
+    var searchOpen by rememberSaveable { mutableStateOf(searchQuery.isNotEmpty()) }
 
     val showPatientDialog by viewModel.showPatientDialog.collectAsStateWithLifecycle()
     val editingPatient by viewModel.editingPatient.collectAsStateWithLifecycle()
@@ -119,7 +126,6 @@ fun MwlAppointmentsTab(
 
     val showSyntheticDialog by viewModel.showSyntheticDialog.collectAsStateWithLifecycle()
     val studyToDelete by viewModel.studyToDelete.collectAsStateWithLifecycle()
-    val patientToDelete by viewModel.patientToDelete.collectAsStateWithLifecycle()
 
     val showExportDialog by viewModel.showDataExportDialog.collectAsStateWithLifecycle()
     val showImportDialog by viewModel.showDataImportDialog.collectAsStateWithLifecycle()
@@ -146,7 +152,7 @@ fun MwlAppointmentsTab(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
-        // Панель управления и поиска
+        // Панель управления и поиска (компактный адаптивный UI)
         WhiteDiagnosticCard {
             viewModel.stationProfileReadError?.let { Text(it, color = ErrorRed) }
             Row(
@@ -156,105 +162,119 @@ fun MwlAppointmentsTab(
             ) {
                 Column(Modifier.weight(1f)) {
                     Text(
-                        text = "Локальная база назначений (MWL)",
-                        fontSize = 16.sp,
+                        text = "Назначения MWL (${filteredStudies.size}/${studies.size})",
+                        fontSize = 15.sp,
                         fontWeight = FontWeight.Bold,
-                        color = TextPrimaryDark
+                        color = TextPrimaryDark,
+                        maxLines = 1
                     )
                     Text(
-                        text = "Пациентов: ${patients.size} · Исследований: ${studies.size}",
-                        fontSize = 12.sp,
-                        color = TextSecondarySlate
+                        text = "Пациентов: ${patients.size} · Назначений: ${studies.size}",
+                        fontSize = 11.sp,
+                        color = TextSecondarySlate,
+                        maxLines = 1
                     )
                 }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    IconButton(onClick = { viewModel.showDataExportDialog.value = true }) {
+                Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(
+                        modifier = Modifier.size(44.dp),
+                        onClick = {
+                            if (searchOpen && searchQuery.isNotEmpty()) {
+                                viewModel.appointmentSearchQuery.value = ""
+                            }
+                            searchOpen = !searchOpen
+                        }
+                    ) {
+                        Icon(
+                            Icons.Default.Search,
+                            contentDescription = if (searchOpen) "Скрыть поиск" else "Поиск",
+                            tint = if (searchOpen || searchQuery.isNotEmpty()) PrimaryBlue else TextSecondarySlate
+                        )
+                    }
+                    IconButton(
+                        modifier = Modifier.size(44.dp),
+                        onClick = { viewModel.showDataExportDialog.value = true }
+                    ) {
                         Icon(Icons.Default.FileDownload, contentDescription = "Экспорт JSON", tint = PrimaryBlue)
                     }
-                    IconButton(onClick = { viewModel.showDataImportDialog.value = true }) {
+                    IconButton(
+                        modifier = Modifier.size(44.dp),
+                        onClick = { viewModel.showDataImportDialog.value = true }
+                    ) {
                         Icon(Icons.Default.FileUpload, contentDescription = "Импорт JSON", tint = PrimaryBlue)
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // Поисковая строка
-            OutlinedTextField(
-                value = searchQuery,
-                onValueChange = { viewModel.appointmentSearchQuery.value = it },
-                placeholder = { Text("Поиск по ФИО, ID, Accession, SPS…") },
-                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // Фильтр по модальностям
-            val modalities = listOf("ALL", "CR", "DX", "MG", "CT", "US", "MR")
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                modalities.forEach { mod ->
-                    FilterChip(
-                        selected = modalityFilter == mod,
-                        onClick = { viewModel.appointmentModalityFilter.value = mod },
-                        label = { Text(if (mod == "ALL") "Все модальности" else mod) }
-                    )
+            if (searchOpen) {
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { viewModel.appointmentSearchQuery.value = it },
+                    placeholder = { Text("Поиск по пациенту, ID или Accession", fontSize = 12.sp) },
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                    trailingIcon = {
+                        IconButton(onClick = {
+                            if (searchQuery.isNotEmpty()) {
+                                viewModel.appointmentSearchQuery.value = ""
+                            } else {
+                                searchOpen = false
+                            }
+                        }) {
+                            Icon(Icons.Default.Close, contentDescription = "Очистить поиск", modifier = Modifier.size(18.dp))
+                        }
+                    },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                val modalities = listOf("ALL", "CR", "DX", "MG", "CT", "US", "MR")
+                Row(
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    modalities.forEach { mod ->
+                        FilterChip(
+                            selected = modalityFilter == mod,
+                            onClick = { viewModel.appointmentModalityFilter.value = mod },
+                            label = { Text(if (mod == "ALL") "Все" else mod, fontSize = 11.sp) }
+                        )
+                    }
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
-            // Кнопки добавления
-            FlowRow(
+            Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Button(
                     onClick = { viewModel.openNewStudyDialog() },
+                    modifier = Modifier.weight(1f),
                     colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue)
                 ) {
-                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Назначение", fontSize = 13.sp)
-                }
-
-                OutlinedButton(
-                    onClick = { viewModel.openNewPatientDialog() },
-                ) {
-                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Пациент", fontSize = 13.sp)
+                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Назначение", fontSize = 12.sp)
                 }
 
                 Button(
                     onClick = { viewModel.showSyntheticDialog.value = true },
-                    colors = ButtonDefaults.buttonColors(containerColor = SuccessGreen),
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(containerColor = SuccessGreen)
                 ) {
-                    Icon(Icons.Default.AutoMode, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Тестовые", fontSize = 13.sp)
+                    Icon(Icons.Default.AutoMode, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Тестовые", fontSize = 12.sp)
                 }
             }
-            FilterChip(selected = showPatients, onClick = { showPatients = !showPatients },
-                label = { Text(if (showPatients) "Показать назначения" else "Пациенты (${patients.size})") })
         }
         }
 
         // Список найденных исследований
-        if (showPatients) {
-            items(patients.filter { searchQuery.isBlank() || it.patientName.contains(searchQuery.trim(), true) || it.patientId.contains(searchQuery.trim(), true) }, key = { "patient:${it.id}" }) { patient ->
-                WhiteDiagnosticCard {
-                    MwlPatientIdentity(patient)
-                    Text("Назначений: ${studies.count { it.patientInternalId == patient.id }}")
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = { viewModel.openEditPatientDialog(patient) }) { Text("Редактировать пациента") }
-                        TextButton(onClick = { viewModel.openNewStudyDialog(patient) }) { Text("Назначить исследование") }
-                    }
-                }
-            }
-        } else if (filteredStudies.isEmpty()) {
+        if (filteredStudies.isEmpty()) {
             item {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
@@ -316,7 +336,7 @@ fun MwlAppointmentsTab(
             stationProfiles = stationProfiles,
             onNewPatient = viewModel::openNewPatientDialog,
             onSaveStation = viewModel::saveStationProfile,
-            onDismiss = { viewModel.showStudyDialog.value = false },
+            onDismiss = { viewModel.closeStudyDialog() },
             onSave = { s ->
                 val result = viewModel.saveStudy(s)
                 if (result is MwlValidation.Result.Invalid) {
@@ -462,12 +482,17 @@ internal fun StudyCardItem(study: MwlScheduledStudy, onEdit: () -> Unit, onDupli
 
 @Composable
 internal fun MwlPatientIdentity(patient: MwlPatient) {
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(DicomPersonName.display(patient.patientName, false).ifEmpty { "ФИО не указано" }, fontWeight = FontWeight.Bold)
-        Text("Patient ID: ${patient.patientId}", style = MaterialTheme.typography.bodyMedium)
-        if (patient.isSynthetic) Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = MaterialTheme.shapes.small) {
-            Text("Тестовый", color = MaterialTheme.colorScheme.onPrimaryContainer, style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp))
-        }
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(
+            text = DicomPersonName.display(patient.patientName, false).ifEmpty { "ФИО не указано" },
+            fontWeight = FontWeight.Bold,
+            color = TextPrimaryDark
+        )
+        Text(
+            text = "ID: ${patient.patientId}" + if (patient.patientBirthDate.isNotBlank()) " · ${patient.patientBirthDate}" else "",
+            fontSize = 12.sp,
+            color = TextSecondarySlate
+        )
     }
 }
 
@@ -492,42 +517,269 @@ internal fun StudyEditorDialog(
         spsId = it[7], accessionNumber = it[8], spsStartDate = it[9], spsStartTime = it[10], studyInstanceUid = it[11]) }) }
     var draft by rememberSaveable(study.id, stateSaver = draftSaver) { mutableStateOf(study) }
     var editingStation by remember { mutableStateOf<MwlStationProfile?>(null) }
-    var selectedStationId by rememberSaveable { mutableStateOf<String?>(null) }
+    var showConfirmOverwriteIds by remember { mutableStateOf(false) }
+    var showConfirmOverwriteUid by remember { mutableStateOf(false) }
+    val initialProfileId = remember(study.id, stationProfiles) {
+        stationProfiles.firstOrNull { profile ->
+            profile.scheduledStationAeTitle.isNotBlank() &&
+            profile.scheduledStationAeTitle.equals(study.scheduledStationAeTitle, ignoreCase = true) &&
+            (profile.modality.isBlank() || profile.modality.equals(study.modality, ignoreCase = true))
+        }?.id
+    }
+    var selectedStationId by rememberSaveable(study.id) { mutableStateOf(initialProfileId) }
+    val selectedProfile = stationProfiles.firstOrNull { it.id == selectedStationId }
     MwlFormDialog(if (study.patientInternalId.isBlank()) "Новое назначение" else "Назначение", onDismiss,
         saveEnabled = patient != null,
         onSave = {
+            val finalModality = (selectedProfile?.modality ?: draft.modality).trim()
+            val finalStudyUid = draft.studyInstanceUid.trim().ifBlank { MwlValidation.generateStudyInstanceUid() }
+            val fallbackNum = (100000..999999).random()
+            val finalAcc = draft.accessionNumber.trim().ifBlank { "ACC-$fallbackNum" }
+            val finalRpId = draft.requestedProcedureId.trim().ifBlank { "RP-$fallbackNum" }
+            val finalSpsId = draft.spsId.trim().ifBlank { "SPS-$fallbackNum" }
+            val finalDesc = draft.requestedProcedureDescription.trim()
+            val finalSpsDesc = draft.spsDescription.trim().ifBlank { finalDesc }
             patient?.let { p -> onSave(draft.copy(patientInternalId = p.id, patientName = p.patientName,
                 patientId = p.patientId, isSynthetic = p.isSynthetic && study.isSynthetic,
-                modality = draft.modality.trim(), scheduledStationAeTitle = draft.scheduledStationAeTitle.trim(),
+                modality = finalModality, scheduledStationAeTitle = draft.scheduledStationAeTitle.trim(),
                 scheduledStationName = draft.scheduledStationName.trim(), spsLocation = draft.spsLocation.trim(),
-                requestedProcedureDescription = draft.requestedProcedureDescription.trim(), spsDescription = draft.spsDescription.trim(),
-                requestedProcedureId = draft.requestedProcedureId.trim(), spsId = draft.spsId.trim(),
-                accessionNumber = draft.accessionNumber.trim(), spsStartDate = draft.spsStartDate.trim(),
-                spsStartTime = draft.spsStartTime.trim(), studyInstanceUid = draft.studyInstanceUid.trim())) }
+                requestedProcedureDescription = finalDesc, spsDescription = finalSpsDesc,
+                requestedProcedureId = finalRpId, spsId = finalSpsId,
+                accessionNumber = finalAcc, spsStartDate = draft.spsStartDate.trim(),
+                spsStartTime = draft.spsStartTime.trim(), studyInstanceUid = finalStudyUid)) }
         }) {
         Text("Пациент (обязательно)", fontWeight = FontWeight.Bold)
-        if (patient != null) MwlPatientIdentity(patient) else Text("Пациент не выбран")
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = { patientPicker = true }) { Text("Выбрать пациента") }
-            TextButton(onClick = onNewPatient) { Text("Создать пациента") }
-        }
-        Text("Изменение пациента применяется только кнопкой «Сохранить».", fontSize = 12.sp)
-        Text("Аппарат", fontWeight = FontWeight.Bold)
-        stationProfiles.forEach { profile ->
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = { draft = profile.applyTo(draft); selectedStationId = profile.id }, modifier = Modifier.weight(1f)) {
-                    Text("${if (selectedStationId == profile.id) "✓ " else ""}${profile.name} · ${profile.modality} · ${profile.scheduledStationAeTitle}")
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(8.dp),
+            color = InputBackgroundGray,
+            border = BorderStroke(1.dp, CardBorderGray)
+        ) {
+            Box(Modifier.padding(10.dp)) {
+                if (patient != null) {
+                    MwlPatientIdentity(patient)
+                } else {
+                    Text("Пациент не выбран", color = ErrorRed, fontSize = 13.sp)
                 }
-                IconButton(onClick = { editingStation = profile }) { Icon(Icons.Default.Edit, "Редактировать профиль ${profile.name}") }
             }
         }
-        TextButton(onClick = { editingStation = MwlStationProfile(name = "", modality = draft.modality,
-            scheduledStationAeTitle = draft.scheduledStationAeTitle, scheduledStationName = draft.scheduledStationName, location = draft.spsLocation) }) { Text("Новый профиль аппарата") }
-        MwlModalityField(draft.modality, { draft = draft.copy(modality = it) })
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedButton(
+                onClick = { patientPicker = true },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("Выбрать пациента", fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            OutlinedButton(
+                onClick = onNewPatient,
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("Создать пациента", fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Аппарат", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+            OutlinedButton(
+                onClick = {
+                    editingStation = MwlStationProfile(
+                        name = "",
+                        modality = draft.modality.ifBlank { "CR" },
+                        scheduledStationAeTitle = draft.scheduledStationAeTitle,
+                        scheduledStationName = draft.scheduledStationName,
+                        location = draft.spsLocation
+                    )
+                },
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                modifier = Modifier.defaultMinSize(minHeight = 36.dp)
+            ) {
+                Text("+ Новый профиль", fontSize = 12.sp)
+            }
+        }
+
+        if (selectedProfile != null) {
+            var switchStationMenuOpen by remember { mutableStateOf(false) }
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp),
+                color = CardSurfaceWhite,
+                border = BorderStroke(1.dp, PrimaryBlue.copy(alpha = 0.6f))
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Text(
+                                text = selectedProfile.name,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                color = TextPrimaryDark
+                            )
+                            Text(
+                                text = "AE: ${selectedProfile.scheduledStationAeTitle}",
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = TextSecondarySlate
+                            )
+                            if (selectedProfile.scheduledStationName.isNotBlank()) {
+                                Text(
+                                    text = "Станция: ${selectedProfile.scheduledStationName}",
+                                    fontSize = 11.sp,
+                                    color = TextSecondarySlate
+                                )
+                            }
+                            Text(
+                                text = "Модальность: ${selectedProfile.modality}",
+                                fontSize = 11.sp,
+                                color = TextSecondarySlate
+                            )
+                        }
+                        IconButton(
+                            onClick = { editingStation = selectedProfile },
+                            modifier = Modifier.size(40.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.Edit,
+                                contentDescription = "Редактировать профиль ${selectedProfile.name}",
+                                tint = PrimaryBlue
+                            )
+                        }
+                    }
+
+                    HorizontalDivider(
+                        color = CardBorderGray.copy(alpha = 0.6f),
+                        modifier = Modifier.padding(vertical = 4.dp)
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(Modifier.weight(1f)) {
+                            OutlinedButton(
+                                onClick = {
+                                    if (stationProfiles.size > 1) {
+                                        switchStationMenuOpen = true
+                                    }
+                                },
+                                enabled = stationProfiles.size > 1,
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                modifier = Modifier.fillMaxWidth().defaultMinSize(minHeight = 36.dp)
+                            ) {
+                                Text(
+                                    text = "Сменить аппарат",
+                                    fontSize = 12.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = switchStationMenuOpen,
+                                onDismissRequest = { switchStationMenuOpen = false }
+                            ) {
+                                stationProfiles.filter { it.id != selectedProfile.id }.forEach { profile ->
+                                    DropdownMenuItem(
+                                        text = {
+                                            Column {
+                                                Text(profile.name, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                                                Text(
+                                                    "${profile.modality} · ${profile.scheduledStationAeTitle}",
+                                                    fontSize = 11.sp,
+                                                    color = TextSecondarySlate
+                                                )
+                                            }
+                                        },
+                                        onClick = {
+                                            selectedStationId = profile.id
+                                            draft = profile.applyTo(draft)
+                                            switchStationMenuOpen = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
+
+                        OutlinedButton(
+                            onClick = { selectedStationId = null },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = ErrorRed),
+                            modifier = Modifier.weight(1f).defaultMinSize(minHeight = 36.dp)
+                        ) {
+                            Text(
+                                text = "Снять выбор",
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            }
+        } else {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp),
+                color = InputBackgroundGray.copy(alpha = 0.5f),
+                border = BorderStroke(1.dp, CardBorderGray)
+            ) {
+                Column(
+                    modifier = Modifier.padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    if (stationProfiles.isNotEmpty()) {
+                        Text("Выберите аппарат или введите вручную:", fontSize = 11.sp, color = TextSecondarySlate)
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            stationProfiles.forEach { profile ->
+                                OutlinedButton(
+                                    onClick = {
+                                        selectedStationId = profile.id
+                                        draft = profile.applyTo(draft)
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                    modifier = Modifier.defaultMinSize(minHeight = 32.dp)
+                                ) {
+                                    Text("${profile.name} (${profile.modality})", fontSize = 11.sp)
+                                }
+                            }
+                        }
+                    } else {
+                        Text("Профили аппаратов не настроены (ручной ввод)", fontSize = 11.sp, color = TextSecondarySlate)
+                    }
+                }
+            }
+        }
+
+        if (selectedProfile == null) {
+            MwlModalityField(draft.modality, { draft = draft.copy(modality = it) })
+        }
         DicomHelpField(draft.scheduledStationAeTitle, { draft = draft.copy(scheduledStationAeTitle = it) }, "AE Title аппарата", DicomFieldHelp.StationAe)
         DicomHelpField(draft.scheduledStationName, { draft = draft.copy(scheduledStationName = it) }, "Название станции", DicomFieldHelp.StationName)
         DicomHelpField(draft.spsLocation, { draft = draft.copy(spsLocation = it) }, "Место проведения", DicomFieldHelp.StepLocation)
-        DicomHelpField(draft.requestedProcedureDescription, { draft = draft.copy(requestedProcedureDescription = it, spsDescription = it) }, "Описание исследования", DicomFieldHelp.Description)
+        val effectiveModality = (selectedProfile?.modality ?: draft.modality).trim()
+        MwlStudyDescriptionField(
+            value = draft.requestedProcedureDescription,
+            modality = effectiveModality,
+            onValueChange = { draft = draft.copy(requestedProcedureDescription = it, spsDescription = it) }
+        )
         DicomHelpField(draft.requestedProcedureId, { draft = draft.copy(requestedProcedureId = it) }, "Requested Procedure ID", DicomFieldHelp.ProcedureId)
         DicomHelpField(draft.spsId, { draft = draft.copy(spsId = it) }, "Scheduled Procedure Step ID", DicomFieldHelp.StepId)
         DicomHelpField(draft.accessionNumber, { draft = draft.copy(accessionNumber = it) }, "Accession Number", DicomFieldHelp.Accession)
@@ -537,7 +789,101 @@ internal fun StudyEditorDialog(
         }
         DicomHelpField(draft.spsStartTime, { draft = draft.copy(spsStartTime = it) }, "Время начала этапа", DicomFieldHelp.StepTime)
         DicomHelpField(draft.studyInstanceUid, { draft = draft.copy(studyInstanceUid = it) }, "Study Instance UID", DicomFieldHelp.StudyUid)
-        TextButton(onClick = { draft = draft.copy(studyInstanceUid = MwlValidation.generateStudyInstanceUid()) }) { Text("Сгенерировать UID") }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedButton(
+                onClick = {
+                    val anyFilled = draft.accessionNumber.isNotBlank() ||
+                            draft.requestedProcedureId.isNotBlank() ||
+                            draft.spsId.isNotBlank()
+                    if (anyFilled) {
+                        showConfirmOverwriteIds = true
+                    } else {
+                        draft = draft.copy(
+                            accessionNumber = MwlValidation.generateAccessionNumber(),
+                            requestedProcedureId = MwlValidation.generateRequestedProcedureId(),
+                            spsId = MwlValidation.generateSpsId()
+                        )
+                    }
+                },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("Сгенерировать ID", fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+
+            OutlinedButton(
+                onClick = {
+                    if (draft.studyInstanceUid.isNotBlank()) {
+                        showConfirmOverwriteUid = true
+                    } else {
+                        draft = draft.copy(studyInstanceUid = MwlValidation.generateStudyInstanceUid())
+                    }
+                },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("Сгенерировать UID", fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+
+        if (showConfirmOverwriteIds) {
+            AlertDialog(
+                onDismissRequest = { showConfirmOverwriteIds = false },
+                title = { Text("Идентификаторы заполнены") },
+                text = { Text("Один или несколько идентификаторов (Accession / RP / SPS ID) уже содержат значения. Как поступить?") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        draft = draft.copy(
+                            accessionNumber = MwlValidation.generateAccessionNumber(),
+                            requestedProcedureId = MwlValidation.generateRequestedProcedureId(),
+                            spsId = MwlValidation.generateSpsId()
+                        )
+                        showConfirmOverwriteIds = false
+                    }) {
+                        Text("Перезаписать все")
+                    }
+                },
+                dismissButton = {
+                    Row {
+                        TextButton(onClick = { showConfirmOverwriteIds = false }) {
+                            Text("Отмена")
+                        }
+                        TextButton(onClick = {
+                            draft = draft.copy(
+                                accessionNumber = draft.accessionNumber.ifBlank { MwlValidation.generateAccessionNumber() },
+                                requestedProcedureId = draft.requestedProcedureId.ifBlank { MwlValidation.generateRequestedProcedureId() },
+                                spsId = draft.spsId.ifBlank { MwlValidation.generateSpsId() }
+                            )
+                            showConfirmOverwriteIds = false
+                        }) {
+                            Text("Только пустые")
+                        }
+                    }
+                }
+            )
+        }
+
+        if (showConfirmOverwriteUid) {
+            AlertDialog(
+                onDismissRequest = { showConfirmOverwriteUid = false },
+                title = { Text("Перезаписать Study Instance UID?") },
+                text = { Text("Study Instance UID уже заполнен. Сгенерировать новый UID?") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        draft = draft.copy(studyInstanceUid = MwlValidation.generateStudyInstanceUid())
+                        showConfirmOverwriteUid = false
+                    }) {
+                        Text("Перезаписать")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showConfirmOverwriteUid = false }) {
+                        Text("Отмена")
+                    }
+                }
+            )
+        }
     }
     if (patientPicker) MwlFormDialog("Выбор пациента", onDismiss = { patientPicker = false }, onSave = { patientPicker = false }, saveLabel = "Закрыть") {
             val pickerFocus = LocalFocusManager.current

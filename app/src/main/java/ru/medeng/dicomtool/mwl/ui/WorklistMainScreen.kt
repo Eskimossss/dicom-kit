@@ -113,6 +113,7 @@ fun WorklistMainScreen(
             when (selectedTab) {
                 MwlSubTab.SCP_SERVER -> MwlScpTab(viewModel = viewModel, isExpandedWidth = isExpandedWidth)
                 MwlSubTab.APPOINTMENTS -> if (readError == null) MwlAppointmentsTab(viewModel = viewModel, isExpandedWidth = isExpandedWidth)
+                MwlSubTab.PATIENTS -> if (readError == null) MwlPatientsTab(viewModel = viewModel, isExpandedWidth = isExpandedWidth)
                 MwlSubTab.SCU_CLIENT -> MwlScuTab(viewModel = viewModel, isExpandedWidth = isExpandedWidth)
                 MwlSubTab.JOURNAL -> MwlJournalTab(viewModel = viewModel, isExpandedWidth = isExpandedWidth)
             }

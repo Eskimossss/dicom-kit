@@ -1,18 +1,42 @@
 package ru.medeng.dicomtool.ui.components
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.widget.Toast
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import ru.medeng.dicomtool.ui.theme.InputBackgroundGray
+import ru.medeng.dicomtool.ui.theme.DangerActionSoftBorder
+import ru.medeng.dicomtool.ui.theme.DangerActionSoftBg
+import ru.medeng.dicomtool.ui.theme.ErrorRed
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.text.KeyboardOptions
@@ -99,6 +123,7 @@ fun DicomToolSubScreenTopBar(
     title: String,
     subtitle: String? = null,
     onBack: () -> Unit,
+    titleModifier: Modifier = Modifier,
     trailingContent: @Composable (() -> Unit)? = null
 ) {
     Column(
@@ -120,7 +145,7 @@ fun DicomToolSubScreenTopBar(
                 )
             }
             Column(
-                modifier = Modifier.weight(1f)
+                modifier = Modifier.weight(1f).then(titleModifier)
             ) {
                 Text(
                     text = title,
@@ -308,7 +333,7 @@ fun ViewerToolButton(
 ) {
     Surface(
         modifier = Modifier
-            .height(34.dp)
+            .heightIn(min = 48.dp)
             .clip(androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
             .clickable(onClick = onClick),
         shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
@@ -316,7 +341,7 @@ fun ViewerToolButton(
         border = BorderStroke(1.dp, if (isActive) PrimaryBlue else CardBorderGray)
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 8.dp),
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
@@ -329,6 +354,7 @@ fun ViewerToolButton(
             Text(
                 text = label,
                 fontSize = 11.sp,
+                lineHeight = 14.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = if (isActive) Color.White else TextPrimaryDark
             )
@@ -361,3 +387,277 @@ fun ModalityFilterChip(
 }
 
 
+
+/**
+ * Единая карточка IP-адреса устройства для DICOM SCP и MWL SCP.
+ * Гарантирует одинаковую высоту, размер шрифта и отсутствие переноса IP на типичных смартфонах.
+ */
+@Composable
+fun AppDeviceIpCard(
+    ipv4: String,
+    interfaceName: String,
+    onRefresh: () -> Unit,
+    refreshContentDescription: String = "Обновить сеть",
+    copyLabel: String = "IP",
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    WhiteDiagnosticCard(modifier = modifier) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "IP адрес устройства",
+                    fontSize = 13.sp,
+                    color = TextSecondarySlate
+                )
+                Spacer(modifier = Modifier.height(3.dp))
+                SelectionContainer {
+                    Text(
+                        text = ipv4,
+                        fontSize = 24.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimaryDark,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Wifi,
+                        contentDescription = null,
+                        tint = PrimaryBlue,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Интерфейс: $interfaceName",
+                        fontSize = 12.sp,
+                        color = TextSecondarySlate,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                IconButton(
+                    onClick = onRefresh,
+                    modifier = Modifier.size(48.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = refreshContentDescription,
+                        tint = PrimaryBlue
+                    )
+                }
+                IconButton(
+                    onClick = {
+                        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        cm.setPrimaryClip(ClipData.newPlainText(copyLabel, ipv4))
+                        Toast.makeText(context, "Скопировано: $ipv4", Toast.LENGTH_SHORT).show()
+                    },
+                    modifier = Modifier.size(48.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.ContentCopy,
+                        contentDescription = "Скопировать",
+                        tint = TextSecondarySlate
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Единый компактный информационный баннер для подсказок и предупреждений.
+ */
+@Composable
+fun AppInfoBanner(
+    title: String,
+    detailedText: String,
+    modifier: Modifier = Modifier,
+    initiallyExpanded: Boolean = false
+) {
+    var expanded by remember { mutableStateOf(initiallyExpanded) }
+    Surface(
+        color = InputBackgroundGray,
+        shape = RoundedCornerShape(8.dp),
+        border = BorderStroke(1.dp, CardBorderGray),
+        modifier = modifier
+            .fillMaxWidth()
+            .clickable { expanded = !expanded }
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f).padding(end = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Wifi,
+                        contentDescription = null,
+                        tint = PrimaryBlue,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = title,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = TextPrimaryDark,
+                        maxLines = if (expanded) Int.MAX_VALUE else 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Text(
+                    text = if (expanded) "Скрыть" else "Инфо",
+                    fontSize = 11.sp,
+                    color = PrimaryBlue,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            if (expanded) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = detailedText,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
+                    color = TextSecondarySlate
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Единый переключатель режимов (сегментированная кнопка) приложения.
+ * Выбранный сегмент выделен заполненным синим фоном (PrimaryBlue) и белым текстом.
+ */
+@Composable
+fun <T> AppSegmentedControl(
+    items: List<Pair<T, String>>,
+    selectedItem: T,
+    onItemSelected: (T) -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(10.dp),
+        color = InputBackgroundGray,
+        border = BorderStroke(1.dp, CardBorderGray)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(3.dp),
+            horizontalArrangement = Arrangement.spacedBy(3.dp)
+        ) {
+            items.forEach { (item, label) ->
+                val selected = item == selectedItem
+                Surface(
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 40.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(enabled = enabled) { onItemSelected(item) },
+                    shape = RoundedCornerShape(8.dp),
+                    color = if (selected) PrimaryBlue else Color.Transparent
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 8.dp, vertical = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = label,
+                            fontSize = 13.sp,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                            color = if (selected) Color.White else TextPrimaryDark,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Единая кнопка опасного / необратимого действия с корректным переносом длинных подписей.
+ */
+@Composable
+fun AppDestructiveButton(
+    text: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    icon: androidx.compose.ui.graphics.vector.ImageVector? = Icons.Outlined.DeleteOutline,
+    enabled: Boolean = true
+) {
+    OutlinedButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp),
+        shape = RoundedCornerShape(10.dp),
+        border = BorderStroke(1.dp, DangerActionSoftBorder),
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+        colors = ButtonDefaults.outlinedButtonColors(
+            containerColor = DangerActionSoftBg,
+            contentColor = ErrorRed
+        )
+    ) {
+        if (icon != null) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp),
+                tint = ErrorRed
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+        }
+        Text(
+            text = text,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = ErrorRed,
+            lineHeight = 18.sp,
+            textAlign = TextAlign.Center,
+            softWrap = true
+        )
+    }
+}
+
+/**
+ * Единый стиль вспомогательного / пояснительного текста.
+ */
+@Composable
+fun AppHelperText(
+    text: String,
+    modifier: Modifier = Modifier
+) {
+    Text(
+        text = text,
+        fontSize = 12.sp,
+        lineHeight = 16.sp,
+        color = TextSecondarySlate,
+        softWrap = true,
+        modifier = modifier
+    )
+}

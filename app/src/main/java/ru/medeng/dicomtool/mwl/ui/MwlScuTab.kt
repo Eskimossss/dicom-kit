@@ -30,6 +30,8 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Stop
@@ -127,7 +129,7 @@ fun MwlScuTab(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // Карточка 1: Выбор профиля удалённого сервера MWL SCP
+        // Карточка 1: Выбор профиля удалённого сервера MWL SCP (компактный UI)
         WhiteDiagnosticCard {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -136,31 +138,26 @@ fun MwlScuTab(
             ) {
                 Column(Modifier.weight(1f)) {
                     Text(
-                        text = "Клиент Modality Worklist (SCU)",
-                        fontSize = 16.sp,
+                        text = "Сервер MWL SCP (C-FIND)",
+                        fontSize = 15.sp,
                         fontWeight = FontWeight.Bold,
                         color = TextPrimaryDark
                     )
-                    Text(
-                        text = "Запрос списка назначений по DICOM DIMSE C-FIND",
-                        fontSize = 12.sp,
-                        color = TextSecondarySlate
-                    )
                 }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    IconButton(onClick = { viewModel.openNewProfileDialog() }) {
+                Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                    IconButton(modifier = Modifier.size(44.dp), onClick = { viewModel.openNewProfileDialog() }) {
                         Icon(Icons.Default.Add, contentDescription = "Новый профиль", tint = PrimaryBlue)
                     }
                     if (selectedProfile != null) {
-                        IconButton(onClick = { viewModel.openEditProfileDialog(selectedProfile!!) }) {
+                        IconButton(modifier = Modifier.size(44.dp), onClick = { viewModel.openEditProfileDialog(selectedProfile!!) }) {
                             Icon(Icons.Default.Edit, contentDescription = "Редактировать", tint = TextSecondarySlate)
                         }
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
             // Dropdown выбора профиля
             var profileExpanded by remember { mutableStateOf(false) }
@@ -197,17 +194,19 @@ fun MwlScuTab(
                     }
                 }
             }
-            selectedProfile?.let { Text("${it.host}:${it.port} · Called AE: ${it.calledAet}", fontSize = 12.sp) }
         }
 
-        // Filters wrap naturally; no intrinsic-height row of five date choices.
+        // Карточка 2: Критерии поиска Worklist (компактные базовые + раскрываемые расширенные)
         WhiteDiagnosticCard {
-            Text("Критерии поиска Worklist", fontWeight = FontWeight.Bold)
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Критерии поиска Worklist", fontSize = 15.sp, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(4.dp))
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 MwlDateFilterOption.entries.forEach { option ->
-                    FilterChip(selected = filter.dateOption == option,
+                    FilterChip(
+                        selected = filter.dateOption == option,
                         onClick = { viewModel.scuFilter.value = filter.copy(dateOption = option) },
-                        label = { Text(option.labelRu, maxLines = 1) })
+                        label = { Text(option.labelRu, maxLines = 1, fontSize = 11.sp) }
+                    )
                 }
             }
             when (filter.dateOption) {
@@ -219,25 +218,71 @@ fun MwlScuTab(
                 else -> Unit
             }
             val dateError = filter.validateDateSelection() as? MwlValidation.Result.Invalid
-            dateError?.let { Text(it.messageRu, color = ErrorRed) }
+            dateError?.let { Text(it.messageRu, color = ErrorRed, fontSize = 12.sp) }
+
+            // Базовые критерии: Модальность и AE Title аппарата
             MwlAdaptiveFields(first = {
                 DicomHelpField(filter.modality, { viewModel.scuFilter.value = filter.copy(modality = it.uppercase(java.util.Locale.US)) }, "Modality", DicomFieldHelp.Modality)
             }, second = {
                 DicomHelpField(filter.scheduledStationAe, { viewModel.scuFilter.value = filter.copy(scheduledStationAe = it) }, "AE Title аппарата", DicomFieldHelp.StationAe)
             })
-            MwlAdaptiveFields(first = {
-                OutlinedTextField(filter.patientName, { viewModel.scuFilter.value = filter.copy(patientName = it) }, label = { Text("ФИО пациента") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-            }, second = {
-                DicomHelpField(filter.patientId, { viewModel.scuFilter.value = filter.copy(patientId = it) }, "Patient ID", DicomFieldHelp.PatientId)
-            })
-            DicomHelpField(filter.accessionNumber, { viewModel.scuFilter.value = filter.copy(accessionNumber = it) }, "Accession Number", DicomFieldHelp.Accession)
-            if (filter.isFilterEmpty()) Text("Запрос без фильтров может вернуть большой объём данных.", color = WarningAmber)
-            Button(onClick = { viewModel.queryWorklist() }, enabled = !isRunning && dateError == null,
-                modifier = Modifier.fillMaxWidth()) {
+
+            // Раскрываемые расширенные критерии
+            val hasAdvancedCriteria = filter.patientName.isNotBlank() || filter.patientId.isNotBlank() || filter.accessionNumber.isNotBlank()
+            var showAdvancedCriteria by rememberSaveable { mutableStateOf(hasAdvancedCriteria) }
+
+            TextButton(
+                onClick = { showAdvancedCriteria = !showAdvancedCriteria },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(
+                    imageVector = if (showAdvancedCriteria) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = if (showAdvancedCriteria) "Скрыть дополнительные фильтры" else "Дополнительные фильтры (ФИО, ID, Accession)",
+                    fontSize = 12.sp
+                )
+            }
+
+            if (showAdvancedCriteria) {
+                MwlAdaptiveFields(first = {
+                    OutlinedTextField(
+                        filter.patientName,
+                        { viewModel.scuFilter.value = filter.copy(patientName = it) },
+                        label = { Text("ФИО пациента") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }, second = {
+                    DicomHelpField(filter.patientId, { viewModel.scuFilter.value = filter.copy(patientId = it) }, "Patient ID", DicomFieldHelp.PatientId)
+                })
+                DicomHelpField(filter.accessionNumber, { viewModel.scuFilter.value = filter.copy(accessionNumber = it) }, "Accession Number", DicomFieldHelp.Accession)
+            }
+
+            if (filter.isFilterEmpty()) {
+                Text("Запрос без фильтров может вернуть большой объём данных.", color = WarningAmber, fontSize = 12.sp)
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            // Кнопка «Получить Worklist» строго на прежнем месте
+            Button(
+                onClick = { viewModel.queryWorklist() },
+                enabled = !isRunning && dateError == null,
+                modifier = Modifier.fillMaxWidth()
+            ) {
                 Text(if (isRunning) "Запрос ($queryCount)…" else "Получить Worklist")
             }
-            if (isRunning) OutlinedButton(onClick = { viewModel.cancelWorklistQuery() }, modifier = Modifier.fillMaxWidth()) { Text("Отмена (C-CANCEL)") }
-            statusMsg?.let { Text(it, color = if (it.contains("Ошибка", true)) ErrorRed else TextSecondarySlate) }
+            if (isRunning) {
+                Spacer(modifier = Modifier.height(4.dp))
+                OutlinedButton(onClick = { viewModel.cancelWorklistQuery() }, modifier = Modifier.fillMaxWidth()) {
+                    Text("Отмена (C-CANCEL)")
+                }
+            }
+            statusMsg?.let { Text(it, color = if (it.contains("Ошибка", true)) ErrorRed else TextSecondarySlate, fontSize = 12.sp) }
         }
         // Карточка 3: Результаты запроса
         WhiteDiagnosticCard {

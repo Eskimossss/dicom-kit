@@ -179,6 +179,27 @@ object MwlValidation {
     }
 
     /**
+     * Генерация стандартного уникального Accession Number (VR: SH, до 16 символов).
+     */
+    fun generateAccessionNumber(): String {
+        return "ACC-${(100000..999999).random()}"
+    }
+
+    /**
+     * Генерация стандартного уникального Requested Procedure ID (VR: SH, до 16 символов).
+     */
+    fun generateRequestedProcedureId(): String {
+        return "RP-${(100000..999999).random()}"
+    }
+
+    /**
+     * Генерация стандартного уникального Scheduled Procedure Step ID (VR: SH, до 16 символов).
+     */
+    fun generateSpsId(): String {
+        return "SPS-${(100000..999999).random()}"
+    }
+
+    /**
      * Текущая дата в формате YYYYMMDD.
      */
     fun currentDateFormatted(): String {

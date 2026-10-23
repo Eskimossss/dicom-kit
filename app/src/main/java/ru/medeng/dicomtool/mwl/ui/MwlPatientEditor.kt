@@ -60,8 +60,12 @@ internal fun PatientEditorDialog(patient: MwlPatient, onDismiss: () -> Unit, onS
         DicomHelpField(id, { id = it }, "Patient ID", DicomFieldHelp.PatientId)
         MwlBirthDateField(birth, { birth = it })
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf("" to "Не указан", "M" to "Муж (M)", "F" to "Жен (F)", "O" to "Другой (O)").forEach { (code, label) ->
-                FilterChip(selected = sex == code, onClick = { sex = code }, label = { Text(label) })
+            listOf("M" to "Муж (M)", "F" to "Жен (F)", "O" to "Другой (O)").forEach { (code, label) ->
+                FilterChip(
+                    selected = sex == code,
+                    onClick = { sex = if (sex == code) "" else code },
+                    label = { Text(label) }
+                )
             }
         }
     }

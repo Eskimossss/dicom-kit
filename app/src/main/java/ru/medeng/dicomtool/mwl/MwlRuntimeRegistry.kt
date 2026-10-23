@@ -35,7 +35,7 @@ object MwlRuntimeRegistry {
     fun getMwlRepository(context: Context): MwlRepository {
         return repositoryInstance ?: run {
             val dir = File(context.applicationContext.filesDir, "mwl_data")
-            LocalMwlRepository(dir, autoSeedIfEmpty = true).also { repositoryInstance = it }
+            LocalMwlRepository(dir, autoSeedIfEmpty = false).also { repositoryInstance = it }
         }
     }
 

@@ -29,6 +29,7 @@ import java.io.IOException
 enum class MwlSubTab(val titleRu: String) {
     SCP_SERVER("Сервер (SCP)"),
     APPOINTMENTS("Назначения"),
+    PATIENTS("Пациенты"),
     SCU_CLIENT("Клиент (SCU)"),
     JOURNAL("Журнал")
 }
@@ -71,6 +72,9 @@ class MwlViewModel(application: Application) : AndroidViewModel(application) {
     // Appointments search
     val appointmentSearchQuery = MutableStateFlow("")
     val appointmentModalityFilter = MutableStateFlow("ALL")
+
+    // Patients search
+    val patientSearchQuery = MutableStateFlow("")
 
     // SCU state
     private val _selectedProfile = MutableStateFlow<MwlScuProfile?>(null)
@@ -214,26 +218,30 @@ class MwlViewModel(application: Application) : AndroidViewModel(application) {
     fun openNewStudyDialog(patient: MwlPatient? = null) {
         val today = MwlValidation.currentDateFormatted()
         val now = MwlValidation.currentTimeFormatted()
-        val randomNum = (1000..9999).random()
 
         editingStudy.value = MwlScheduledStudy(
             patientInternalId = patient?.id.orEmpty(),
             patientName = patient?.patientName.orEmpty(),
             patientId = patient?.patientId.orEmpty(),
-            accessionNumber = "ACC-$randomNum",
-            studyInstanceUid = MwlValidation.generateStudyInstanceUid(),
-            requestedProcedureId = "RP-$randomNum",
-            requestedProcedureDescription = "Рентгенография органов грудной клетки",
-            spsId = "SPS-$randomNum",
-            modality = "CR",
+            accessionNumber = "",
+            studyInstanceUid = "",
+            requestedProcedureId = "",
+            requestedProcedureDescription = "",
+            spsId = "",
+            modality = "",
             spsStartDate = today,
             spsStartTime = now,
-            scheduledStationAeTitle = "CR_STATION_01",
-            scheduledStationName = "Кабинет 101",
-            spsDescription = "Chest X-Ray PA",
+            scheduledStationAeTitle = "",
+            scheduledStationName = "",
+            spsDescription = "",
             isSynthetic = patient?.isSynthetic ?: false
         )
         showStudyDialog.value = true
+    }
+
+    fun closeStudyDialog() {
+        showStudyDialog.value = false
+        editingStudy.value = null
     }
 
     fun openEditStudyDialog(study: MwlScheduledStudy) {
@@ -245,27 +253,40 @@ class MwlViewModel(application: Application) : AndroidViewModel(application) {
         if (repository.getPatientById(study.patientInternalId) == null) {
             return MwlValidation.Result.Invalid("patientInternalId", "Выберите пациента из локальной базы")
         }
-        val uidCheck = MwlValidation.validateStudyInstanceUid(study.studyInstanceUid)
+        val targetStudy = if (study.studyInstanceUid.isBlank() || study.requestedProcedureId.isBlank() ||
+            study.spsId.isBlank() || study.accessionNumber.isBlank()) {
+            val fallbackNum = (100000..999999).random()
+            study.copy(
+                studyInstanceUid = study.studyInstanceUid.ifBlank { MwlValidation.generateStudyInstanceUid() },
+                accessionNumber = study.accessionNumber.ifBlank { "ACC-$fallbackNum" },
+                requestedProcedureId = study.requestedProcedureId.ifBlank { "RP-$fallbackNum" },
+                spsId = study.spsId.ifBlank { "SPS-$fallbackNum" }
+            )
+        } else {
+            study
+        }
+
+        val uidCheck = MwlValidation.validateStudyInstanceUid(targetStudy.studyInstanceUid)
         if (uidCheck is MwlValidation.Result.Invalid) return uidCheck
 
-        val accCheck = MwlValidation.validateAccessionNumber(study.accessionNumber)
+        val accCheck = MwlValidation.validateAccessionNumber(targetStudy.accessionNumber)
         if (accCheck is MwlValidation.Result.Invalid) return accCheck
 
-        val modCheck = MwlValidation.validateModality(study.modality)
+        val modCheck = MwlValidation.validateModality(targetStudy.modality)
         if (modCheck is MwlValidation.Result.Invalid) return modCheck
 
-        val aeCheck = MwlValidation.validateAeTitle(study.scheduledStationAeTitle, "scheduledStationAeTitle")
+        val aeCheck = MwlValidation.validateAeTitle(targetStudy.scheduledStationAeTitle, "scheduledStationAeTitle")
         if (aeCheck is MwlValidation.Result.Invalid) return aeCheck
 
-        val dateCheck = MwlValidation.validateDate(study.spsStartDate, "spsStartDate", required = true)
+        val dateCheck = MwlValidation.validateDate(targetStudy.spsStartDate, "spsStartDate", required = true)
         if (dateCheck is MwlValidation.Result.Invalid) return dateCheck
 
-        val timeCheck = MwlValidation.validateTime(study.spsStartTime, "spsStartTime", required = false)
+        val timeCheck = MwlValidation.validateTime(targetStudy.spsStartTime, "spsStartTime", required = false)
         if (timeCheck is MwlValidation.Result.Invalid) return timeCheck
 
-        val completeCheck = MwlValidation.validateStudy(study)
+        val completeCheck = MwlValidation.validateStudy(targetStudy)
         if (completeCheck is MwlValidation.Result.Invalid) return completeCheck
-        try { repository.saveStudy(study) } catch (_: Exception) { return MwlValidation.Result.Invalid("storage", "Не удалось сохранить назначение; предыдущие данные сохранены") }
+        try { repository.saveStudy(targetStudy) } catch (_: Exception) { return MwlValidation.Result.Invalid("storage", "Не удалось сохранить назначение; предыдущие данные сохранены") }
         showStudyDialog.value = false
         editingStudy.value = null
         return MwlValidation.Result.Valid

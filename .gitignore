@@ -48,3 +48,6 @@ ehthumbs.db
 Thumbs.db
 [Dd]esktop.ini
 $RECYCLE.BIN/
+
+# Agent local instructions
+.agents/

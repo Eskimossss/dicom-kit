@@ -1,6 +1,14 @@
-# DICOM Kit — MWL conformance notes, 1.5.0-alpha.5
+# DICOM Kit — MWL conformance notes, 1.6.0-beta.1
 
 This describes the implemented subset and measured behavior; it is not a claim of certification on all modalities. See [audit fixes and evidence](STAGE_7_AUDIT_FIXES.md).
+
+## Beta.1 publication and Worklist state
+
+This is a testing Beta Pre-release, not a final stable version.
+- **Initial unseeded state:** A fresh installation does not automatically seed demo patients, appointments, or station profiles (`autoSeedIfEmpty = false`). Manual creation is available via the synthetic generator action.
+- **Update preservation:** Installing over previous versions preserves all existing databases, snapshots, and PACS profiles.
+- **Appointment identifiers:** `Accession Number` (0008,0050), `Requested Procedure ID` (0040,1001), and `Scheduled Procedure Step ID` (0040,0009) conform to VR SH (up to 16 characters). `Study Instance UID` (0020,000D) conforms to VR UI (up to 64 characters). Generated values adhere strictly to DICOM VR constraints. Automatic fallback generation populates blank identifiers on save.
+- **Study descriptions:** Standard Procedure Descriptions from DICOM PS3.3 / PS3.4 are suggested per modality (CR, DX, MG, CT, MR, US, etc.), while preserving manual input (VR LO, max 64 characters).
 
 ## Alpha.5 publication and Storage interoperability
 

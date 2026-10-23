@@ -58,6 +58,8 @@ import androidx.compose.ui.unit.sp
 import ru.medeng.dicomtool.BuildConfig
 import ru.medeng.dicomtool.data.storage.StorageLocationInfo
 import ru.medeng.dicomtool.data.storage.StorageType
+import ru.medeng.dicomtool.ui.components.AppDestructiveButton
+import ru.medeng.dicomtool.ui.components.AppHelperText
 import ru.medeng.dicomtool.ui.components.DicomToolSubScreenTopBar
 import ru.medeng.dicomtool.ui.components.WhiteDiagnosticCard
 import ru.medeng.dicomtool.ui.theme.AppBackgroundGray
@@ -451,13 +453,13 @@ fun SettingsAndCleanupScreen(
                         Text(policy.label, fontSize = 12.sp)
                     }
                 }
-                Text("При переносе и восстановлении точные повторы объединяются в одну проверенную копию; разные данные сохраняются отдельно.", fontSize = 11.sp)
+                AppHelperText("При переносе и восстановлении точные повторы объединяются в одну проверенную копию; разные данные сохраняются отдельно.")
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     androidx.compose.material3.Checkbox(checked = receptionOptions.patientFolderNames, enabled = !isMigrating,
                         onCheckedChange = { onReceptionOptionsChange(receptionOptions.copy(patientFolderNames = it)) })
                     Text("ФИО + UID для папок новых исследований", fontSize = 12.sp)
                 }
-                Text("ФИО в имени папки содержит персональные данные. Старые папки не переименовываются; продолжение исследования сохраняется в существующую папку.", fontSize = 11.sp)
+                AppHelperText("ФИО в имени папки содержит персональные данные. Старые папки не переименовываются; продолжение исследования сохраняется в существующую папку.")
                 // Кнопки управления хранилищем
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -550,70 +552,24 @@ fun SettingsAndCleanupScreen(
             )
 
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                OutlinedButton(
-                    onClick = { confirmClearStudies = true },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(50.dp),
-                    shape = RoundedCornerShape(10.dp),
-                    border = BorderStroke(1.dp, DangerActionSoftBorder),
-                    colors = ButtonDefaults.outlinedButtonColors(
-                        containerColor = DangerActionSoftBg,
-                        contentColor = ErrorRed
-                    )
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.DeleteOutline,
-                        contentDescription = null,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Удалить все принятые исследования",
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-                Text(
-                    text = "Удаляются файлы исследований. Пустые SAF-папки могут остаться для защиты сторонних документов. Журнал и оставшиеся входящие данные не удаляются.",
-                    fontSize = 12.sp,
-                    lineHeight = 16.sp,
-                    color = TextSecondarySlate,
-                    softWrap = true
+                AppDestructiveButton(
+                    text = "Удалить все принятые исследования",
+                    icon = Icons.Outlined.DeleteOutline,
+                    onClick = { confirmClearStudies = true }
+                )
+                AppHelperText(
+                    text = "Удаляются файлы исследований. Пустые SAF-папки могут остаться для защиты сторонних документов. Журнал и оставшиеся входящие данные не удаляются."
                 )
             }
 
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                OutlinedButton(
-                    onClick = { confirmClearLogs = true },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(50.dp),
-                    shape = RoundedCornerShape(10.dp),
-                    border = BorderStroke(1.dp, DangerActionSoftBorder),
-                    colors = ButtonDefaults.outlinedButtonColors(
-                        containerColor = DangerActionSoftBg,
-                        contentColor = ErrorRed
-                    )
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.DeleteOutline,
-                        contentDescription = null,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Очистить журнал",
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-                Text(
-                    text = "Удаляются все записи из журнала DICOM ($logsCount зап.). Это действие нельзя отменить.",
-                    fontSize = 12.sp,
-                    lineHeight = 16.sp,
-                    color = TextSecondarySlate,
-                    softWrap = true
+                AppDestructiveButton(
+                    text = "Очистить журнал",
+                    icon = Icons.Outlined.DeleteOutline,
+                    onClick = { confirmClearLogs = true }
+                )
+                AppHelperText(
+                    text = "Удаляются все записи из журнала DICOM ($logsCount зап.). Это действие нельзя отменить."
                 )
             }
 

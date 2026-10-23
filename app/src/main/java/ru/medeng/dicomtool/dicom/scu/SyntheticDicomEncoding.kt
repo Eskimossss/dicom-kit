@@ -29,9 +29,27 @@ enum class SyntheticDicomEncoding(val label: String, val charsetName: String, va
         }
     }
 
-    fun validationError(config: ScuSendConfig): String? = try {
-        textFields(config).forEach { encode(it.value, it.label) }; null
-    } catch (invalid: IllegalArgumentException) { invalid.message }
+    fun validationError(config: ScuSendConfig): String? {
+        if (config.patientName.trim().isEmpty()) {
+            return "Укажите ФИО пациента (обязательный атрибут для формирования DICOM)"
+        }
+        if (config.patientId.trim().isEmpty()) {
+            return "Укажите ID пациента (обязательный атрибут для формирования DICOM)"
+        }
+        val dateValidation = ru.medeng.dicomtool.dicom.date.DicomDateUtils.validateBirthDateDigits(config.patientBirthDateDigits)
+        if (dateValidation is ru.medeng.dicomtool.dicom.date.DateValidationResult.Incomplete) {
+            return "Дата рождения заполнена не полностью (введено ${dateValidation.digitsCount} из 8 цифр). Заполните все 8 цифр ДД.ММ.ГГГГ или очистите поле."
+        }
+        if (dateValidation is ru.medeng.dicomtool.dicom.date.DateValidationResult.Invalid) {
+            return dateValidation.messageRu
+        }
+        return try {
+            textFields(config).forEach { encode(it.value, it.label) }
+            null
+        } catch (invalid: IllegalArgumentException) {
+            invalid.message
+        }
+    }
 
     fun warning(config: ScuSendConfig): String? = when (this) {
         WINDOWS1251 -> "Нестандартный тест: текстовые байты CP1251 без (0008,0005). Это не ISO_IR 144; оборудование может прочитать текст неверно. Только синтетические объекты."
