@@ -72,7 +72,8 @@ class Alpha5MwlSafetyInstrumentedTest {
             val model = MwlViewModel(context.applicationContext as Application)
             assertEquals(1, model.importSyntheticData(incoming.exportSyntheticJson()))
             compose.setContent { DicomToolTheme { MwlAppointmentsTab(model, isExpandedWidth = true) } }
-            val search = compose.onNodeWithText("Поиск по ФИО, ID, Accession, SPS…")
+            compose.onNodeWithContentDescription("Поиск").performClick()
+            val search = compose.onNodeWithText("Поиск по пациенту, ID или Accession")
             search.performTextInput("ALPHA5-PATIENT")
             for (acc in listOf("ALPHA5-FIRST", "ALPHA5-SECOND")) {
                 val text = "ID: ALPHA5-PATIENT · ACC: $acc"

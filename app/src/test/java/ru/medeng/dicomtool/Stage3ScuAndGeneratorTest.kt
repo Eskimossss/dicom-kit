@@ -11,6 +11,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -447,12 +448,43 @@ class Stage3ScuAndGeneratorTest {
 
     @Test
     fun testDefaultEmptyPacsParametersAndValidation() {
-        // 1. По умолчанию параметры PACS в ScuSendConfig пусты
+        // 1. По умолчанию параметры PACS и демонстрационные данные пациента в ScuSendConfig пусты
         val defaultConfig = ScuSendConfig()
         assertEquals("", defaultConfig.remoteIp)
         assertEquals(0, defaultConfig.remotePort)
         assertEquals("", defaultConfig.calledAeTitle)
         assertEquals("", defaultConfig.callingAeTitle)
+        assertEquals("", defaultConfig.patientName)
+        assertEquals("", defaultConfig.patientId)
+        assertEquals("", defaultConfig.patientBirthDateDigits)
+        assertEquals("", defaultConfig.patientBirthDateDisplay)
+        assertEquals("", defaultConfig.patientBirthDate)
+        assertEquals("", defaultConfig.patientSex)
+        assertEquals("", defaultConfig.studyDescription)
+        assertEquals("", defaultConfig.seriesDescription)
+
+        // Проверка запрета создания DICOM при незаполненных обязательных полях
+        val errName = try {
+            DicomSecondaryCaptureGenerator.prepareSecondaryCaptureObject(defaultConfig)
+            null
+        } catch (e: IllegalArgumentException) { e.message }
+        assertNotNull(errName)
+        assertTrue(errName!!.contains("ФИО пациента"))
+
+        val errId = try {
+            DicomSecondaryCaptureGenerator.prepareSecondaryCaptureObject(defaultConfig.copy(patientName = "ИВАНОВ^ИВАН"))
+            null
+        } catch (e: IllegalArgumentException) { e.message }
+        assertNotNull(errId)
+        assertTrue(errId!!.contains("ID пациента"))
+
+        // При заполнении обязательных полей создаётся корректный DICOM
+        val validObj = DicomSecondaryCaptureGenerator.prepareSecondaryCaptureObject(
+            defaultConfig.copy(patientName = "ИВАНОВ^ИВАН", patientId = "PAT-001")
+        )
+        assertNotNull(validObj)
+        assertEquals("ИВАНОВ^ИВАН", validObj.dataset.getString(org.dcm4che3.data.Tag.PatientName))
+        assertEquals("PAT-001", validObj.dataset.getString(org.dcm4che3.data.Tag.PatientID))
 
         val logger = PersistentDicomTechnicalLogger(File(tempDir, "scu_val.tsv"))
         val scuClient = DicomScuClient(logger, File(tempDir, "scu_cache"))

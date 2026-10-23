@@ -301,6 +301,79 @@ class ViewerSafetyInstrumentedTest {
             await { !model.isMigrating.value }
         }
     }
+    @Test fun receivedLongPatientHeaderRespectsSystemInsetsAndKeepsViewport() {
+        check(context.packageName.endsWith(".storagesafetytest"))
+        val model = vm()
+        val name = "SYNTHETIC-LONG-PATIENT-NAME-FOR-MOBILE-LAYOUT^SECOND-SYNTHETIC-COMPONENT-FOR-WRAPPING^TEST-ONLY"
+        val ds = dataset(name)
+        val uid = ds.getString(Tag.StudyInstanceUID)
+        compose.runOnIdle { model.resetToInternalStorage() }
+        await { !model.isMigrating.value }
+        val repo = DicomRuntimeRegistry.getStudyRepository(context)
+        val temp = File(context.cacheDir, "mobile-${UUID.randomUUID()}.dcm").apply { writeBytes(bytes(ds)) }
+        val saved = repo.saveIncomingInstance(temp, uid, ds.getString(Tag.SeriesInstanceUID), ds.getString(Tag.SOPInstanceUID))
+        assertTrue(saved.toString(), saved is ru.medeng.dicomtool.data.storage.DicomSaveResult.Success)
+        repo.refreshFromDisk()
+        await { model.studies.value.any { it.studyInstanceUid == uid } }
+        try {
+            compose.onNodeWithTag("main-tab:RECEIVED").performClick()
+            compose.onNodeWithText(name).performScrollTo().performClick()
+            compose.onNodeWithContentDescription("Назад").assertIsDisplayed()
+            val title = compose.onAllNodesWithText(name).onFirst()
+            val layouts = mutableListOf<androidx.compose.ui.text.TextLayoutResult>()
+            title.performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.GetTextLayoutResult) { it(layouts) }
+            assertTrue(layouts.isNotEmpty())
+            assertFalse(layouts.any { l -> (0 until l.lineCount).any { l.isLineEllipsized(it) || l.getLineRight(it) > l.size.width + 1 } })
+            var safeInsets = androidx.core.graphics.Insets.NONE
+            var cutoutBounds = emptyList<android.graphics.Rect>()
+            compose.runOnIdle {
+                val insets = androidx.core.view.ViewCompat.getRootWindowInsets(compose.activity.window.decorView)!!
+                safeInsets = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.statusBars() or androidx.core.view.WindowInsetsCompat.Type.displayCutout())
+                cutoutBounds = insets.displayCutout?.boundingRects.orEmpty()
+            }
+            if (InstrumentationRegistry.getArguments().getString("requireCutout") == "true") {
+                assertTrue("Emulated camera cutout must reach the activity's WindowInsets", cutoutBounds.isNotEmpty())
+            }
+            val insetDirectory = File(context.getExternalFilesDir(null), "mobile-layout").apply { mkdirs() }
+            val config = context.resources.configuration
+            File(insetDirectory, "${config.screenWidthDp}x${config.screenHeightDp}-font${config.fontScale}-insets.txt")
+                .writeText("safeInsets=$safeInsets\ncutoutBounds=$cutoutBounds\n")
+            val titleBounds = title.fetchSemanticsNode().boundsInWindow
+            assertTrue(titleBounds.top >= safeInsets.top)
+            assertTrue(titleBounds.left >= safeInsets.left)
+            compose.onNodeWithContentDescription("DICOM изображение").assertIsDisplayed()
+            compose.onNodeWithContentDescription("На весь экран").assertHeightIsAtLeast(48.dp)
+            val buttonLayouts = mutableListOf<androidx.compose.ui.text.TextLayoutResult>()
+            compose.onNodeWithText("Экран").performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.GetTextLayoutResult) { it(buttonLayouts) }
+            assertTrue(buttonLayouts.isNotEmpty())
+            // Compose may report didOverflowWidth for fractional intrinsic widths even
+            // when every glyph fits (e.g. 68 px box, 67 px right edge). Check visible
+            // line bounds and ellipsis, as the existing journal wrapping tests do.
+            assertFalse(buttonLayouts.joinToString { "size=${it.size} lines=${it.lineCount} bottom=${it.getLineBottom(it.lineCount - 1)} right=${it.getLineRight(0)}" }, buttonLayouts.any { l ->
+                (0 until l.lineCount).any { l.isLineEllipsized(it) || l.getLineLeft(it) < -1f || l.getLineRight(it) > l.size.width + 1f } ||
+                    l.getLineBottom(l.lineCount - 1) > l.size.height + 1f
+            })
+            val wl = compose.onNodeWithContentDescription("Увеличить WL")
+            if (runCatching { wl.assertIsDisplayed() }.isFailure) wl.performScrollTo()
+            wl.assertIsDisplayed()
+            val fullscreen = compose.onNodeWithContentDescription("На весь экран")
+            if (runCatching { fullscreen.assertIsDisplayed() }.isFailure) fullscreen.performScrollTo()
+            fullscreen.performClick()
+            compose.onNodeWithContentDescription("Выйти из полноэкранного режима").assertExists()
+            compose.runOnIdle { model.setViewerFullScreen(false) }
+            compose.onNodeWithContentDescription("Назад").assertIsDisplayed()
+            compose.waitForIdle()
+            val c = context.resources.configuration
+            val dir = File(context.getExternalFilesDir(null), "mobile-layout").apply { mkdirs() }
+            val bitmap = instrumentation.uiAutomation.takeScreenshot()
+            File(dir, "${c.screenWidthDp}x${c.screenHeightDp}-font${c.fontScale}-viewer.png").outputStream().use {
+                bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+            }
+            bitmap.recycle()
+        } finally {
+            compose.runOnIdle { model.setViewerFullScreen(false); model.deleteStudy(uid) }
+        }
+    }
     @Test fun externalFullscreenUsesSharedViewportAndReturnsToSameObject() {
         val model = vm(); val uri = source(dataset("SYNTHETIC^FULLSCREEN")).first
         compose.runOnIdle { model.loadExternalDicomFile(uri) }; await { ready(model, uri) }
