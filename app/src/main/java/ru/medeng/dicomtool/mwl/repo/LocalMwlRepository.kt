@@ -11,7 +11,7 @@ import java.util.UUID
 /** Patients and appointments are committed together in one atomically replaced snapshot. */
 class LocalMwlRepository(
     private val rootDir: File,
-    autoSeedIfEmpty: Boolean = true,
+    autoSeedIfEmpty: Boolean = false,
     private val snapshotWriter: (File, String) -> Unit = { file, text -> AtomicMwlFile.write(file, text) }
 ) : MwlRepository {
     private val lock = Any()

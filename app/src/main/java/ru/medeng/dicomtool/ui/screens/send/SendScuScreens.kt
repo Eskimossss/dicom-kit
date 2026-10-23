@@ -111,6 +111,7 @@ import ru.medeng.dicomtool.domain.model.NormalizedPoint
 import ru.medeng.dicomtool.domain.model.PatientSexOption
 import ru.medeng.dicomtool.domain.model.ScuSendConfig
 import ru.medeng.dicomtool.domain.model.TestImageMode
+import ru.medeng.dicomtool.ui.components.AppSegmentedControl
 import ru.medeng.dicomtool.ui.components.DiagnosticOutlinedField
 import ru.medeng.dicomtool.ui.components.DicomToolSubScreenTopBar
 import ru.medeng.dicomtool.ui.components.WhiteDiagnosticCard
@@ -693,12 +694,14 @@ fun PatientMetadataFormFields(
         HorizontalFormFieldRow(
             label = "ФИО пациента",
             value = config.patientName,
-            onValueChange = { v -> onUpdateConfig { it.copy(patientName = v) } }
+            onValueChange = { v -> onUpdateConfig { it.copy(patientName = v) } },
+            placeholder = "ИВАНОВ^ИВАН^ИВАНОВИЧ"
         )
         HorizontalFormFieldRow(
             label = "ID пациента",
             value = config.patientId,
-            onValueChange = { v -> onUpdateConfig { it.copy(patientId = v) } }
+            onValueChange = { v -> onUpdateConfig { it.copy(patientId = v) } },
+            placeholder = "PAT-001"
         )
 
         // Автоматическая маска ввода ДД.ММ.ГГГГ без вызова календаря (KeyboardType.Number, 8 цифр)
@@ -905,12 +908,19 @@ fun PatientMetadataFormFields(
         HorizontalFormFieldRow(
             label = "Описание исследования",
             value = config.studyDescription,
-            onValueChange = { v -> onUpdateConfig { it.copy(studyDescription = v) } }
+            onValueChange = { v -> onUpdateConfig { it.copy(studyDescription = v) } },
+            placeholder = "Например: Контрольное исследование"
         )
         HorizontalFormFieldRow(
             label = "Описание серии",
             value = config.seriesDescription,
-            onValueChange = { v -> onUpdateConfig { it.copy(seriesDescription = v) } }
+            onValueChange = { v -> onUpdateConfig { it.copy(seriesDescription = v) } },
+            placeholder = "Например: Серия 1"
+        )
+        Text(
+            text = "Поля «ФИО пациента» и «ID пациента» обязательны для формирования тестового DICOM",
+            fontSize = 11.sp,
+            color = TextSecondarySlate
         )
     }
 }
@@ -1492,51 +1502,15 @@ fun ScuModeSelector(
     onSelectMode: (ScuSendMode) -> Unit,
     isBusy: Boolean
 ) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-        color = InputBackgroundGray,
-        border = BorderStroke(1.dp, CardBorderGray)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(4.dp),
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
-            val modes = listOf(
-                ScuSendMode.TEST_IMAGE to "Тестовое изображение",
-                ScuSendMode.DICOM_FILES to "DICOM-файлы"
-            )
-            modes.forEach { (mode, label) ->
-                val selected = currentMode == mode
-                Surface(
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(38.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable(enabled = !isBusy) { onSelectMode(mode) },
-                    shape = RoundedCornerShape(8.dp),
-                    color = if (selected) CardSurfaceWhite else Color.Transparent,
-                    border = if (selected) BorderStroke(1.dp, PrimaryBlue) else null
-                ) {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = label,
-                            fontSize = 13.sp,
-                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                            color = if (selected) PrimaryBlue else TextSecondarySlate,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-            }
-        }
-    }
+    AppSegmentedControl(
+        items = listOf(
+            ScuSendMode.TEST_IMAGE to "Тестовое изображение",
+            ScuSendMode.DICOM_FILES to "DICOM-файлы"
+        ),
+        selectedItem = currentMode,
+        onItemSelected = onSelectMode,
+        enabled = !isBusy
+    )
 }
 
 /**

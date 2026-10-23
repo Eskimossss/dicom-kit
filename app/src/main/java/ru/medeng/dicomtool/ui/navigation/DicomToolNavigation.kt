@@ -1,6 +1,13 @@
 package ru.medeng.dicomtool.ui.navigation
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.systemBarsIgnoringVisibility
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
@@ -96,6 +103,7 @@ enum class ActiveSubScreen {
     ABOUT_APP
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun DicomToolAppRoot(
     viewModel: DicomToolViewModel = viewModel()
@@ -210,7 +218,11 @@ fun DicomToolAppRoot(
             containerColor = AppBackgroundGray,
             contentWindowInsets = if (isViewerFullScreen) WindowInsets(0, 0, 0, 0) else WindowInsets.safeDrawing,
             topBar = {
-                Column {
+                // Scaffold delegates top insets to a supplied topBar, including an empty one.
+                Column(Modifier.windowInsetsPadding(
+                    if (isViewerFullScreen) WindowInsets(0, 0, 0, 0)
+                    else WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
+                )) {
                 if (!isViewerFullScreen && activeSubScreen == ActiveSubScreen.NONE) {
                     val topBarTitle = when (currentTab) {
                         MainBottomTab.RECEIVER -> "DICOM Приёмник (SCP)"
@@ -281,8 +293,11 @@ fun DicomToolAppRoot(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(if (isViewerFullScreen) androidx.compose.foundation.layout.PaddingValues(0.dp) else innerPadding)
-                    .then(if (currentTab == MainBottomTab.WORKLIST) Modifier.consumeWindowInsets(innerPadding) else Modifier)
+                    .padding(innerPadding)
+                    .consumeWindowInsets(innerPadding)
+                    .then(if (isViewerFullScreen) Modifier.windowInsetsPadding(
+                        WindowInsets.systemBarsIgnoringVisibility.union(WindowInsets.displayCutout)
+                    ) else Modifier)
             ) {
                 when (activeSubScreen) {
                     ActiveSubScreen.SETTINGS_AND_CLEANUP -> {

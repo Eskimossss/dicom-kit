@@ -10,6 +10,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -468,38 +469,46 @@ fun DicomViewerAndTagsScreen(
         )
     }
 
-    Column(Modifier.fillMaxSize()) {
-        if (!isFullScreen) {
-            DicomToolSubScreenTopBar(title = study.patientName, subtitle = study.modality, onBack = onBack,
-                trailingContent = { IconButton(onClick = { showDeleteConfirm = true }) {
-                    Icon(Icons.Default.DeleteOutline, contentDescription = "Удалить исследование")
-                } })
-        }
-        ru.medeng.dicomtool.ui.components.DicomViewerWorkspace(
-            sourceKey = study.studyInstanceUid, diagnosticNoticeId = study.diagnosticNoticeId, metadata = listOf("Пациент" to study.patientName,
-                "ID пациента" to study.patientId, "Дата исследования" to study.studyDateFormatted,
-                "Описание исследования" to study.studyDescription, "Study Instance UID" to study.studyInstanceUid), tags = tags, query = tagSearchQuery,
-            renderState = renderState, zoom = zoom, pan = pan, inverted = inverted, ww = windowWidth, wl = windowCenter,
-            frame = currentFrame, frames = totalFramesInInstance, instance = safeInstanceIdx, instances = instancesInActiveSeries,
-            fullScreen = isFullScreen, initialTab = initialTab, encodingWarning = activeInstance?.encodingWarning ?: study.encodingWarning,
-            onQuery = onTagSearchChange, onZoom = onZoomFactor, onPan = onPanDelta, onFit = onFitToScreen,
-            onResetView = onResetTransform, onResetWindow = onResetWindowOnly, onInvert = onToggleInvert,
-            onAdjustWindow = onAdjustWindow, onWindow = onSetWindowWidthLevel, onFrame = onStepFrame,
-            onInstance = onStepInstance, onFullScreen = onToggleFullScreen, modifier = Modifier.weight(1f),
-            leadingControls = {
-                var seriesMenu by remember { mutableStateOf(false) }
-                if (study.seriesList.size > 1) {
-                    Box {
-                        OutlinedButton(onClick = { seriesMenu = true }) { Text("Серия $seriesIndex/${study.seriesCount}") }
-                        DropdownMenu(expanded = seriesMenu, onDismissRequest = { seriesMenu = false }) {
-                            study.seriesList.forEach { series ->
-                                DropdownMenuItem(text = { Text("${series.seriesNumber}: ${series.seriesDescription}") },
-                                    onClick = { seriesMenu = false; onSelectSeries(series.seriesInstanceUid) })
+    Box(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize()) {
+            if (!isFullScreen) {
+                DicomToolSubScreenTopBar(
+                    title = "Просмотр DICOM",
+                    subtitle = study.modality,
+                    onBack = onBack,
+                    trailingContent = {
+                        IconButton(onClick = { showDeleteConfirm = true }) {
+                            Icon(Icons.Default.DeleteOutline, contentDescription = "Удалить исследование")
+                        }
+                    }
+                )
+            }
+            ru.medeng.dicomtool.ui.components.DicomViewerWorkspace(
+                sourceKey = study.studyInstanceUid, diagnosticNoticeId = study.diagnosticNoticeId, metadata = listOf("Пациент" to study.patientName,
+                    "ID пациента" to study.patientId, "Дата исследования" to study.studyDateFormatted,
+                    "Описание исследования" to study.studyDescription, "Study Instance UID" to study.studyInstanceUid), tags = tags, query = tagSearchQuery,
+                renderState = renderState, zoom = zoom, pan = pan, inverted = inverted, ww = windowWidth, wl = windowCenter,
+                frame = currentFrame, frames = totalFramesInInstance, instance = safeInstanceIdx, instances = instancesInActiveSeries,
+                fullScreen = isFullScreen, initialTab = initialTab, encodingWarning = activeInstance?.encodingWarning ?: study.encodingWarning,
+                onQuery = onTagSearchChange, onZoom = onZoomFactor, onPan = onPanDelta, onFit = onFitToScreen,
+                onResetView = onResetTransform, onResetWindow = onResetWindowOnly, onInvert = onToggleInvert,
+                onAdjustWindow = onAdjustWindow, onWindow = onSetWindowWidthLevel, onFrame = onStepFrame,
+                onInstance = onStepInstance, onFullScreen = onToggleFullScreen, modifier = Modifier.weight(1f),
+                leadingControls = {
+                    var seriesMenu by remember { mutableStateOf(false) }
+                    if (study.seriesList.size > 1) {
+                        Box {
+                            OutlinedButton(onClick = { seriesMenu = true }) { Text("Серия $seriesIndex/${study.seriesCount}") }
+                            DropdownMenu(expanded = seriesMenu, onDismissRequest = { seriesMenu = false }) {
+                                study.seriesList.forEach { series ->
+                                    DropdownMenuItem(text = { Text("${series.seriesNumber}: ${series.seriesDescription}") },
+                                        onClick = { seriesMenu = false; onSelectSeries(series.seriesInstanceUid) })
+                                }
                             }
                         }
                     }
-                }
-            })
+                })
+        }
     }
 }
 

@@ -16,6 +16,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -31,6 +32,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Search
@@ -85,9 +87,10 @@ fun MwlJournalTab(
     val context = LocalContext.current
     val logs by viewModel.logs.collectAsStateWithLifecycle()
 
-    var searchQuery by remember { mutableStateOf("") }
-    var filterDirection by remember { mutableStateOf<String>("ALL") } // "ALL", "SCP", "SCU"
-    var filterErrorsOnly by remember { mutableStateOf(false) }
+    var searchQuery by rememberSaveable { mutableStateOf("") }
+    var searchOpen by rememberSaveable { mutableStateOf(false) }
+    var filterDirection by rememberSaveable { mutableStateOf<String>("ALL") } // "ALL", "SCP", "SCU"
+    var filterErrorsOnly by rememberSaveable { mutableStateOf(false) }
 
     var expandedIds by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var copyEntry by remember { mutableStateOf<DicomLogEntry?>(null) }
@@ -113,13 +116,12 @@ fun MwlJournalTab(
     }
 
     LazyColumn(
-        modifier = modifier
-            .fillMaxSize()
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        modifier = modifier.fillMaxSize(),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         item {
-        // Панель управления и фильтрации журнала
+        // Панель управления и фильтрации журнала (компактный UI в стиле основного журнала)
         WhiteDiagnosticCard {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -128,70 +130,104 @@ fun MwlJournalTab(
             ) {
                 Column(Modifier.weight(1f)) {
                     Text(
-                        text = "Журнал операций Worklist (MWL)",
-                        fontSize = 16.sp,
+                        text = "Журнал операций MWL",
+                        fontSize = 15.sp,
                         fontWeight = FontWeight.Bold,
-                        color = TextPrimaryDark
+                        color = TextPrimaryDark,
+                        maxLines = 1
                     )
                     Text(
-                        text = "События SCP/SCU: ${logs.size} · Отфильтровано: ${filteredLogs.size}",
-                        fontSize = 12.sp,
-                        color = TextSecondarySlate
+                        text = "Событий: ${logs.size} · Найдено: ${filteredLogs.size}",
+                        fontSize = 11.sp,
+                        color = TextSecondarySlate,
+                        maxLines = 1
                     )
                 }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    IconButton(onClick = { showExportDialog = true }) {
+                Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(
+                        modifier = Modifier.size(44.dp),
+                        onClick = {
+                            if (searchOpen && searchQuery.isNotEmpty()) {
+                                searchQuery = ""
+                            }
+                            searchOpen = !searchOpen
+                        }
+                    ) {
+                        Icon(
+                            Icons.Default.Search,
+                            contentDescription = if (searchOpen) "Скрыть поиск" else "Поиск в журнале",
+                            tint = if (searchOpen || searchQuery.isNotEmpty()) PrimaryBlue else TextSecondarySlate
+                        )
+                    }
+                    IconButton(
+                        modifier = Modifier.size(44.dp),
+                        onClick = { showExportDialog = true }
+                    ) {
                         Icon(Icons.Default.FileDownload, contentDescription = "Экспорт отчёта", tint = PrimaryBlue)
                     }
-                    IconButton(onClick = { showClearConfirm = true }) {
+                    IconButton(
+                        modifier = Modifier.size(44.dp),
+                        onClick = { showClearConfirm = true }
+                    ) {
                         Icon(Icons.Default.Delete, contentDescription = "Очистить журнал", tint = ErrorRed)
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
+            if (searchOpen) {
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    placeholder = { Text("Поиск по событиям, IP, AE, кодам…", fontSize = 12.sp) },
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                    trailingIcon = {
+                        IconButton(onClick = {
+                            if (searchQuery.isNotEmpty()) {
+                                searchQuery = ""
+                            } else {
+                                searchOpen = false
+                            }
+                        }) {
+                            Icon(Icons.Default.Close, contentDescription = "Очистить поиск", modifier = Modifier.size(18.dp))
+                        }
+                    },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
 
-            // Поисковая строка
-            OutlinedTextField(
-                value = searchQuery,
-                onValueChange = { searchQuery = it },
-                placeholder = { Text("Поиск по событиям, IP, AE, кодам…") },
-                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth()
-            )
+            Spacer(modifier = Modifier.height(6.dp))
 
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Фильтры SCP / SCU / Ошибки
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            // Компактные фильтры потоков и ошибок
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 item {
                     FilterChip(
                         selected = filterDirection == "ALL",
                         onClick = { filterDirection = "ALL" },
-                        label = { Text("Все события") }
+                        label = { Text("Все", fontSize = 11.sp) }
                     )
                 }
                 item {
                     FilterChip(
                         selected = filterDirection == "SCP",
                         onClick = { filterDirection = "SCP" },
-                        label = { Text("MWL SCP") }
+                        label = { Text("MWL SCP", fontSize = 11.sp) }
                     )
                 }
                 item {
                     FilterChip(
                         selected = filterDirection == "SCU",
                         onClick = { filterDirection = "SCU" },
-                        label = { Text("MWL SCU") }
+                        label = { Text("MWL SCU", fontSize = 11.sp) }
                     )
                 }
                 item {
                     FilterChip(
                         selected = filterErrorsOnly,
                         onClick = { filterErrorsOnly = !filterErrorsOnly },
-                        label = { Text("Только ошибки") }
+                        label = { Text("Только ошибки", fontSize = 11.sp) }
                     )
                 }
             }
@@ -216,16 +252,14 @@ fun MwlJournalTab(
             }
             }
         } else {
-                items(filteredLogs, key = { it.id }) { entry ->
-                    Surface(color = CardSurfaceWhite, shape = RoundedCornerShape(8.dp), border = BorderStroke(1.dp, CardBorderGray)) {
-                    DicomDetailedLogRow(
-                        entry = entry,
-                        isExpanded = entry.id in expandedIds,
-                        onToggleExpand = { expandedIds = if (entry.id in expandedIds) expandedIds - entry.id else expandedIds + entry.id },
-                        onCopyEvent = { copyEntry = entry }
-                    )
-                    }
-                }
+            items(filteredLogs, key = { it.id }) { entry ->
+                DicomDetailedLogRow(
+                    entry = entry,
+                    isExpanded = entry.id in expandedIds,
+                    onToggleExpand = { expandedIds = if (entry.id in expandedIds) expandedIds - entry.id else expandedIds + entry.id },
+                    onCopyEvent = { copyEntry = entry }
+                )
+            }
         }
     }
 

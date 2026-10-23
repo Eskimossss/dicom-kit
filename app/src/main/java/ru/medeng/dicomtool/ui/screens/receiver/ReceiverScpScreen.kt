@@ -43,6 +43,11 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -58,6 +63,8 @@ import ru.medeng.dicomtool.domain.model.ScpReceiverState
 import ru.medeng.dicomtool.domain.model.ScpServerStatus
 import ru.medeng.dicomtool.ui.components.DiagnosticOutlinedField
 import ru.medeng.dicomtool.ui.components.WhiteDiagnosticCard
+import ru.medeng.dicomtool.ui.components.AppDeviceIpCard
+import ru.medeng.dicomtool.ui.components.AppInfoBanner
 import ru.medeng.dicomtool.ui.theme.CardBorderGray
 import ru.medeng.dicomtool.ui.theme.CardSurfaceWhite
 import ru.medeng.dicomtool.ui.theme.DangerActionSoftBg
@@ -129,8 +136,6 @@ fun ReceiverScpScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-
-        Text("SCP: сеанс до 4 часов. Android может остановить фоновый приём раньше; круглосуточная работа не гарантируется. После остановки нужен ручной запуск.", fontSize = 12.sp)
         if (isExpandedWidth) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -200,6 +205,15 @@ fun ReceiverScpScreen(
 }
 
 @Composable
+fun ScpServiceNotice(
+    title: String,
+    detailedText: String,
+    modifier: Modifier = Modifier
+) {
+    AppInfoBanner(title = title, detailedText = detailedText, modifier = modifier)
+}
+
+@Composable
 private fun IpAddressCard(
     ipv4: String,
     interfaceName: String,
@@ -244,15 +258,32 @@ private fun IpAddressCard(
                     )
                 }
             }
-            IconButton(
-                onClick = onRefresh,
-                modifier = Modifier.size(40.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Refresh,
-                    contentDescription = "Обновить IP",
-                    tint = TextSecondarySlate
-                )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(
+                    onClick = onRefresh,
+                    modifier = Modifier.size(48.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "Обновить IP",
+                        tint = PrimaryBlue
+                    )
+                }
+                val ctx = LocalContext.current
+                IconButton(
+                    onClick = {
+                        val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        cm.setPrimaryClip(ClipData.newPlainText("SCP IP", ipv4))
+                        Toast.makeText(ctx, "Скопировано: $ipv4", Toast.LENGTH_SHORT).show()
+                    },
+                    modifier = Modifier.size(48.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.ContentCopy,
+                        contentDescription = "Скопировать IP",
+                        tint = TextSecondarySlate
+                    )
+                }
             }
         }
     }
@@ -353,6 +384,7 @@ private fun ScpStatusCard(
 ) {
     val isRunning = state.status == ScpServerStatus.RUNNING
     val isError = state.status == ScpServerStatus.ERROR
+    var showDetails by rememberSaveable { mutableStateOf(false) }
     val cardBg = when {
         isRunning -> SuccessGreenBackground
         isError -> DangerActionSoftBg
@@ -403,9 +435,9 @@ private fun ScpStatusCard(
         Spacer(modifier = Modifier.height(8.dp))
         Text(
             text = if (isRunning) {
-                "Слушает 0.0.0.0:${state.tcpPort} (C-ECHO SCP, C-STORE SCP Implicit/Explicit VR Little Endian)"
+                "Ожидает подключения · C-ECHO и приём исследований"
             } else if (state.serviceStopping || state.status == ScpServerStatus.STOPPING) {
-                "Новые соединения отключены; выполняется освобождение ресурсов. Повторный запуск пока недоступен."
+                "Новые соединения отключены; выполняется освобождение ресурсов."
             } else {
                 "Ожидание запуска приёмника..."
             },
@@ -414,6 +446,54 @@ private fun ScpStatusCard(
             color = TextSecondarySlate,
             softWrap = true
         )
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(6.dp))
+                .clickable { showDetails = !showDetails }
+                .padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = if (showDetails) "Скрыть технические сведения" else "Подробнее",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = PrimaryBlue
+            )
+            Icon(
+                imageVector = if (showDetails) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                contentDescription = if (showDetails) "Скрыть подробности" else "Показать подробности",
+                tint = PrimaryBlue,
+                modifier = Modifier.size(16.dp)
+            )
+        }
+
+        if (showDetails) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp),
+                color = InputBackgroundGray,
+                border = BorderStroke(1.dp, CardBorderGray)
+            ) {
+                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        text = "Параметры сокета: 0.0.0.0:${state.tcpPort} (C-ECHO SCP, C-STORE SCP Implicit/Explicit VR Little Endian)",
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = TextPrimaryDark,
+                        softWrap = true
+                    )
+                    Text(
+                        text = "Сеанс приёма до 4 часов. Фоновая работа может быть ограничена Android при нехватке памяти или энергосбережении.",
+                        fontSize = 11.sp,
+                        color = TextSecondarySlate,
+                        softWrap = true
+                    )
+                }
+            }
+        }
         Spacer(modifier = Modifier.height(10.dp))
 
         StatusCounterLine("Принято исследований:", state.receivedStudiesCount.toString())

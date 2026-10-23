@@ -1,8 +1,13 @@
 package ru.medeng.dicomtool.mwl.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -18,7 +23,11 @@ import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import ru.medeng.dicomtool.mwl.model.*
 import ru.medeng.dicomtool.ui.components.*
+import ru.medeng.dicomtool.ui.theme.TextSecondarySlate
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.sp
 
 @Composable
 internal fun MwlAdaptiveFields(first: @Composable () -> Unit, second: @Composable () -> Unit) {
@@ -102,21 +111,112 @@ internal fun MwlStationEditor(profile: MwlStationProfile, onDismiss: () -> Unit,
 @Composable
 internal fun MwlModalityField(value: String, onValue: (String) -> Unit) {
     var open by remember { mutableStateOf(false) }
-    var manual by rememberSaveable { mutableStateOf(value.isNotEmpty() && MwlModalityChoices.standard.none { it.first == value }) }
     val focus = LocalFocusManager.current
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.weight(1f)) {
-            OutlinedButton(onClick = { focus.clearFocus(); open = true }, modifier = Modifier.fillMaxWidth()) {
-                Text("Модальность: ${MwlModalityChoices.label(value).ifEmpty { "выбрать" }}")
-            }
-            DropdownMenu(expanded = open, onDismissRequest = { open = false }, modifier = Modifier.heightIn(max = 320.dp)) {
-                MwlModalityChoices.standard.forEach { (code, description) ->
-                    DropdownMenuItem(text = { Text("$code — $description") }, onClick = { onValue(code); manual = false; open = false })
+
+    Box(modifier = Modifier.fillMaxWidth()) {
+        OutlinedTextField(
+            value = value,
+            onValueChange = { onValue(it.uppercase(java.util.Locale.US)) },
+            label = { Text("Модальность (0008,0060)") },
+            placeholder = { Text("CT, MR, CR...") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+            trailingIcon = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = { open = !open }) {
+                        Icon(
+                            imageVector = if (open) Icons.Default.ExpandLess else Icons.Default.ArrowDropDown,
+                            contentDescription = "Выбрать модальность"
+                        )
+                    }
+                    DicomHelpButton(DicomFieldHelp.Modality)
                 }
-                DropdownMenuItem(text = { Text("Другой код — ручной ввод") }, onClick = { manual = true; open = false })
+            }
+        )
+        DropdownMenu(
+            expanded = open,
+            onDismissRequest = { open = false },
+            modifier = Modifier.heightIn(max = 320.dp)
+        ) {
+            MwlModalityChoices.standard.forEach { (code, description) ->
+                DropdownMenuItem(
+                    text = { Text("$code — $description") },
+                    onClick = {
+                        onValue(code)
+                        open = false
+                        focus.clearFocus()
+                    }
+                )
+            }
+            DropdownMenuItem(
+                text = { Text("Другой код — ручной ввод") },
+                onClick = {
+                    open = false
+                }
+            )
+        }
+    }
+}
+
+@Composable
+internal fun MwlStudyDescriptionField(
+    value: String,
+    modality: String,
+    onValueChange: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var open by remember { mutableStateOf(false) }
+    val focus = LocalFocusManager.current
+    val suggestions = remember(modality) { MwlProcedureSuggestions.forModality(modality) }
+
+    Box(modifier = modifier.fillMaxWidth()) {
+        OutlinedTextField(
+            value = value,
+            onValueChange = onValueChange,
+            label = { Text("Описание исследования") },
+            placeholder = { Text("Например: ${suggestions.firstOrNull() ?: "Исследование"}") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+            trailingIcon = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = { open = !open }) {
+                        Icon(
+                            imageVector = if (open) Icons.Default.ExpandLess else Icons.Default.ArrowDropDown,
+                            contentDescription = "Шаблоны описания"
+                        )
+                    }
+                    DicomHelpButton(DicomFieldHelp.Description)
+                }
+            }
+        )
+        DropdownMenu(
+            expanded = open,
+            onDismissRequest = { open = false },
+            modifier = Modifier.heightIn(max = 320.dp)
+        ) {
+            val modLabel = modality.trim().uppercase(java.util.Locale.US).ifBlank { "Общие" }
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        "Шаблоны ($modLabel):",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = TextSecondarySlate
+                    )
+                },
+                onClick = {},
+                enabled = false
+            )
+            suggestions.forEach { desc ->
+                DropdownMenuItem(
+                    text = { Text(desc, fontSize = 13.sp) },
+                    onClick = {
+                        onValueChange(desc)
+                        open = false
+                        focus.clearFocus()
+                    }
+                )
             }
         }
-        DicomHelpButton(DicomFieldHelp.Modality)
     }
-    if (manual) DicomHelpField(value, { onValue(it.uppercase(java.util.Locale.US)) }, "Код модальности", DicomFieldHelp.Modality)
 }

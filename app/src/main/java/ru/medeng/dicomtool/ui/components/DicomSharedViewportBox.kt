@@ -5,6 +5,10 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -113,7 +117,7 @@ fun DicomSharedViewportBox(
 ) {
     var controlsVisible by remember { mutableStateOf(true) }
 
-    Box(
+    BoxWithConstraints(
         modifier = modifier
             .background(DicomViewerCanvasBlack)
             .clipToBounds()
@@ -130,6 +134,7 @@ fun DicomSharedViewportBox(
                 }
             }
     ) {
+        val compactControls = maxHeight < 320.dp || LocalDensity.current.fontScale >= 1.5f
         // Рендеринг контента изображения / состояния загрузки / ошибок
         when (renderState) {
             is DicomViewerRenderState.Idle,
@@ -278,6 +283,7 @@ fun DicomSharedViewportBox(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .then(if (compactControls) Modifier.horizontalScroll(rememberScrollState()) else Modifier)
                     .padding(horizontal = 8.dp, vertical = 6.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.Top
@@ -285,7 +291,7 @@ fun DicomSharedViewportBox(
                 // Левый компактный блок: параметры окна яркости и матрицы пикселей
                 Column(
                     modifier = Modifier
-                        .weight(1f, fill = false)
+                        .then(if (compactControls) Modifier else Modifier.weight(1f, fill = false))
                         .background(Color.Black.copy(alpha = 0.52f), RoundedCornerShape(6.dp))
                         .padding(horizontal = 7.dp, vertical = 4.dp)
                 ) {
@@ -413,7 +419,9 @@ fun DicomSharedViewportBox(
                     color = Color.Black.copy(alpha = 0.65f)
                 ) {
                     FlowRow(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 4.dp),
+                        modifier = Modifier.fillMaxWidth()
+                            .then(if (compactControls) Modifier.horizontalScroll(rememberScrollState()) else Modifier)
+                            .padding(horizontal = 6.dp, vertical = 4.dp),
                         horizontalArrangement = Arrangement.spacedBy(5.dp, Alignment.CenterHorizontally),
                         verticalArrangement = Arrangement.spacedBy(5.dp)
                     ) {

@@ -11,6 +11,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
@@ -19,6 +20,12 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.testTag
+import androidx.activity.compose.BackHandler
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -60,7 +67,6 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -120,6 +126,7 @@ import ru.medeng.dicomtool.data.logging.EventOutcome
  * - Фильтры по направлению, результату и текстовый поиск по всем полям.
  * - Копирование и экспорт: техническая сводка по allowlist или полный текст с предупреждением.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun DicomLogScreen(
     displayMode: DicomLogDisplayMode,
@@ -152,10 +159,35 @@ fun DicomLogScreen(
 
     val listState = rememberLazyListState()
 
-    // Автопрокрутка в подробном режиме
-    LaunchedEffect(logs.size, autoScroll, displayMode) {
-        if (autoScroll && displayMode == DicomLogDisplayMode.DETAILED && logs.isNotEmpty()) {
-            listState.animateScrollToItem(logs.size - 1)
+    var searchOpen by rememberSaveable { mutableStateOf(searchQuery.isNotEmpty()) }
+    val focusManager = LocalFocusManager.current
+    fun closeSearch() {
+        onSearchQueryChange("")
+        searchOpen = false
+        focusManager.clearFocus()
+    }
+    BackHandler(enabled = searchOpen) { closeSearch() }
+
+    // Follow new events only while the reader stays at the tail. Scrolling up pauses
+    // following without changing the user's Auto preference; returning to the tail resumes it.
+    var followingTail by remember { mutableStateOf(false) }
+    LaunchedEffect(listState, displayMode) {
+        snapshotFlow { listState.isScrollInProgress to listState.canScrollForward }
+            .distinctUntilChanged().collect { (scrolling, canScrollForward) ->
+                if (scrolling) followingTail = !canScrollForward
+            }
+    }
+    LaunchedEffect(autoScroll, displayMode) {
+        followingTail = autoScroll && displayMode == DicomLogDisplayMode.DETAILED
+        if (followingTail && logs.isNotEmpty()) listState.scrollToItem(logs.size)
+    }
+    LaunchedEffect(searchOpen) {
+        if (searchOpen) followingTail = false
+    }
+    LaunchedEffect(logs.lastOrNull()?.id) {
+        if (!searchOpen && autoScroll && followingTail && displayMode == DicomLogDisplayMode.DETAILED &&
+            !listState.isScrollInProgress && logs.isNotEmpty()) {
+            listState.scrollToItem(logs.size) // header is item zero
         }
     }
 
@@ -217,290 +249,217 @@ fun DicomLogScreen(
 
     if (showLoggerDetails) LoggerHealthDialog(loggerHealth, onDismiss = { showLoggerDetails = false })
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(CardSurfaceWhite)
+    LazyColumn(
+        state = listState,
+        modifier = Modifier.fillMaxSize().background(CardSurfaceWhite).testTag("journal-list"),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        if (loggerHealth.historyLoading) Text("Загрузка сохранённой истории журнала…", fontSize = 12.sp)
-        if (loggerHealth.needsAttention) {
-            ru.medeng.dicomtool.ui.components.AppNotice("logger-health:${loggerHealth.state}:${loggerHealth.droppedNormal}:${loggerHealth.droppedCritical}:${loggerHealth.writeUnconfirmed}:${loggerHealth.readFailures}:${loggerHealth.controlFailures}:${loggerHealth.lastError.hashCode()}", loggerHealth.warning, modifier = Modifier.clickable { showLoggerDetails = true })
-        }
-        TextButton(onClick = { showLoggerDetails = true }) { Text("Состояние записи журнала", fontSize = 11.sp) }
-        // --- 1. ВЕРХНЯЯ ПАНЕЛЬ: Переключатель режимов + действия ---
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            color = CardSurfaceWhite,
-            tonalElevation = 1.dp
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 14.dp, vertical = 8.dp)
-            ) {
-                Row(
+        item(key = "journal-controls", contentType = "controls") {
+            Column {
+                if (loggerHealth.historyLoading) Text("Загрузка сохранённой истории журнала…", fontSize = 12.sp)
+                if (loggerHealth.needsAttention) {
+                    ru.medeng.dicomtool.ui.components.AppNotice("logger-health:${loggerHealth.state}:${loggerHealth.droppedNormal}:${loggerHealth.droppedCritical}:${loggerHealth.writeUnconfirmed}:${loggerHealth.readFailures}:${loggerHealth.controlFailures}:${loggerHealth.lastError.hashCode()}", loggerHealth.warning, modifier = Modifier.clickable { showLoggerDetails = true })
+                }
+                TextButton(onClick = { showLoggerDetails = true }) { Text("Состояние записи журнала", fontSize = 11.sp) }
+                // --- 1. ВЕРХНЯЯ ПАНЕЛЬ: Переключатель режимов + действия ---
+                Surface(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    color = CardSurfaceWhite,
+                    tonalElevation = 1.dp
                 ) {
-                    // Переключатель: Краткий | Подробный
-                    ModeSwitchSegment(
-                        currentMode = displayMode,
-                        onModeSelected = onSetDisplayMode
-                    )
-
-                    // Действия: Автопрокрутка, Экспорт, Очистить
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 8.dp)
                     ) {
-                        if (displayMode == DicomLogDisplayMode.DETAILED) {
-                            Text(
-                                text = "Авто",
-                                fontSize = 12.sp,
-                                color = TextSecondarySlate
-                            )
-                            Switch(
-                                checked = autoScroll,
-                                onCheckedChange = onToggleAutoScroll,
-                                colors = SwitchDefaults.colors(
-                                    checkedThumbColor = Color.White,
-                                    checkedTrackColor = PrimaryBlue,
-                                    uncheckedThumbColor = Color.White,
-                                    uncheckedTrackColor = CardBorderGray
-                                ),
-                                modifier = Modifier.size(width = 44.dp, height = 28.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                        }
-
-                        // Кнопка экспорта
-                        Surface(
-                            modifier = Modifier
-                                .size(34.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .clickable { showExportDialog = true },
-                            shape = RoundedCornerShape(8.dp),
-                            color = InputBackgroundGray,
-                            border = BorderStroke(1.dp, CardBorderGray)
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalArrangement = Arrangement.Center
                         ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(
-                                    imageVector = Icons.Default.Share,
-                                    contentDescription = "Экспорт журнала",
-                                    tint = PrimaryBlue,
-                                    modifier = Modifier.size(17.dp)
-                                )
+                            ModeSwitchSegment(currentMode = displayMode, onModeSelected = onSetDisplayMode)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(modifier = Modifier.size(48.dp), onClick = { if (searchOpen) closeSearch() else searchOpen = true }) {
+                                    Icon(Icons.Default.Search, contentDescription = "Поиск в журнале", tint = PrimaryBlue)
+                                }
+                                IconButton(modifier = Modifier.size(48.dp), onClick = { showExportDialog = true }) {
+                                    Icon(Icons.Default.Share, contentDescription = "Экспорт журнала", tint = PrimaryBlue)
+                                }
+                                IconButton(modifier = Modifier.size(48.dp), onClick = { showClearDialog = true }) {
+                                    Icon(Icons.Outlined.DeleteOutline, contentDescription = "Очистить журнал", tint = ErrorRed)
+                                }
                             }
                         }
 
-                        // Кнопка очистки
-                        Surface(
-                            modifier = Modifier
-                                .size(34.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .clickable { showClearDialog = true },
-                            shape = RoundedCornerShape(8.dp),
-                            color = InputBackgroundGray,
-                            border = BorderStroke(1.dp, CardBorderGray)
+                        if (searchOpen) {
+                            OutlinedTextField(
+                                value = searchQuery,
+                                onValueChange = onSearchQueryChange,
+                                modifier = Modifier.fillMaxWidth(),
+                                placeholder = {
+                                    Text(
+                                        text = "Поиск по AE, IP, файлу, UID, ошибке...",
+                                        fontSize = 13.sp,
+                                        color = TextSecondarySlate
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.Search,
+                                        contentDescription = null,
+                                        tint = TextSecondarySlate,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                },
+                                trailingIcon = {
+                                    Row {
+                                        if (searchQuery.isNotEmpty()) IconButton(modifier = Modifier.size(48.dp), onClick = { onSearchQueryChange("") }) {
+                                            Icon(Icons.Default.Close, contentDescription = "Очистить поиск")
+                                        }
+                                        IconButton(modifier = Modifier.size(48.dp), onClick = { closeSearch() }) {
+                                            Icon(Icons.Default.ExpandLess, contentDescription = "Закрыть поиск")
+                                        }
+                                    }
+                                },
+                                singleLine = true,
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = PrimaryBlue,
+                                    unfocusedBorderColor = CardBorderGray,
+                                    focusedContainerColor = CardSurfaceWhite,
+                                    unfocusedContainerColor = InputBackgroundGray
+                                ),
+                                shape = RoundedCornerShape(10.dp)
+                            )
+
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        // Фильтр направления потока и переключатель «Авто» в единой строке
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(
-                                    imageVector = Icons.Outlined.DeleteOutline,
-                                    contentDescription = "Очистить журнал",
-                                    tint = ErrorRed,
-                                    modifier = Modifier.size(19.dp)
+                            Row(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .horizontalScroll(rememberScrollState()),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    text = "Поток:",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = TextSecondarySlate
                                 )
+                                DicomTrafficFilter.entries.forEach { f ->
+                                    FilterChip(
+                                        modifier = Modifier.testTag("journal-traffic:${f.name}"),
+                                        selected = trafficFilter == f,
+                                        onClick = { onSetTrafficFilter(f) },
+                                        label = { Text(f.labelRu, fontSize = 11.sp, maxLines = 1) },
+                                        colors = FilterChipDefaults.filterChipColors(
+                                            selectedContainerColor = PrimaryBlue,
+                                            selectedLabelColor = Color.White,
+                                            containerColor = InputBackgroundGray,
+                                            labelColor = TextPrimaryDark
+                                        ),
+                                        border = FilterChipDefaults.filterChipBorder(
+                                            enabled = true,
+                                            selected = trafficFilter == f,
+                                            borderColor = if (trafficFilter == f) PrimaryBlue else CardBorderGray
+                                        )
+                                    )
+                                }
+
+                                if (trafficFilter != DicomTrafficFilter.ALL || searchQuery.isNotBlank()) {
+                                    Spacer(modifier = Modifier.width(2.dp))
+                                    TextButton(
+                                        onClick = {
+                                            onSetTrafficFilter(DicomTrafficFilter.ALL)
+                                            onSearchQueryChange("")
+                                        },
+                                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                                    ) {
+                                        Text("Сбросить", fontSize = 11.sp, color = ErrorRed)
+                                    }
+                                }
+                            }
+
+                            if (displayMode == DicomLogDisplayMode.DETAILED) {
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Text("Авто", fontSize = 11.sp, color = TextSecondarySlate, maxLines = 1)
+                                    Switch(
+                                        checked = autoScroll,
+                                        onCheckedChange = onToggleAutoScroll,
+                                        modifier = Modifier.testTag("journal-autoscroll-switch")
+                                    )
+                                }
                             }
                         }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                HorizontalDivider(color = CardBorderGray, thickness = 1.dp)
 
-                // Поисковая строка
-                OutlinedTextField(
-                    value = searchQuery,
-                    onValueChange = onSearchQueryChange,
-                    modifier = Modifier.fillMaxWidth(),
-                    placeholder = {
-                        Text(
-                            text = "Поиск по AE, IP, файлу, UID, ошибке...",
-                            fontSize = 13.sp,
-                            color = TextSecondarySlate
-                        )
-                    },
-                    leadingIcon = {
-                        Icon(
-                            imageVector = Icons.Default.Search,
-                            contentDescription = null,
-                            tint = TextSecondarySlate,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    },
-                    trailingIcon = {
-                        if (searchQuery.isNotBlank()) {
-                            IconButton(onClick = { onSearchQueryChange("") }) {
-                                Icon(
-                                    imageVector = Icons.Default.Close,
-                                    contentDescription = "Очистить поиск",
-                                    tint = TextSecondarySlate,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            }
-                        }
-                    },
-                    singleLine = true,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = PrimaryBlue,
-                        unfocusedBorderColor = CardBorderGray,
-                        focusedContainerColor = CardSurfaceWhite,
-                        unfocusedContainerColor = InputBackgroundGray
-                    ),
-                    shape = RoundedCornerShape(10.dp)
-                )
-
-                Spacer(modifier = Modifier.height(6.dp))
-
-                // Фильтр направления потока в горизонтальной строке
-                Row(
+                // Индикатор количества записей
+                val countText = if (displayMode == DicomLogDisplayMode.BRIEF) {
+                    "Сеансов: ${sessionSummaries.size}"
+                } else {
+                    "Записей: ${logs.size}"
+                }
+                FlowRow(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                        .background(InputBackgroundGray.copy(alpha = 0.5f))
+                        .padding(horizontal = 14.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Text(
-                        text = "Поток:",
+                        text = countText,
                         fontSize = 11.sp,
-                        fontWeight = FontWeight.Medium,
+                        color = TextSecondarySlate,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = if (displayMode == DicomLogDisplayMode.BRIEF) "Краткий режим (сеансы)" else "Подробный режим (хронология)",
+                        fontSize = 11.sp,
                         color = TextSecondarySlate
                     )
-                    DicomTrafficFilter.entries.forEach { f ->
-                        FilterChip(
-                            selected = trafficFilter == f,
-                            onClick = { onSetTrafficFilter(f) },
-                            label = { Text(f.labelRu, fontSize = 11.sp) },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = PrimaryBlueLight,
-                                selectedLabelColor = PrimaryBlue,
-                                containerColor = InputBackgroundGray,
-                                labelColor = TextSecondarySlate
-                            ),
-                            border = FilterChipDefaults.filterChipBorder(
-                                enabled = true,
-                                selected = trafficFilter == f,
-                                borderColor = if (trafficFilter == f) PrimaryBlue else CardBorderGray
-                            )
-                        )
-                    }
-
-                    if (trafficFilter != DicomTrafficFilter.ALL || searchQuery.isNotBlank()) {
-                        Spacer(modifier = Modifier.width(4.dp))
-                        TextButton(
-                            onClick = {
-                                onSetTrafficFilter(DicomTrafficFilter.ALL)
-                                onSearchQueryChange("")
-                            }
-                        ) {
-                            Text("Сбросить", fontSize = 11.sp, color = ErrorRed)
-                        }
-                    }
                 }
+
+                HorizontalDivider(color = CardBorderGray.copy(alpha = 0.6f), thickness = 0.7.dp)
+
             }
         }
-
-        HorizontalDivider(color = CardBorderGray, thickness = 1.dp)
-
-        // Индикатор количества записей
-        val countText = if (displayMode == DicomLogDisplayMode.BRIEF) {
-            "Сеансов: ${sessionSummaries.size}"
-        } else {
-            "Записей: ${logs.size}"
-        }
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(InputBackgroundGray.copy(alpha = 0.5f))
-                .padding(horizontal = 14.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = countText,
-                fontSize = 11.sp,
-                color = TextSecondarySlate,
-                fontWeight = FontWeight.Medium
-            )
-            Text(
-                text = if (displayMode == DicomLogDisplayMode.BRIEF) "Краткий режим (сеансы)" else "Подробный режим (хронология)",
-                fontSize = 11.sp,
-                color = TextSecondarySlate
-            )
-        }
-
-        HorizontalDivider(color = CardBorderGray.copy(alpha = 0.6f), thickness = 0.7.dp)
-
-        // --- 2. СПИСОК: Краткий или Подробный ---
-        if (displayMode == DicomLogDisplayMode.BRIEF) {
-            if (sessionSummaries.isEmpty()) {
-                EmptyStateView(
-                    isSearchActive = searchQuery.isNotBlank() || trafficFilter != DicomTrafficFilter.ALL,
-                    onReset = {
-                        onSetTrafficFilter(DicomTrafficFilter.ALL)
-                        onSearchQueryChange("")
-                    }
-                )
-            } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp)
-                ) {
-                    items(sessionSummaries, key = { it.sessionKey }) { summary ->
-                        val isExpanded = expandedSessionKeys.contains(summary.sessionKey)
-                        DicomSessionSummaryCard(
-                            summary = summary,
-                            isExpanded = isExpanded,
-                            onToggleExpand = { onToggleSessionExpand(summary.sessionKey) },
-                            onCopySession = {
-                                copySession = summary
-                            }
-                        )
-                    }
+        if (displayMode == DicomLogDisplayMode.BRIEF && sessionSummaries.isNotEmpty()) {
+            items(sessionSummaries, key = { "session:${it.sessionKey}" }, contentType = { "session" }) { summary ->
+                Box(Modifier.padding(horizontal = 12.dp)) {
+                    DicomSessionSummaryCard(summary, summary.sessionKey in expandedSessionKeys,
+                        { onToggleSessionExpand(summary.sessionKey) }, { copySession = summary })
+                }
+            }
+        } else if (displayMode == DicomLogDisplayMode.DETAILED && logs.isNotEmpty()) {
+            items(logs, key = { "event:${it.id}" }, contentType = { "event" }) { entry ->
+                Box(Modifier.padding(horizontal = 12.dp)) {
+                    DicomDetailedLogRow(entry, entry.id in expandedLogIds,
+                        { onToggleLogExpand(entry.id) }, { copyEvent = entry })
                 }
             }
         } else {
-            // Подробный режим
-            if (logs.isEmpty()) {
-                EmptyStateView(
-                    isSearchActive = searchQuery.isNotBlank() || trafficFilter != DicomTrafficFilter.ALL,
-                    onReset = {
-                        onSetTrafficFilter(DicomTrafficFilter.ALL)
-                        onSearchQueryChange("")
-                    }
-                )
-            } else {
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(5.dp)
-                ) {
-                    items(logs, key = { it.id }) { entry ->
-                        val isExpanded = expandedLogIds.contains(entry.id)
-                        DicomDetailedLogRow(
-                            entry = entry,
-                            isExpanded = isExpanded,
-                            onToggleExpand = { onToggleLogExpand(entry.id) },
-                            onCopyEvent = {
-                                copyEvent = entry
-                            }
-                        )
-                    }
+            item(key = "journal-empty") {
+                EmptyStateView(searchQuery.isNotBlank() || trafficFilter != DicomTrafficFilter.ALL) {
+                    onSetTrafficFilter(DicomTrafficFilter.ALL)
+                    onSearchQueryChange("")
                 }
             }
         }
+        item(key = "journal-bottom") { Spacer(Modifier.height(12.dp)) }
     }
 }
 
@@ -512,29 +471,41 @@ private fun ModeSwitchSegment(
     currentMode: DicomLogDisplayMode,
     onModeSelected: (DicomLogDisplayMode) -> Unit
 ) {
-    Surface(
-        shape = RoundedCornerShape(8.dp),
-        color = InputBackgroundGray,
-        border = BorderStroke(1.dp, CardBorderGray)
+    Box(
+        modifier = Modifier.heightIn(min = 48.dp),
+        contentAlignment = Alignment.CenterStart
     ) {
-        Row(
-            modifier = Modifier.padding(2.dp),
-            horizontalArrangement = Arrangement.spacedBy(2.dp)
+        Surface(
+            shape = RoundedCornerShape(8.dp),
+            color = InputBackgroundGray,
+            border = BorderStroke(1.dp, CardBorderGray)
         ) {
-            DicomLogDisplayMode.entries.forEach { mode ->
-                val isSelected = currentMode == mode
-                Surface(
-                    shape = RoundedCornerShape(6.dp),
-                    color = if (isSelected) PrimaryBlue else Color.Transparent,
-                    modifier = Modifier.clickable { onModeSelected(mode) }
-                ) {
-                    Text(
-                        text = mode.labelRu,
-                        fontSize = 12.sp,
-                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
-                        color = if (isSelected) Color.White else TextPrimaryDark,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
-                    )
+            Row(
+                modifier = Modifier.padding(2.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                DicomLogDisplayMode.entries.forEach { mode ->
+                    val isSelected = currentMode == mode
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = if (isSelected) PrimaryBlue else Color.Transparent,
+                        modifier = Modifier
+                            .defaultMinSize(minWidth = 48.dp, minHeight = 32.dp)
+                            .clickable { onModeSelected(mode) }
+                    ) {
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = mode.labelRu,
+                                fontSize = 11.sp,
+                                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                                color = if (isSelected) Color.White else TextPrimaryDark
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -566,11 +537,10 @@ private fun DicomSessionSummaryCard(
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
             .clickable(onClick = onToggleExpand),
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(containerColor = CardSurfaceWhite),
-        border = BorderStroke(1.dp, if (isExpanded) PrimaryBlue.copy(alpha = 0.5f) else CardBorderGray)
+        border = BorderStroke(1.dp, PrimaryBlue.copy(alpha = 0.85f))
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
             // Верхняя строка карточки: Направление, ID, Статус, Время
@@ -1065,7 +1035,7 @@ internal fun DicomDetailedLogRow(entry: DicomLogEntry, isExpanded: Boolean, onTo
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(10.dp),
         colors = CardDefaults.cardColors(containerColor = CardSurfaceWhite),
-        border = BorderStroke(1.dp, accent.copy(alpha = 0.65f))
+        border = BorderStroke(1.dp, accent.copy(alpha = 0.85f))
     ) {
         Column(Modifier.fillMaxWidth().clickable(onClick = onToggleExpand).padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
