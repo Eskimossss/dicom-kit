@@ -31,6 +31,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.ui.text.style.TextAlign
+import kotlinx.coroutines.yield
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -158,6 +161,7 @@ fun DicomLogScreen(
     var showLoggerDetails by remember { mutableStateOf(false) }
 
     val listState = rememberLazyListState()
+    val coroutineScope = rememberCoroutineScope()
 
     var searchOpen by rememberSaveable { mutableStateOf(searchQuery.isNotEmpty()) }
     val focusManager = LocalFocusManager.current
@@ -355,10 +359,24 @@ fun DicomLogScreen(
                                 )
                                 DicomTrafficFilter.entries.forEach { f ->
                                     FilterChip(
-                                        modifier = Modifier.testTag("journal-traffic:${f.name}"),
+                                        modifier = Modifier
+                                            .width(78.dp)
+                                            .testTag("journal-traffic:${f.name}"),
                                         selected = trafficFilter == f,
                                         onClick = { onSetTrafficFilter(f) },
-                                        label = { Text(f.labelRu, fontSize = 11.sp, maxLines = 1) },
+                                        label = {
+                                            Box(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Text(
+                                                    text = f.labelRu,
+                                                    fontSize = 11.sp,
+                                                    maxLines = 1,
+                                                    textAlign = TextAlign.Center
+                                                )
+                                            }
+                                        },
                                         colors = FilterChipDefaults.filterChipColors(
                                             selectedContainerColor = PrimaryBlue,
                                             selectedLabelColor = Color.White,
@@ -438,17 +456,49 @@ fun DicomLogScreen(
             }
         }
         if (displayMode == DicomLogDisplayMode.BRIEF && sessionSummaries.isNotEmpty()) {
-            items(sessionSummaries, key = { "session:${it.sessionKey}" }, contentType = { "session" }) { summary ->
+            itemsIndexed(sessionSummaries, key = { _, it -> "session:${it.sessionKey}" }, contentType = { _, _ -> "session" }) { index, summary ->
+                val isExpanded = summary.sessionKey in expandedSessionKeys
                 Box(Modifier.padding(horizontal = 12.dp)) {
-                    DicomSessionSummaryCard(summary, summary.sessionKey in expandedSessionKeys,
-                        { onToggleSessionExpand(summary.sessionKey) }, { copySession = summary })
+                    DicomSessionSummaryCard(
+                        summary = summary,
+                        isExpanded = isExpanded,
+                        onToggleExpand = {
+                            if (isExpanded) {
+                                followingTail = false
+                                onToggleSessionExpand(summary.sessionKey)
+                                coroutineScope.launch {
+                                    yield()
+                                    if (index == 0) listState.animateScrollToItem(0) else listState.animateScrollToItem(index + 1)
+                                }
+                            } else {
+                                onToggleSessionExpand(summary.sessionKey)
+                            }
+                        },
+                        onCopySession = { copySession = summary }
+                    )
                 }
             }
         } else if (displayMode == DicomLogDisplayMode.DETAILED && logs.isNotEmpty()) {
-            items(logs, key = { "event:${it.id}" }, contentType = { "event" }) { entry ->
+            itemsIndexed(logs, key = { _, it -> "event:${it.id}" }, contentType = { _, _ -> "event" }) { index, entry ->
+                val isExpanded = entry.id in expandedLogIds
                 Box(Modifier.padding(horizontal = 12.dp)) {
-                    DicomDetailedLogRow(entry, entry.id in expandedLogIds,
-                        { onToggleLogExpand(entry.id) }, { copyEvent = entry })
+                    DicomDetailedLogRow(
+                        entry = entry,
+                        isExpanded = isExpanded,
+                        onToggleExpand = {
+                            if (isExpanded) {
+                                followingTail = false
+                                onToggleLogExpand(entry.id)
+                                coroutineScope.launch {
+                                    yield()
+                                    if (index == 0) listState.animateScrollToItem(0) else listState.animateScrollToItem(index + 1)
+                                }
+                            } else {
+                                onToggleLogExpand(entry.id)
+                            }
+                        },
+                        onCopyEvent = { copyEvent = entry }
+                    )
                 }
             }
         } else {

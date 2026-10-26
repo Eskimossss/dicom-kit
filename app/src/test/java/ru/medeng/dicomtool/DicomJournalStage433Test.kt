@@ -207,4 +207,10 @@ class DicomJournalStage433Test {
         assertFalse(summary.formattedRemoteNode.contains("(-)"))
         assertFalse(summary.formattedRemoteNode.contains("-"))
     }
+    @Test
+    fun testJournalTrafficFilterLabels() {
+        assertEquals("Все", ru.medeng.dicomtool.data.logging.DicomTrafficFilter.ALL.labelRu)
+        assertEquals("SCP IN", ru.medeng.dicomtool.data.logging.DicomTrafficFilter.SCP_IN.labelRu)
+        assertEquals("SCU OUT", ru.medeng.dicomtool.data.logging.DicomTrafficFilter.SCU_OUT.labelRu)
+    }
 }

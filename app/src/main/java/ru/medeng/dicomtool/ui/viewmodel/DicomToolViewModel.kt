@@ -301,7 +301,7 @@ class DicomToolViewModel(application: Application) : AndroidViewModel(applicatio
     private val _logSearchQuery = MutableStateFlow("")
     val logSearchQuery: StateFlow<String> = _logSearchQuery.asStateFlow()
 
-    private val _autoScrollLogs = MutableStateFlow(true)
+    private val _autoScrollLogs = MutableStateFlow(false)
     val autoScrollLogs: StateFlow<Boolean> = _autoScrollLogs.asStateFlow()
 
     private val _expandedLogIds = MutableStateFlow<Set<String>>(emptySet())

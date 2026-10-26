@@ -62,7 +62,7 @@ fun DicomViewerWorkspace(
                     verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     leadingControls()
                     metadata.forEach { (key, value) -> KeyValueTableRow(key, value) }
-                    Text("WW — контраст; WL — центр окна / яркость", fontSize = 12.sp)
+                    Text("WW — контраст; WL — яркость", fontSize = 12.sp)
                     val span = ((descriptor?.maxModalityValue ?: 65535.0) - (descriptor?.minModalityValue ?: 0.0)).coerceAtLeast(255.0)
                     // Ranges may expand for external step buttons but never shrink under a moving thumb.
                     var widthBound by remember(sourceKey, descriptor) { mutableFloatStateOf(maxOf(ww.toDouble(), descriptor?.defaultWindowWidth ?: 255.0, span * 1.5).coerceIn(255.0, 131072.0).toFloat()) }
